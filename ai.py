@@ -51,6 +51,7 @@ def _post(system, user, model, temperature):
                         {"role": "user", "content": user},
                     ],
                     "temperature": temperature,
+                    "stream": False,
                     "response_format": {"type": "json_object"},
                 },
                 timeout=TIMEOUT,

@@ -1,5 +1,42 @@
 # Clipper — Release Notes
 
+**v0.2.1 "9Router on-box"** · branch `claude/code-clipper-review-v9e3im`
+1 commit · 2 files, `ai.py` +1 line · AI copy path now works against 9Router
+running on the box itself.
+
+_Dalmislave_
+
+---
+
+## What this is
+
+9Router now runs locally on the box (`localhost:20128`) with Dalmi's key, and
+the copy path works end to end. Two things changed to make that true.
+
+## Fix: `ai.py` requests a non-streamed reply
+
+9Router streams by default (SSE `data:` chunks), and `ai.py`'s `raw_decode`
+could not parse that, so every copy call raised `JSONDecodeError`. The client
+now sends `"stream": false` and gets a single `chat.completion` object back.
+`ai.py` self-check passes (`chat_json OK`).
+
+## Config: model pinned to one this router serves
+
+The old default `ds/deepseek-v4-pro` is not in this 9Router's catalogue
+(26 models, all `cc/*` and `ag/*`). `NINEROUTER_MODEL` is now
+`cc/claude-sonnet-5`; cheaper swaps are `cc/claude-haiku-4-5-20251001` or
+`ag/gemini-3-flash-low`.
+
+## Still broken
+
+- No `cookies.txt`: YouTube capped at 360p, and flagged-VPS requests hit the
+  bot-check.
+- Empty BGM folder (`bgm/`): clips render silent.
+- Clippo session and uploader tokens absent: the full pipeline cannot submit
+  or upload. The clip path is unaffected.
+
+---
+
 **v0.2 "reference style"** · branch `claude/code-clipper-review-v9e3im`
 15 commits, 12 files, +1343 / −122 · one new module (`bgm.py`), one new manifest
 (`requirements.txt`)
