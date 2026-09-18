@@ -24,7 +24,22 @@ Write like a person who watched this clip, not like a model describing it:
   "seamless", "cutting edge", "yuk simak", "simak selengkapnya".
 - No "bukan cuma X, tapi Y" and no "bukan sekadar X". It is a formula, not a point.
 - Do not force three of anything. List what the clip actually has.
-- Quote what was actually said instead of describing how good it is."""
+- Quote what was actually said instead of describing how good it is.
+
+Title craft, like a top Indonesian clip account:
+- The title sells THIS moment, not the topic. Name the specific, surprising,
+  confrontational, or funny thing that actually happens or is said in the clip.
+- Open a curiosity gap: tease the payoff without revealing it. If a viewer can
+  skip the clip and still get the whole story from the title, it failed.
+- Prefer a short punchy statement or a mini-quote over a label. "Dia jawab
+  begini pas ditanya soal gaji" beats "Pandangan soal gaji".
+- No clickbait the clip does not back up: the title stays true to what is
+  actually said, so a curious viewer is not lied to.
+
+Description craft:
+- Write 2-3 sentences that actually represent the clip: who or what it is
+  about and the key moment, so a reader knows what they will watch before
+  clicking. Never return only the hashtags or a single generic line."""
 
 USER_TEMPLATE = """Buat metadata untuk klip pendek dari transkrip ini.
 
@@ -41,8 +56,12 @@ Return JSON keys:
    WAJIB: bungkus bagian yang paling memancing dengan **dua bintang** supaya
    dicetak tebal. Sisanya (kata sambung, keterangan) biarkan tanpa bintang.
    Contoh: "**Nekat!! Dia Berani Banget** Ngomong Gini Ke **Mantannya**"
-2. "title": judul video, maksimal 80 karakter, boleh emoji.
-3. "description": 2 kalimat engaging + SEMUA hashtag wajib + 2-3 hashtag relevan lain.
+2. "title": judul video ala akun klip ternama: jual momen spesifiknya, bukan
+   topiknya. Buka rasa penasaran tanpa bocorin payoff. Maksimal 80 karakter,
+   boleh emoji, dan harus jujur ke isi transkrip.
+3. "description": 2-3 kalimat yang MEREPRESENTASIKAN isi klip (siapa/bahas apa
+   + momen kuncinya, biar pembaca tahu yang bakal ditonton) + SEMUA hashtag
+   wajib + 2-3 hashtag relevan lain. Jangan cuma hashtag atau satu baris.
 4. "youtube_tags": array 10 keyword pencarian relevan (tanpa #).
 5. "punchline": kutip PERSIS 3-6 kata dari transkrip yang jadi puncak/kejutan
    segmen ini. Dipakai untuk mewarnai caption di momen itu. Kalau tidak ada
@@ -177,6 +196,17 @@ def generate(transcript, requirements, platform="youtube"):
     if not _has_words(hook):
         hook = title
 
+    # A description of only hashtags does not represent the clip. When the
+    # model returned no prose, derive a real summary from the transcript and
+    # keep the hashtags below it.
+    if not _has_words(re.sub(r"#\w+", "", desc).strip()):
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", transcript)
+                     if s.strip()]
+        summary = " ".join(sentences[:2]).strip()
+        if summary:
+            desc = (f"{summary[:280]}\n\n{desc.strip()}" if desc.strip()
+                    else summary[:280])
+
     # words the renderer tints as the punchline; only keep ones the segment
     # actually says, so a hallucinated quote colours nothing
     spoken = {w.strip(".,!?").lower() for w in transcript.split()}
@@ -270,6 +300,8 @@ if __name__ == "__main__":
         assert m2["title"].startswith("Kalimat pertama"), m2
         assert m2["hook"] == m2["title"]
         assert m2["punchline_words"] == []
+        # a blank description must still represent the clip, not just hashtags
+        assert m2["description"].startswith("Kalimat pertama"), m2["description"]
         # an unreachable router must degrade, never raise (PRD §5)
         ai.chat_json = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
         m3 = generate("Router mati tapi klip harus tetap jalan.", {"hashtags": ["#x"]})

@@ -1,5 +1,39 @@
 # Clipper — Release Notes
 
+**v0.2.2 "copy that represents the clip"** · branch `claude/code-clipper-review-v9e3im`
+1 commit · 2 files · `metadata.py`: viral-title craft + a real description
+
+_Dalmislave_
+
+---
+
+## What this is
+
+Titles and descriptions were reading flat: a title could be the first sentence
+of the transcript, and a description could come back as nothing but `#Shorts`.
+Both are fixed.
+
+## Title craft
+
+The `metadata.py` prompt now asks the model to sell the specific moment, not
+the topic: open a curiosity gap, prefer a punchy mini-quote over a label, and
+stay true to what is actually said. Verified live: "Gaji Diakuin Kecil, Tapi
+Kok Mobilnya Ganti Mulu?" instead of a flat restatement.
+
+## Description must represent the clip
+
+The prompt now requires a 2-3 sentence summary of who or what the clip is and
+its key moment, before the hashtags. A fallback in `generate()` does the same
+when the router is unreachable: a description of only hashtags is rebuilt from
+the transcript, so `#Shorts` alone can never ship again.
+
+## Still broken
+
+Unchanged from v0.2.1: no `cookies.txt` (360p), empty BGM folder (silent
+clips), and no Clippo session or uploader tokens (full pipeline only).
+
+---
+
 **v0.2.1 "9Router on-box"** · branch `claude/code-clipper-review-v9e3im`
 1 commit · 2 files, `ai.py` +1 line · AI copy path now works against 9Router
 running on the box itself.
