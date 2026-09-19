@@ -27,6 +27,28 @@ import time
 import traceback
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv():
+    """Load clipper/.env into os.environ before any module reads its config.
+
+    edit.py, fetch.py and transcribe.py read CLIPPER_* at import time, so the
+    .env has to be applied before they are imported. ai.py parses the same file
+    but only when metadata imports it, which is too late for edit's defaults.
+    """
+    path = os.path.join(_BASE, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_dotenv()
+
 OUT_DIR = os.environ.get("CLIPPER_JOB_OUT", os.path.join(_BASE, "jobs"))
 LOCK_PATH = os.environ.get("CLIPPER_JOB_LOCK", os.path.join(_BASE, ".job.lock"))
 # Seconds to wait for a job already running. Zero means refuse immediately,

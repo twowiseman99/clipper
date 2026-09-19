@@ -1,5 +1,47 @@
 # Clipper — Release Notes
 
+**v0.2.3 "motion and word-by-word captions"** · branch `claude/code-clipper-review-v9e3im`
+1 commit · 3 files · `edit.py` + `job.py`: Ken Burns push-in, karaoke default, .env fix
+
+_Dalmislave_
+
+---
+
+## What this is
+
+Two render changes the operator asked for: captions that highlight the spoken
+word, and a slow camera push-in so a static talking-head shot moves.
+
+## Camera movement (Ken Burns push-in)
+
+`CLIPPER_ZOOM` (default 1.0 = off) pushes the frame in by that factor over the
+clip. It is a centred zoom on the full-frame ("cover") path only: a zoom on the
+fill/fit band would drag the band edge around. Captions are overlaid after the
+zoom, so they stay sharp while the picture moves. The zoompan filter got `fps=`
+pinned, otherwise zoompan's default 25 fps stretches the clip by a second and
+desyncs the audio; verified 5s in, 5s out.
+
+## Word-by-word captions
+
+`caption_style="karaoke"` was already implemented (white text, active word
+light blue `#87CEFA`) but not the default. The box now runs it via
+`CLIPPER_CAPTION_STYLE=karaoke`.
+
+## A latent bug fixed: .env was loaded too late
+
+`edit.py` (and `fetch.py`, `transcribe.py`) read `CLIPPER_*` at import time,
+but `.env` was only parsed when `metadata` imported `ai`, which happens after
+`edit` in `job.py`'s import order, so every `CLIPPER_*` override in `.env` was
+silently ignored. `job.py` now loads `.env` at the top, before any module
+imports.
+
+## Still broken
+
+Unchanged: no `cookies.txt` (360p), empty BGM folder (silent clips), no Clippo
+session or uploader tokens.
+
+---
+
 **v0.2.2 "copy that represents the clip"** · branch `claude/code-clipper-review-v9e3im`
 1 commit · 2 files · `metadata.py`: viral-title craft + a real description
 

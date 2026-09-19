@@ -102,6 +102,11 @@ CAPTION_STYLE = os.environ.get("CLIPPER_CAPTION_STYLE", "phrase")
 # zoom on landscape footage, so a landscape source is the case for "fit".
 FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "cover")
 FILL_HEIGHT_FRAC = 0.62
+# Camera movement: a slow centred push-in (Ken Burns) on the full-frame path.
+# 1.0 is off; 1.12 pushes in 12% by the last frame. Captions are overlaid after
+# the zoom, so they stay sharp while the picture moves. A zoom on the fill/fit
+# band would drag the band edge around, so it applies to "cover" only.
+ZOOM = float(os.environ.get("CLIPPER_ZOOM", "1.0"))
 
 # Where the captions sit relative to the footage:
 #   "below"  — the footage is shrunk to the reference clip's proportion and
@@ -568,6 +573,23 @@ def _graph_flag():
     return _GRAPH_FLAG
 
 
+def _zoompan(dur, fps=FPS):
+    """Filter for a slow centred push-in over the whole clip, or None if off.
+
+    The footage is normalised to `fps` first so the zoom spreads evenly across
+    the full clip whatever the source's native rate: `on` then counts output
+    frames at a known speed, and the target factor is reached exactly on the
+    last frame. 1.0 is no zoom; a higher ZOOM pushes in that many percent.
+    """
+    if ZOOM <= 1.0:
+        return None
+    n = max(1, int(dur * fps))
+    return (f"fps={fps},"
+            f"zoompan=z='min(1+{ZOOM - 1:.4f}*on/{n},{ZOOM:.4f})':"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d=1:fps={fps}:s={CANVAS_W}x{CANVAS_H}")
+
+
 def render_clip(video_path, start, end, words, out_path, *,
                 hook=None, split_screen=False, bgm=True, fps=FPS,
                 bitrate=BITRATE, preset=PRESET, threads=THREADS,
@@ -688,7 +710,10 @@ def render_clip(video_path, start, end, words, out_path, *,
         base_label = "vmain" if intro else "v0"
         if frame_mode == "cover" and not split_screen:
             # nothing to composite: the footage is the frame
-            chains.append(f"[0:v]{cover},setsar=1[{base_label}]")
+            zoom = _zoompan(dur, fps)
+            chains.append(f"[0:v]{cover},setsar=1"
+                          + (f",{zoom}" if zoom else "")
+                          + f"[{base_label}]")
         elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
             chains.append(f"[0:v]scale=-2:980,crop=min(iw\\,1040):980[mn]")
