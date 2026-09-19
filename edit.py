@@ -107,6 +107,12 @@ FILL_HEIGHT_FRAC = 0.62
 # the zoom, so they stay sharp while the picture moves. A zoom on the fill/fit
 # band would drag the band edge around, so it applies to "cover" only.
 ZOOM = float(os.environ.get("CLIPPER_ZOOM", "1.0"))
+# Follow the speaker's face when zooming, instead of staying centred. Detection
+# uses a YuNet face detector on the cropped 9:16 frame; no face, and the
+# camera stays centred. cv2 is imported lazily so the self-check runs without it.
+FACE_TRACK = os.environ.get("CLIPPER_FACE_TRACK", "1") not in ("0", "false", "no", "")
+# YuNet ONNX face detector (much fewer false positives than the Haar cascade).
+FACE_MODEL = os.path.join(_BASE, "models", "face_detection_yunet_2023mar.onnx")
 
 # Where the captions sit relative to the footage:
 #   "below"  — the footage is shrunk to the reference clip's proportion and
@@ -573,8 +579,15 @@ def _graph_flag():
     return _GRAPH_FLAG
 
 
+def _zoom_parts(dur, fps):
+    """Shared zoompan bits: the frame budget and the zoom-factor expression."""
+    n = max(1, int(dur * fps))
+    z = f"min(1+{ZOOM - 1:.4f}*on/{n},{ZOOM:.4f})"
+    return n, z
+
+
 def _zoompan(dur, fps=FPS):
-    """Filter for a slow centred push-in over the whole clip, or None if off.
+    """Centred push-in (no tracking), or None when zoom is off.
 
     The footage is normalised to `fps` first so the zoom spreads evenly across
     the full clip whatever the source's native rate: `on` then counts output
@@ -583,10 +596,120 @@ def _zoompan(dur, fps=FPS):
     """
     if ZOOM <= 1.0:
         return None
-    n = max(1, int(dur * fps))
+    _n, z = _zoom_parts(dur, fps)
     return (f"fps={fps},"
-            f"zoompan=z='min(1+{ZOOM - 1:.4f}*on/{n},{ZOOM:.4f})':"
+            f"zoompan=z='{z}':"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d=1:fps={fps}:s={CANVAS_W}x{CANVAS_H}")
+
+
+def _cover_rect(W, H):
+    """The source-pixel rectangle the 9:16 'cover' crop keeps."""
+    s = max(CANVAS_W / W, CANVAS_H / H)
+    return ((W * s - CANVAS_W) / (2 * s), (H * s - CANVAS_H) / (2 * s),
+            CANVAS_W / s, CANVAS_H / s)
+
+
+def _sample_face_centers(video_path, start, end, step=1.0):
+    """[(t, cx, cy)] centres of the tracked face, in cropped-frame fractions.
+
+    Reads the segment once in order (no per-sample seek), and on each sampled
+    frame picks the face nearest the previous position, so a two-person shot
+    follows one speaker instead of hopping between them. t is relative to
+    `start`; cx,cy are fractions of the cropped 9:16 frame, lining up with what
+    the zoompan sees. Empty means no face was found; the caller stays centred.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return []
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+    try:
+        if not os.path.exists(FACE_MODEL):
+            return []
+        det = cv2.FaceDetectorYN_create(FACE_MODEL, "", (640, 640), 0.6, 0.3, 5000)
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if W <= 0 or H <= 0:
+            return []
+        left, top, cw, ch = _cover_rect(W, H)
+        x0, y0 = max(0, int(left)), max(0, int(top))
+        x1, y1 = min(W, int(left + cw)), min(H, int(top + ch))
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        every = max(1, int(round(src_fps * step)))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start * src_fps))
+        pts, prev = [], None
+        idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            t = start + idx / src_fps
+            if t >= end:
+                break
+            if idx % every == 0:
+                crop = frame[y0:y1, x0:x1]
+                det.setInputSize((crop.shape[1], crop.shape[0]))
+                _ok, faces = det.detect(crop)
+                if faces is not None and len(faces):
+                    centers = [((float(f[0]) + float(f[2]) / 2) / crop.shape[1],
+                                (float(f[1]) + float(f[3]) / 2) / crop.shape[0])
+                               for f in faces]
+                    target = prev or (0.5, 0.5)
+                    c = min(centers, key=lambda p:
+                            (p[0] - target[0]) ** 2 + (p[1] - target[1]) ** 2)
+                    prev = c
+                    pts.append((t - start, c[0], c[1]))
+            idx += 1
+        return pts
+    except cv2.error:
+        return []
+    finally:
+        cap.release()
+
+
+def _track_expr(pts, dur, fps, axis):
+    """Piecewise-linear ffmpeg expression for the face centre (axis 0=x, 1=y).
+
+    Keypoints are thinned (a point that has not moved is dropped, so a static
+    speaker yields a constant) then clamped so the crop never leaves the frame
+    at full zoom. A gap before the first detection holds that first position.
+    """
+    key = []
+    for i, (t, cx, cy) in enumerate(pts):
+        v = cx if axis == 0 else cy
+        if not key or i == len(pts) - 1 or abs(v - key[-1][1]) >= 0.015:
+            key.append((max(0, int(t * fps)), v))
+    lo, hi = 1.0 / (2.0 * ZOOM), 1.0 - 1.0 / (2.0 * ZOOM)
+    key = [(k, min(hi, max(lo, v))) for k, v in key]
+    if len(key) == 1:
+        return f"{key[0][1]:.4f}"
+    expr = f"{key[-1][1]:.4f}"
+    for i in range(len(key) - 2, -1, -1):
+        k0, v0 = key[i]
+        k1, v1 = key[i + 1]
+        expr = (f"if(lt(on,{k1}),{v0:.4f}+({v1:.4f}-{v0:.4f})"
+                f"*(on-{k0})/{max(1, k1 - k0)},{expr})")
+    k0, v0 = key[0]
+    return f"if(lt(on,{k0}),{v0:.4f},{expr})"
+
+
+def _face_zoompan(video_path, start, end, dur, fps=FPS):
+    """Push-in that follows the speaker's face, or None to fall back centred."""
+    if ZOOM <= 1.0:
+        return None
+    pts = _sample_face_centers(video_path, start, end)
+    if len(pts) < 2:
+        return None
+    _n, z = _zoom_parts(dur, fps)
+    fx = _track_expr(pts, dur, fps, 0)
+    fy = _track_expr(pts, dur, fps, 1)
+    off = f"1/(2*({z}))"
+    return (f"fps={fps},"
+            f"zoompan=z='{z}':"
+            f"x='iw*(({fx})-({off}))':y='ih*(({fy})-({off}))':"
             f"d=1:fps={fps}:s={CANVAS_W}x{CANVAS_H}")
 
 
@@ -710,7 +833,11 @@ def render_clip(video_path, start, end, words, out_path, *,
         base_label = "vmain" if intro else "v0"
         if frame_mode == "cover" and not split_screen:
             # nothing to composite: the footage is the frame
-            zoom = _zoompan(dur, fps)
+            zoom = None
+            if ZOOM > 1.0:
+                zoom = (_face_zoompan(video_path, start, end, dur, fps)
+                        if FACE_TRACK else None)
+                zoom = zoom or _zoompan(dur, fps)
             chains.append(f"[0:v]{cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
                           + f"[{base_label}]")

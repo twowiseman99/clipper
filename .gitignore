@@ -10,6 +10,9 @@ clippo_session.json
 media/
 *.words.json
 *.heatmap.json
+jobs/
+reports/
+.job.lock
 
 __pycache__/
 *.pyc

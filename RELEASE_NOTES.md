@@ -1,5 +1,44 @@
 # Clipper — Release Notes
 
+**v0.2.4 "camera that follows the speaker"** · branch `claude/code-clipper-review-v9e3im`
+1 commit · 5 files · `edit.py`: face-tracked camera (YuNet); `fetch.py`: SABR bypass
+
+_Dalmislave_
+
+---
+
+## What this is
+
+The camera now follows the speaker's face instead of only pushing in centred.
+This release also commits the download fix that had been running uncommitted
+on the box.
+
+## Face-tracked camera
+
+When `CLIPPER_ZOOM` is on, the renderer detects faces with a YuNet model
+(`models/face_detection_yunet_2023mar.onnx`, bundled) on the cropped 9:16
+frame, once per second. The zoom centre follows the primary face (nearest the
+previous position, so a two-person shot tracks one speaker rather than hopping)
+along a piecewise-linear path, clamped so the crop never leaves the frame. No
+face detected, and the camera falls back to the centred push-in. Set
+`CLIPPER_FACE_TRACK=0` to disable.
+
+## Download fix, finally committed
+
+`fetch.py` had been running with an uncommitted patch: `player_client`
+`web_embedded` (supports cookies, bypasses the SABR streaming YouTube forces on
+the web client) and `remote_components ejs:github` (JS solver for the `n`/nsig
+parameter). That is what makes a flagged VPS download at 2160p instead of
+failing the bot-check; it is now in the tree.
+
+## Still broken
+
+No `cookies.txt` (YouTube capped at 360p and hits the bot-check without one),
+empty BGM folder (silent clips), no Clippo session or uploader tokens (full
+pipeline only).
+
+---
+
 **v0.2.3 "motion and word-by-word captions"** · branch `claude/code-clipper-review-v9e3im`
 1 commit · 3 files · `edit.py` + `job.py`: Ken Burns push-in, karaoke default, .env fix
 

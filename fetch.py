@@ -222,6 +222,12 @@ def fetch_youtube(url, task_id):
     }
     if YTDLP_COOKIES:
         opts["cookiefile"] = YTDLP_COOKIES
+    # YouTube forces SABR streaming on the default web client (bot-detection)
+    # that yt-dlp can't decrypt; web_embedded supports cookies and bypasses it.
+    # EJS remote component supplies the JS challenge solver for the "n" (nsig)
+    # parameter — requires a JS runtime (node/deno) on the box.
+    opts["extractor_args"] = {"youtube": {"player_client": ["web_embedded"]}}
+    opts["remote_components"] = ["ejs:github"]
     with yt_dlp.YoutubeDL(opts) as ydl:
         # metadata first: a duration check here costs a second, the same check
         # after the fact costs the whole download
