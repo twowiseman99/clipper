@@ -133,6 +133,9 @@ def catalogue():
              "desc": "Whole phrases in gold, two lines max, punchline tinted."},
             {"id": "karaoke", "label": "Word-by-word",
              "desc": "Per-word highlight as the speaker says it."},
+            {"id": "editorial", "label": "Editorial serif",
+             "desc": "Thin serif beside the speaker, mixed roman/italic, "
+                     "punchline word set large. No box, no stroke."},
         ],
         "hook_style": [
             {"id": "boxes", "label": "Pull quote",
@@ -253,10 +256,12 @@ def _delivery_copy(path, max_mb):
 
 
 def run(content_url, opening_url=None, hook=None, platform="youtube",
-        start=None, seconds=None, mood=None, out=None, max_mb=0, **style):
+        start=None, seconds=None, mood=None, out=None, max_mb=0, context=None,
+        copy_style=None, **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
     import edit
+    import emphasis
     import fetch
     import metadata
     import segments as selector
@@ -286,7 +291,8 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     else:
         _log("choosing a segment...")
         picks = selector.pick_topical_segments(words, platform, 1,
-                                               video_duration=info["duration"])
+                                               video_duration=info["duration"],
+                                               context=context)
         if not picks:
             # Same ladder the pipeline uses: an unreachable router costs the
             # topic-aware cut, not the clip. Without this a 9Router hiccup
@@ -304,8 +310,19 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         topic_hook = picks[0].get("hook")
 
     seg_words = selector.words_in(words, seg_start, seg_end)
+    # Measure which words the speaker actually leaned on before captions are
+    # drawn. Failure here scores every word 0.0 and the captions fall back to
+    # the model's punchline pick, so a broken audio read never blocks a render.
+    try:
+        seg_words = emphasis.score_words(content, seg_words, seg_start, seg_end)
+        stressed = emphasis.emphatic(seg_words)
+        if stressed:
+            _log(f"emphasis: {', '.join(sorted(stressed))}")
+    except Exception as exc:
+        _log(f"emphasis unavailable ({type(exc).__name__}: {exc})")
     seg_text = " ".join(w["word"] for w in seg_words)
-    meta = metadata.generate(seg_text, {}, platform=platform)
+    meta = metadata.generate(seg_text, {}, platform=platform, context=context,
+                             style=copy_style)
     meta["hook"] = _hook_for(hook, opening, topic_hook, meta["hook"])
 
     track, why = bgm.pick(mood or meta.get("mood"), key=f"job:{int(seg_start)}")
@@ -358,7 +375,7 @@ def _selftest():
     cat = catalogue()
     parser_choices = {
         "frame_mode": ("cover", "fill", "fit"),
-        "caption_style": ("phrase", "karaoke"),
+        "caption_style": ("phrase", "karaoke", "editorial"),
         "hook_style": ("boxes", "card"),
     }
     for key, allowed in parser_choices.items():
@@ -392,11 +409,19 @@ def main(argv=None):
                                                "the model choose")
     p.add_argument("--seconds", type=float, help="clip length when --start is given")
     p.add_argument("--mood", help="override the music mood")
+    p.add_argument("--context", help="what the clip is about: who is speaking, "
+                                     "where, and why the moment matters. Steers "
+                                     "which segment is cut and how the hook and "
+                                     "title are written")
     p.add_argument("--out", help="output path")
+    p.add_argument("--copy-style", dest="copy_style",
+                   choices=("pr-politik",),
+                   help="tone for the hook, title and description. Omit for "
+                        "the neutral viral tone")
     p.add_argument("--frame-mode", dest="frame_mode",
                    choices=("cover", "fill", "fit"))
     p.add_argument("--caption-style", dest="caption_style",
-                   choices=("phrase", "karaoke"))
+                   choices=("phrase", "karaoke", "editorial"))
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
     p.add_argument("--wait", type=float, default=None,
                    help="seconds to wait if another job holds the host")
@@ -423,7 +448,8 @@ def main(argv=None):
         with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
             res = run(a.content, a.opening, hook=a.hook, platform=a.platform,
                       start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
-                      max_mb=a.max_mb, **style)
+                      max_mb=a.max_mb, context=a.context,
+                      copy_style=a.copy_style, **style)
     except Busy as e:
         # not a failure of this job, so it gets no report and its own code —
         # the caller should retry rather than escalate
@@ -435,7 +461,8 @@ def main(argv=None):
         import report
         filed = report.capture(e, "job", context={
             "content": a.content, "opening": a.opening, "platform": a.platform,
-            "start": a.start, "seconds": a.seconds, **style})
+            "start": a.start, "seconds": a.seconds, "clip_context": a.context,
+            **style})
         out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         out.update(filed)
         print(json.dumps(out, ensure_ascii=False))

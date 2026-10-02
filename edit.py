@@ -21,6 +21,9 @@ from collections import namedtuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+import censor
+import emphasis
+
 # One timed image pasted onto the canvas: PNG path, position, visible window.
 Overlay = namedtuple("Overlay", "path x y t_start t_end")
 
@@ -59,7 +62,15 @@ PRESET = os.environ.get("CLIPPER_PRESET", "veryfast")
 BITRATE = os.environ.get("CLIPPER_BITRATE", "6M")
 THREADS = int(os.environ.get("CLIPPER_THREADS", str(os.cpu_count() or 4)))
 FPS = int(os.environ.get("CLIPPER_FPS", "30"))
-BGM_VOLUME = 0.1
+BGM_VOLUME = float(os.environ.get("CLIPPER_BGM_VOLUME", "0.2"))
+# The hook is the music's moment: the b-roll under it is muted and the bed
+# carries the energy, then it ducks under the speaker so the talking stays
+# legible. Two levels, not one, because the two seconds are doing opposite jobs.
+BGM_HOOK_VOLUME = float(os.environ.get("CLIPPER_BGM_HOOK_VOLUME", "0.8"))
+BGM_FADE = float(os.environ.get("CLIPPER_BGM_FADE", "0.6"))
+# Mute the b-roll's own audio under the hook so the music bed owns it.
+BGM_MUTE_BROLL_HOOK = os.environ.get(
+    "CLIPPER_MUTE_BROLL_HOOK", "1").strip().lower() not in ("0", "false", "no")
 
 CANVAS_W, CANVAS_H = 1080, 1920
 BLUR_SIGMA = 28.0   # background blur strength (full-res equivalent)
@@ -88,6 +99,31 @@ PHRASE_MAX_LINES = 2      # lines per phrase before it is flushed
 PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
 PHRASE_X_FRAC = 0.09      # left margin, fraction of canvas width
 PHRASE_Y_FRAC = 0.80      # block BOTTOM on a full frame (reference: 76-84%)
+# "editorial": the reference-clip look — thin serif, no stroke, mixed roman and
+# italic inside one phrase, and the punchline word set large on its own line.
+# Deliberately quieter than the gold phrase style: it reads as designed rather
+# than auto-captioned, which is the whole point of it.
+EDIT_FONT_SERIF = os.environ.get(
+    "CLIPPER_SERIF", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
+EDIT_FONT_SERIF_ITALIC = os.environ.get(
+    "CLIPPER_SERIF_ITALIC", "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf")
+EDIT_FONT_SERIF_BOLD = os.environ.get(
+    "CLIPPER_SERIF_BOLD", "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf")
+EDIT_SIZE = int(os.environ.get("CLIPPER_EDIT_SIZE", "72"))
+EDIT_PUNCH_SIZE = int(os.environ.get("CLIPPER_EDIT_PUNCH_SIZE", "132"))
+EDIT_X_FRAC = 0.09        # left margin: the block runs across the frame
+EDIT_Y_FRAC = 0.62        # block TOP, below the speaker's face
+EDIT_LINE_GAP = 2
+EDIT_SHADOW = (0, 0, 0, 170)
+# Legibility floor. A speaker in white clothing swallowed plain white serif, so
+# every word sits on its own dark plate and carries a stroke. 0 alpha drops the
+# plate for footage dark enough not to need it.
+EDIT_BOX_ALPHA = int(os.environ.get("CLIPPER_EDIT_BOX_ALPHA", "215"))
+EDIT_BOX_RADIUS = int(os.environ.get("CLIPPER_EDIT_BOX_RADIUS", "10"))
+EDIT_BOX_PAD = int(os.environ.get("CLIPPER_EDIT_BOX_PAD", "14"))
+EDIT_STROKE = int(os.environ.get("CLIPPER_EDIT_STROKE", "3"))
+# Stress score above which a word is set in caps (see emphasis.py).
+EMPH_THRESHOLD = float(os.environ.get("CLIPPER_EMPH_THRESHOLD", "1.15"))
 # "phrase" (reference look) or "karaoke" (per-word highlight, PRD §3.6)
 CAPTION_STYLE = os.environ.get("CLIPPER_CAPTION_STYLE", "phrase")
 # How the footage sits on the canvas:
@@ -107,12 +143,24 @@ FILL_HEIGHT_FRAC = 0.62
 # the zoom, so they stay sharp while the picture moves. A zoom on the fill/fit
 # band would drag the band edge around, so it applies to "cover" only.
 ZOOM = float(os.environ.get("CLIPPER_ZOOM", "1.0"))
+# Seconds for one in-and-out zoom cycle. 0 keeps the old single slow push.
+ZOOM_CYCLE = float(os.environ.get("CLIPPER_ZOOM_CYCLE", "12"))
 # Follow the speaker's face when zooming, instead of staying centred. Detection
 # uses a YuNet face detector on the cropped 9:16 frame; no face, and the
 # camera stays centred. cv2 is imported lazily so the self-check runs without it.
 FACE_TRACK = os.environ.get("CLIPPER_FACE_TRACK", "1") not in ("0", "false", "no", "")
 # YuNet ONNX face detector (much fewer false positives than the Haar cascade).
 FACE_MODEL = os.path.join(_BASE, "models", "face_detection_yunet_2023mar.onnx")
+# Panning the 9:16 crop window across the source instead of holding it centred.
+# A 16:9 source only keeps its middle 32% in a 9:16 frame, so a wide two-shot
+# puts both speakers outside the crop and the clip stares at the table between
+# them. Panning slides that window to wherever the speaker actually is. The
+# aspect ratio never changes; only which part of the source the window keeps.
+PAN = os.environ.get("CLIPPER_PAN", "1") not in ("0", "false", "no", "")
+PAN_STEP = 0.5        # seconds between face samples
+PAN_DEADZONE = 0.18   # face may drift this fraction of the window before moving
+PAN_HOLD = 0.6        # seconds off-centre before the camera commits to a move
+PAN_SLIDE = 0.6       # seconds a reframe takes, so it reads as a pan not a cut
 
 # Where the captions sit relative to the footage:
 #   "below"  — the footage is shrunk to the reference clip's proportion and
@@ -223,9 +271,14 @@ HOOK_Y = 300          # hook block top, centered style (split-screen mode)
 CLEAN_HOOK_BOTTOM = 0.81
 CLEAN_SUB_Y = 1040    # karaoke line in full-frame mode (mid-frame, above hook)
 HOOK_X_LEFT = 162     # left margin, 15% of canvas (measured off the reference)
-HOOK_FONT_SIZE = 44
+HOOK_EDGE_PAD = 32    # breathing room kept clear on the right of a left-hugged hook
+HOOK_FONT_SIZE = int(os.environ.get("CLIPPER_HOOK_FONT", "64"))
 HOOK_DUR = float(os.environ.get("CLIPPER_HOOK_SECONDS", "7"))
 HOOK_MAX_CHARS = 26   # wrap width per boxed line
+# The hook is the one piece of text a scroller reads before deciding, so it
+# runs as wide as the frame allows. 0.94 leaves a thin margin on each side:
+# text touching the very edge reads as a rendering bug, not as a design.
+HOOK_MAX_W = int(0.94 * CANVAS_W)
 HOOK_PAD_X, HOOK_PAD_Y = 22, 10
 # Two hook treatments seen across the reference clips:
 #   "boxes" — one white box per line, ragged right, a teal quote mark above.
@@ -350,6 +403,25 @@ def _hook_layer(text, tmp_dir, dur=HOOK_DUR, y=HOOK_Y, left=False, bottom=False,
     if not lines:
         return []
     rendered = [_rich_line_image(l, bold_font, reg_font) for l in lines]
+
+    # A long hook at the headline size can outgrow the canvas. Step the font
+    # down until the widest line fits rather than letting it run off the frame
+    # or shrinking the image afterwards, which softens the text.
+    # A left-hugged block starts at HOOK_X_LEFT, so it has that much less room
+    # than a centred one — measuring against the centred width let the boxes
+    # run off the right edge.
+    max_w = HOOK_MAX_W
+    if left:
+        max_w = min(max_w, CANVAS_W - HOOK_X_LEFT - HOOK_EDGE_PAD)
+    size = HOOK_FONT_SIZE
+    while (max(r.width for r in rendered) + HOOK_PAD_X * 2) > max_w and size > 32:
+        size -= 4
+        try:
+            bold_font = ImageFont.truetype(FONT_PATH, size)
+            reg_font = ImageFont.truetype(FONT_PATH_REGULAR, size)
+        except OSError:
+            break
+        rendered = [_rich_line_image(l, bold_font, reg_font) for l in lines]
 
     if style == "card":
         inner_w = max(r.width for r in rendered)
@@ -478,6 +550,7 @@ def _phrase_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=PHRASE_Y_F
         tiles = []
         for line in ph["lines"]:
             text = " ".join(re.sub(r"[.,!?]", "", w["word"].upper()) for w in line)
+            text = censor.mask(text)
             img, _ = _mixed_text_image(text, font, color, stroke_width=PHRASE_STROKE)
             if img.width > max_w:  # very long word — shrink the whole line
                 s = max_w / img.width
@@ -504,6 +577,132 @@ def _phrase_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=PHRASE_Y_F
     return overlays
 
 
+def _editorial_layer(words, clip_start, tmp_dir, accent_words=(),
+                     x_frac=EDIT_X_FRAC, y_frac=EDIT_Y_FRAC):
+    """Reference-clip captions: thin serif, no box, mixed roman/italic, and the
+    punchline word set large — with the per-word karaoke highlight kept.
+
+    Every word of the phrase is drawn in every frame of that phrase; only the
+    colour of the word currently being spoken changes. An earlier cut dropped
+    the words after the punchline, which made captions look like they were
+    losing text mid-sentence.
+
+    Layout is two lines: the phrase runs small on the top line, and the
+    punchline word sits under it at EDIT_PUNCH_SIZE. That size jump is what
+    makes the style read as designed rather than auto-captioned.
+    """
+    try:
+        f_small = ImageFont.truetype(EDIT_FONT_SERIF, EDIT_SIZE)
+        f_small_it = ImageFont.truetype(EDIT_FONT_SERIF_ITALIC, EDIT_SIZE)
+        f_small_bold = ImageFont.truetype(EDIT_FONT_SERIF_BOLD, EDIT_SIZE)
+        f_punch = ImageFont.truetype(EDIT_FONT_SERIF_BOLD, EDIT_PUNCH_SIZE)
+    except OSError:
+        return _phrase_layer(words, clip_start, tmp_dir, accent_words)
+
+    # accent_words arrives from the model via metadata.generate, which already
+    # filters to spoken words. Coerced again here because _editorial_layer is
+    # also called directly (self-check, other callers), and a non-string item
+    # would raise mid-render instead of simply not being accented.
+    accent = {str(a).lower().strip(".,!?") for a in accent_words if a}
+    max_w = CANVAS_W - int(x_frac * CANVAS_W) - PADDING
+    overlays = []
+
+    def tile(text, font, colour):
+        """One word, transparent behind it — the plate is drawn per line."""
+        bbox = font.getbbox(text)
+        pad = EDIT_BOX_PAD
+        img = Image.new("RGBA", (bbox[2] - bbox[0] + pad * 2,
+                                 bbox[3] - bbox[1] + pad * 2), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        # The stroke is the second line of defence: on footage bright enough to
+        # wash out even the plate, black-on-white edges still hold the shape.
+        d.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=colour,
+               stroke_width=EDIT_STROKE, stroke_fill="black")
+        return img
+
+    for ph in group_phrases(words, max_lines=1, max_words=4):
+        items = [w for line in ph["lines"] for w in line]
+        toks = [censor.mask(re.sub(r"[.,!?]", "", w["word"])) for w in items]
+        keep = [(t, w) for t, w in zip(toks, items) if t]
+        if not keep:
+            continue
+        toks = [t for t, _ in keep]
+        items = [w for _, w in keep]
+
+        # Words the speaker audibly leaned on (emphasis.py), set apart from the
+        # single punchline word. "mereka DISERANG terus MENERUS" needs both
+        # stressed words marked, not just one.
+        hot = {i for i, w in enumerate(items)
+               if w.get("stress", 0) >= EMPH_THRESHOLD
+               and re.sub(r"[^\w]", "", w["word"]).lower() not in emphasis.STOPWORDS
+               and len(re.sub(r"[^\w]", "", w["word"])) > 2}
+        # The big word is a LINE BREAK, not a highlight: everything before it
+        # goes on the top line. So it can only ever be the LAST word of the
+        # phrase. Picking a stressed word in the middle — "tadi saya inget
+        # sudara" with "inget" enlarged — pushes word 4 up beside words 1-2 and
+        # the caption reads out of order. Stress is already shown with caps, so
+        # the break carries no emphasis duty and stays where reading order
+        # demands. Two earlier attempts (any stressed word, then any stressed
+        # word in the second half) both shipped scrambled captions.
+        hit = len(toks) - 1
+
+        for active in range(len(toks)):
+            # top line: the whole phrase except the punchline, alternating
+            # roman and italic so it never reads as one flat weight
+            top = [(t, i) for i, t in enumerate(toks) if i != hit]
+            tiles_top = []
+            for n, (t, i) in enumerate(top):
+                colour = ACTIVE_COLOR if i == active else "white"
+                if i in hot:
+                    # Stressed words go uppercase in the bold cut: the delivery
+                    # is visible in the caption instead of being flattened.
+                    tiles_top.append(tile(t.upper(), f_small_bold, colour))
+                else:
+                    tiles_top.append(
+                        tile(t, f_small_it if n % 2 else f_small, colour))
+            punch_text = toks[hit].upper() if hit in hot else toks[hit]
+            punch = tile(punch_text, f_punch,
+                         ACTIVE_COLOR if hit == active else "white")
+
+            top_w = sum(t.width for t in tiles_top)
+            top_h = max((t.height for t in tiles_top), default=0)
+            block_w = min(max_w, max(top_w, punch.width))
+            block_h = top_h + EDIT_LINE_GAP + punch.height
+            block = Image.new("RGBA", (max(1, block_w), block_h), (0, 0, 0, 0))
+
+            # One plate per LINE, drawn before the words. Per-word plates left a
+            # stepped, colliding silhouette where the big punchline met the
+            # small line; a single rounded bar per line reads as deliberate.
+            if EDIT_BOX_ALPHA:
+                d = ImageDraw.Draw(block)
+                if tiles_top:
+                    d.rounded_rectangle([(0, 0), (min(top_w, block_w) - 1, top_h - 1)],
+                                        radius=EDIT_BOX_RADIUS,
+                                        fill=(0, 0, 0, EDIT_BOX_ALPHA))
+                d.rounded_rectangle([(0, block_h - punch.height),
+                                     (punch.width - 1, block_h - 1)],
+                                    radius=EDIT_BOX_RADIUS,
+                                    fill=(0, 0, 0, EDIT_BOX_ALPHA))
+
+            cx = 0
+            for t in tiles_top:
+                if cx + t.width > block_w:
+                    break
+                block.paste(t, (cx, 0), t)
+                cx += t.width
+            block.paste(punch, (0, block_h - punch.height), punch)
+
+            path = os.path.join(tmp_dir, _name("e"))
+            block.save(path)
+            t_start = max(0.0, items[active]["start"] - clip_start)
+            nxt = (items[active + 1]["start"] if active + 1 < len(items)
+                   else items[active]["end"])
+            t_end = max(t_start + 0.1, nxt - clip_start)
+            overlays.append(Overlay(path, int(x_frac * CANVAS_W),
+                                    int(y_frac * CANVAS_H), t_start, t_end))
+    return overlays
+
+
 def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
     """Karaoke captions as timed overlays.
 
@@ -526,6 +725,7 @@ def _karaoke_layer(words, clip_start, tmp_dir, sub_y=SUB_Y):
             tiles, widths = [], []
             for j, w_item in enumerate(chunk):
                 text = re.sub(r"[.,!?]", "", w_item["word"].upper())
+                text = censor.mask(text)
                 color = ACTIVE_COLOR if i_w == j else "white"
                 img, tw = _mixed_text_image(text, font, color, stroke_width=STROKE)
                 tiles.append(img)
@@ -582,7 +782,16 @@ def _graph_flag():
 def _zoom_parts(dur, fps):
     """Shared zoompan bits: the frame budget and the zoom-factor expression."""
     n = max(1, int(dur * fps))
-    z = f"min(1+{ZOOM - 1:.4f}*on/{n},{ZOOM:.4f})"
+    if ZOOM_CYCLE > 0:
+        # A single slow push across 80s is invisible — the frame moves a few
+        # pixels a second. Cycling in and out on a fixed period is the movement
+        # the reference clips actually have: it reads as a live camera rather
+        # than a still. Half a cosine period gives in-and-back-out per cycle.
+        span = ZOOM - 1.0
+        z = (f"1+{span / 2:.4f}-{span / 2:.4f}"
+             f"*cos(2*PI*on/{max(1, int(ZOOM_CYCLE * fps))})")
+    else:
+        z = f"min(1+{ZOOM - 1:.4f}*on/{n},{ZOOM:.4f})"
     return n, z
 
 
@@ -608,6 +817,151 @@ def _cover_rect(W, H):
     s = max(CANVAS_W / W, CANVAS_H / H)
     return ((W * s - CANVAS_W) / (2 * s), (H * s - CANVAS_H) / (2 * s),
             CANVAS_W / s, CANVAS_H / s)
+
+
+def _sample_pan_faces(video_path, start, end, step=PAN_STEP):
+    """[(t, cx)] the speaker's face centre as a fraction of the FULL source width.
+
+    Detection runs on the whole frame rather than the centre crop, which is the
+    point: on a 16:9 source the crop keeps only the middle third, so a wide
+    two-shot has both speakers outside it and nothing to track. Of the faces
+    found, the largest is taken as the speaker — a podcast camera is already
+    cutting to whoever is talking, so the biggest face is usually the one the
+    shot is about. Empty means no face anywhere; the caller stays centred.
+    """
+    try:
+        import cv2
+    except ImportError:
+        return []
+    if not os.path.exists(FACE_MODEL):
+        return []
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+    try:
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if W <= 0 or H <= 0:
+            return []
+        # Detect on a downscaled copy: face centres are wanted, not pixels, and
+        # a 2560-wide frame costs several times more for the same answer.
+        scale = min(1.0, 960.0 / W)
+        dw, dh = int(W * scale), int(H * scale)
+        det = cv2.FaceDetectorYN_create(FACE_MODEL, "", (dw, dh), 0.6, 0.3, 5000)
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        every = max(1, int(round(src_fps * step)))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start * src_fps))
+        pts = []
+        idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            t = idx / src_fps
+            if start + t >= end:
+                break
+            if idx % every == 0:
+                small = cv2.resize(frame, (dw, dh)) if scale < 1.0 else frame
+                _ok, faces = det.detect(small)
+                if faces is not None and len(faces):
+                    # D: the biggest face is the speaker the shot is on
+                    f = max(faces, key=lambda f: float(f[2]) * float(f[3]))
+                    pts.append((t, (float(f[0]) + float(f[2]) / 2) / dw))
+            idx += 1
+        return pts
+    except cv2.error:
+        return []
+    finally:
+        cap.release()
+
+
+def _pan_keys(pts, win_frac):
+    """[(t, centre)] keyframes for the crop window, as source-width fractions.
+
+    Turns raw per-sample face positions into camera moves. A face drifting
+    inside PAN_DEADZONE of the window is ignored, so a speaker shifting in
+    their chair does not drag the frame. A face outside it has to stay outside
+    for PAN_HOLD seconds before the camera commits, which filters out a head
+    turning or a one-sample false positive. The move itself is spread over
+    PAN_SLIDE seconds, so it reads as a pan rather than a cut.
+    """
+    half = win_frac / 2.0
+    lo, hi = half, 1.0 - half
+    if lo >= hi:                      # window is the whole frame: nothing to pan
+        return []
+    clamp = lambda v: min(hi, max(lo, v))
+    cur = clamp(pts[0][1])
+    keys = [(0.0, cur)]
+    pending_since = None
+    for t, fx in pts:
+        want = clamp(fx)
+        if abs(want - cur) <= PAN_DEADZONE * win_frac:
+            pending_since = None
+            continue
+        if pending_since is None:
+            pending_since = t
+            pending_to = want
+            continue
+        pending_to = want             # track the latest reading while waiting
+        if t - pending_since < PAN_HOLD:
+            continue
+        if t <= keys[-1][0]:          # still mid-slide; let it land first
+            continue
+        keys.append((t, cur))
+        cur = pending_to
+        keys.append((t + PAN_SLIDE, cur))
+        pending_since = None
+    return keys
+
+
+def _pan_expr(keys):
+    """Piecewise-linear ffmpeg expression in `t` for the crop-window centre."""
+    if len(keys) == 1:
+        return f"{keys[0][1]:.4f}"
+    expr = f"{keys[-1][1]:.4f}"
+    for i in range(len(keys) - 2, -1, -1):
+        t0, v0 = keys[i]
+        t1, v1 = keys[i + 1]
+        if abs(v1 - v0) < 1e-6:
+            expr = f"if(lt(t,{t1:.3f}),{v0:.4f},{expr})"
+        else:
+            expr = (f"if(lt(t,{t1:.3f}),{v0:.4f}+({v1 - v0:.4f})"
+                    f"*(t-{t0:.3f})/{t1 - t0:.4f},{expr})")
+    return expr
+
+
+def _pan_cover(video_path, start, end):
+    """A 'cover' filter whose crop window follows the speaker, or None.
+
+    Same scale and same 9:16 crop size as the static cover — only the window's
+    x position varies with time. The aspect ratio is untouched; the clip just
+    stops keeping the middle of the frame when the speaker is not in it.
+    """
+    if not PAN:
+        return None
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(video_path)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if cap.isOpened() else 0
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if cap.isOpened() else 0
+    cap.release()
+    if W <= 0 or H <= 0:
+        return None
+    s = max(CANVAS_W / W, CANVAS_H / H)
+    win_frac = CANVAS_W / (W * s)
+    if win_frac >= 0.999:             # already vertical: no room to pan
+        return None
+    pts = _sample_pan_faces(video_path, start, end)
+    if not pts:
+        return None
+    keys = _pan_keys(pts, win_frac)
+    if not keys:
+        return None
+    x = _pan_expr(keys)
+    return (f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
+            f"crop={CANVAS_W}:{CANVAS_H}:x='iw*({x})-ow/2':y='(ih-oh)/2'")
 
 
 def _sample_face_centers(video_path, start, end, step=1.0):
@@ -764,7 +1118,10 @@ def render_clip(video_path, start, end, words, out_path, *,
         # in — they ride on the footage, which is what the reference does.
         below = (caption_place == "below" and not split_screen
                  and frame_mode != "cover")
-        if caption_style == "phrase" and not split_screen:
+        if caption_style == "editorial" and not split_screen:
+            overlays = _editorial_layer(
+                words, start, tmp_dir, accent_words=accent_words)
+        elif caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
                 y_frac=BELOW_CAPTION_BOTTOM if below else PHRASE_Y_FRAC)
@@ -793,7 +1150,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 hook_y, anchor_bottom = int(BELOW_HOOK_BOTTOM * CANVAS_H), True
             else:
                 hook_y, anchor_bottom = int(CLEAN_HOOK_BOTTOM * CANVAS_H), True
-            overlays += _hook_layer(hook, tmp_dir, hook_dur,
+            overlays += _hook_layer(censor.mask(hook), tmp_dir, hook_dur,
                                     y=hook_y, left=not split_screen,
                                     bottom=anchor_bottom, style=hook_style)
 
@@ -833,12 +1190,16 @@ def render_clip(video_path, start, end, words, out_path, *,
         base_label = "vmain" if intro else "v0"
         if frame_mode == "cover" and not split_screen:
             # nothing to composite: the footage is the frame
+            # A panning crop window already keeps the speaker in shot, so the
+            # push-in over it stays centred; tracking inside an already-tracked
+            # window would just fight it.
+            cover_v = _pan_cover(video_path, start, end) if FACE_TRACK else None
             zoom = None
             if ZOOM > 1.0:
-                zoom = (_face_zoompan(video_path, start, end, dur, fps)
-                        if FACE_TRACK else None)
+                if cover_v is None and FACE_TRACK:
+                    zoom = _face_zoompan(video_path, start, end, dur, fps)
                 zoom = zoom or _zoompan(dur, fps)
-            chains.append(f"[0:v]{cover},setsar=1"
+            chains.append(f"[0:v]{cover_v or cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
                           + f"[{base_label}]")
         elif split_screen and bg_video:
@@ -884,10 +1245,27 @@ def render_clip(video_path, start, end, words, out_path, *,
 
         total = dur + intro_dur
         if intro:
-            # the b-roll runs silent under the BGM; delaying rather than
-            # concatenating means a b-roll with no audio track cannot break it
+            # The b-roll's own sound is dropped under the hook: the music bed
+            # carries that moment, and the two together are mush. The gap is
+            # filled with silence so the speech starts after the hook —
+            # concatenating a missing stream would break the graph outright.
             ms = int(intro_dur * 1000)
-            chains.append(f"[0:a]adelay={ms}|{ms}[amain]")
+            intro_audio = False
+            if intro_idx is not None and not BGM_MUTE_BROLL_HOOK:
+                try:
+                    import fetch
+                    intro_audio = fetch.probe_has_audio(os.path.abspath(intro))
+                except Exception:
+                    intro_audio = False
+            if intro_audio:
+                chains.append(f"[{intro_idx}:a]atrim=0:{intro_dur:.3f},"
+                              f"asetpts=N/SR/TB,aformat=sample_rates=48000:"
+                              f"channel_layouts=stereo[aintro]")
+                chains.append(f"[0:a]aformat=sample_rates=48000:"
+                              f"channel_layouts=stereo[aspeech]")
+                chains.append("[aintro][aspeech]concat=n=2:v=0:a=1[amain]")
+            else:
+                chains.append(f"[0:a]adelay={ms}|{ms}[amain]")
             speech = "[amain]"
         else:
             speech = "[0:a]"
@@ -897,7 +1275,23 @@ def render_clip(video_path, start, end, words, out_path, *,
         # than the music simply fails to write.
         restamp = "asetpts=N/SR/TB"
         if bgm_idx is not None:
-            chains.append(f"[{bgm_idx}:a]volume={BGM_VOLUME}[bgm]")
+            # Loud under the hook, ducked under the speaker. The step down is
+            # ramped rather than cut: a hard level change lands as a click at
+            # the exact second the clip is asking for attention.
+            hook_end = intro_dur if intro_idx is not None else 0.0
+            if hook_end > 0:
+                duck_at = max(0.0, hook_end - BGM_FADE / 2)
+                duck_end = duck_at + BGM_FADE
+                # One per-frame expression: hook level, linear ramp, bed level.
+                chains.append(
+                    f"[{bgm_idx}:a]volume=eval=frame:volume="
+                    f"'if(lt(t,{duck_at:.3f}),{BGM_HOOK_VOLUME},"
+                    f"if(lt(t,{duck_end:.3f}),"
+                    f"{BGM_HOOK_VOLUME}+({BGM_VOLUME}-{BGM_HOOK_VOLUME})"
+                    f"*(t-{duck_at:.3f})/{BGM_FADE},"
+                    f"{BGM_VOLUME}))'[bgm]")
+            else:
+                chains.append(f"[{bgm_idx}:a]volume={BGM_VOLUME}[bgm]")
             chains.append(f"{speech}[bgm]amix=inputs=2:duration=first:"
                           f"dropout_transition=0,{restamp},"
                           f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")

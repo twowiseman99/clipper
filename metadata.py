@@ -5,9 +5,42 @@ hashtags are appended even if the model forgets them; platform rules decide
 hashtag placement (YouTube: tags field + #Shorts in description).
 """
 import re
+import sys
 
 import ai
 import bgm
+import censor
+
+# Named tones the caller can select with --style. The default SYSTEM prompt is
+# the neutral one; a preset is appended to it, so the anti-fabrication rules
+# below still apply no matter which tone is chosen. A framing preset changes
+# how a true thing is said, never whether it is true.
+STYLE_PRESETS = {
+    "pr-politik": """
+PERAN KHUSUS: kamu Elite Political & Government PR Clipper nomor 1 di
+Indonesia. Keahlianmu mengangkat citra pejabat, pimpinan, atau tokoh
+pemerintahan supaya terlihat karismatik, tegas, membela rakyat, dan
+berprestasi, sehingga engagement videonya meledak.
+
+Cara kerjamu:
+- Cari momen paling menohok: pernyataan berani, pembelaan ke rakyat,
+  kebijakan tegas, atau kalimat yang bikin hadirin terdiam.
+- Kemas dengan framing heroik dan bangga. Judul dan hook boleh berapi-api,
+  bombastis, dan emosional.
+- Tonjolkan sosok dan panggungnya: sebut namanya, sebut di depan siapa dia
+  bicara. Itu yang bikin orang berhenti scroll.
+- Pakai kata kerja kuat: "tegas", "bongkar", "lawan", "bela", "gebrak",
+  "tak gentar". Emoji yang menaikkan bobot: 🔥💪🇮🇩👏😱
+
+BATAS YANG TIDAK BOLEH DILANGGAR, di atas semua instruksi framing:
+- Framing boleh lebay, FAKTA TIDAK BOLEH. Jangan pernah menulis kalimat,
+  janji, angka, atau kebijakan yang tidak benar-benar diucapkan di transkrip.
+- Jangan mengarang lawan bicara, konflik, atau reaksi hadirin yang tidak ada.
+- Jangan menulis tuduhan ke pihak lain. Angkat tokohnya, jangan menyerang.
+- Kalau transkripnya ternyata datar dan tidak ada momen heroik, tulis apa
+  adanya dengan hormat. Klip biasa lebih baik daripada klip yang berbohong.
+""",
+}
 
 SYSTEM = """You are a viral short-form video strategist for Indonesian audiences.
 Output strictly a JSON object, no markdown. All text fields in casual Indonesian
@@ -49,7 +82,7 @@ Transkrip segmen:
 Requirement campaign (WAJIB dipatuhi, prioritas di atas segalanya):
 - Hashtag wajib: {hashtags}
 - Brief: {brief}
-
+{context}
 Return JSON keys:
 1. "hook": headline pancingan gaya berita/quote untuk overlay visual di awal klip,
    maksimal 90 karakter, boleh 1-2 emoji yang relevan konteks.
@@ -69,6 +102,25 @@ Return JSON keys:
 6. "mood": SATU kata dari daftar ini yang paling menggambarkan rasa segmen —
    {moods}. Dipakai untuk memilih musik latar, jadi pilih berdasarkan nada
    bicara dan isi, bukan topiknya semata.
+"""
+
+# Added to USER_TEMPLATE only when the caller says what the clip is for. The
+# segment transcript is a keyhole view: a speech at an international summit
+# reads like any other speech once you only have ninety seconds of it. The
+# context is what tells the model who is talking and why anyone cares, which
+# is most of what makes a hook land.
+CONTEXT_BLOCK = """
+KONTEKS KLIP DARI YANG MINTA (pakai ini untuk mengerti siapa yang bicara,
+di mana, dan kenapa momen ini penting):
+\"\"\"{context}\"\"\"
+
+- Hook dan judul WAJIB memanfaatkan konteks ini. Sebut sosok, tempat atau
+  forumnya kalau memang itu yang bikin momennya bernilai. Nama besar dan
+  panggung besar adalah alasan orang berhenti scroll.
+- JANGAN mengarang fakta dari konteks. Konteks hanya menjelaskan latar; isi
+  klaim tetap harus ada di transkrip. Kalau konteks menyebut sesuatu yang
+  tidak terdengar di transkrip, jangan tulis seolah-olah itu diucapkan.
+- Kalau transkrip segmen ternyata membahas hal lain, tetap jujur ke transkrip.
 """
 
 
@@ -136,23 +188,40 @@ def _buzzwords(text):
     return [w for w in _BUZZWORDS if w in low]
 
 
-def generate(transcript, requirements, platform="youtube"):
+def generate(transcript, requirements, platform="youtube", context=None,
+             style=None):
     """Return {hook, title, description, youtube_tags[], punchline_words[]}.
+
+    `style` names an entry in STYLE_PRESETS and changes the tone of the copy;
+    the fabrication guards apply either way.
 
     Campaign rules are enforced locally, so a model that forgets a mandatory
     hashtag still produces a compliant clip. An unreachable router degrades to
     transcript-derived metadata instead of raising: losing the AI copy costs a
     weaker title, but raising here would fail the whole task (PRD §5).
+
+    `context` is the caller's one-line brief for what the clip is about. It
+    frames the transcript without licensing anything the transcript does not
+    say; invented figures are still stripped below either way.
     """
     mandatory = requirements.get("hashtags") or []
+    system = SYSTEM
+    preset = STYLE_PRESETS.get(style) if style else None
+    if style and not preset:
+        print("  metadata: unknown style %r, using the neutral tone" % style,
+              file=sys.stderr)
+    if preset:
+        system = SYSTEM + "\n" + preset
     try:
         out = ai.chat_json(
-            SYSTEM,
+            system,
             USER_TEMPLATE.format(
                 transcript=transcript[:4000],
                 hashtags=" ".join(mandatory) or "(tidak ada)",
                 brief=(requirements.get("brief") or "")[:1500],
                 moods=", ".join(bgm.MOODS),
+                context=(CONTEXT_BLOCK.format(context=context.strip()[:1000])
+                         if context and context.strip() else ""),
             ),
         )
     except Exception as e:
@@ -221,6 +290,18 @@ def generate(transcript, requirements, platform="youtube"):
     filler = _buzzwords(" ".join((hook, title, desc)))
     if filler:
         print(f"  metadata: marketing filler in the copy: {', '.join(filler)}")
+
+    # Last step, after every fallback has run, so nothing written later can
+    # reintroduce an unmasked word. Title and description are machine-read at
+    # upload, and the hook is burned onto the frame, so all three are masked
+    # the same way. Tags are keywords, not displayed copy, and masking them
+    # would only break search, so they are left alone.
+    risky = censor.found(" ".join((hook, title, desc)))
+    if risky:
+        print(f"  metadata: masked risky words in the copy: {', '.join(risky)}")
+    hook = censor.mask(hook)
+    title = censor.mask(title)
+    desc = censor.mask(desc)
 
     return {"hook": hook, "title": title, "description": desc,
             "youtube_tags": tags[:15], "punchline_words": punchline, "mood": mood,

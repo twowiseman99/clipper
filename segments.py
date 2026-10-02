@@ -14,6 +14,7 @@ platform. Boundaries snap to word edges so cuts never land mid-word.
 """
 import os
 import random
+import sys
 
 MIN_GAP = 30.0  # §3.5: minimum seconds between allocated segments
 # YouTube heatmaps always peak at t=0 (everyone "watches" the opening), so the
@@ -191,6 +192,25 @@ Return JSON:
   ]
 }}"""
 
+# Appended to TOPIC_USER only when the caller knows what the clip is for. The
+# transcript says what was said; it does not say which moment the person asking
+# actually wants. Without this the picker optimises for whatever peaks
+# emotionally, which is how a speech about Palestine at a summit comes back as
+# a passage about a boarding school.
+TOPIC_CONTEXT = """
+
+KONTEKS DARI YANG MINTA KLIP (prioritas TERTINGGI, di atas aturan 4):
+\"\"\"{context}\"\"\"
+
+- Segmen yang dipilih WAJIB tentang konteks ini. Cari bagian transkrip yang
+  benar-benar membahasnya, bukan bagian yang kebetulan paling emosional.
+- Kalau konteksnya disinggung di beberapa tempat, ambil yang paling langsung
+  dan paling tegas membahasnya.
+- Hook WAJIB nyambung ke konteks ini.
+- Kalau SAMA SEKALI tidak ada bagian yang membahas konteks ini, baru pilih
+  segmen terbaik secara umum. Jangan memaksakan kaitan yang tidak ada di
+  transkrip."""
+
 
 def compress_transcript(words, bucket=8.0):
     """Group word list into ~`bucket`-second timestamped lines.
@@ -218,13 +238,18 @@ def _snap_start(words, target):
     return min(starts) if starts else None
 
 
-def pick_topical_segments(words, platform, count, existing=(), video_duration=None):
+def pick_topical_segments(words, platform, count, existing=(), video_duration=None,
+                          context=None):
     """LLM-chosen segments that begin and end on topic boundaries.
 
     Returns [{start, end, topic, hook, reason_end}] — already snapped to word
     edges, duration-validated, gap-checked and deduped against `existing`.
     Returns [] if the model is unreachable or proposes nothing usable, so the
     caller can fall back to heatmap selection.
+
+    `context` is what the person asking wants the clip to be about. A long
+    source usually contains several good moments, and only the caller knows
+    which one is the point; without it the model picks whichever peaks hardest.
     """
     import ai
 
@@ -235,12 +260,19 @@ def pick_topical_segments(words, platform, count, existing=(), video_duration=No
     transcript = compress_transcript(words)
     if not transcript:
         return []
+    prompt = TOPIC_USER.format(transcript=transcript[:60000], count=count,
+                               lo=lo, hi=hi)
+    if context and context.strip():
+        prompt += TOPIC_CONTEXT.format(context=context.strip()[:1000])
     try:
-        out = ai.chat_json(
-            TOPIC_SYSTEM,
-            TOPIC_USER.format(transcript=transcript[:60000], count=count, lo=lo, hi=hi),
-        )
-    except Exception:
+        out = ai.chat_json(TOPIC_SYSTEM, prompt)
+    except Exception as exc:
+        # Swallowing this silently made a rate-limited router look like a
+        # transcript with nothing worth clipping: the caller fell back to the
+        # heatmap and the user got a clip off the wrong part of the video with
+        # no hint why. Say which one it was.
+        print("  segments: topical pick failed (%s: %s)"
+              % (type(exc).__name__, str(exc)[:200]), file=sys.stderr)
         return []
 
     taken = [tuple(e) for e in existing]

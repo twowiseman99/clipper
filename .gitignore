@@ -12,6 +12,8 @@ media/
 *.heatmap.json
 jobs/
 reports/
+# render scratch — removed in a finally, but a killed render leaves it behind
+temp_subs_*/
 .job.lock
 
 __pycache__/

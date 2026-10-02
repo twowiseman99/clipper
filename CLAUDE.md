@@ -1,5 +1,8 @@
 # Clipper — working notes
 
+Project #1 of **Oden Tal Company**. Studio charter, divisions, and the ship
+gate live in `docs/ODEN_TAL_COMPANY.md` — read it before taking on new scope.
+
 ## Deploy convention (standing rule)
 
 Every deploy ships with release notes. Add the release to `RELEASE_NOTES.md`
@@ -20,6 +23,28 @@ Three ways in, cheapest first:
     python edit.py preview FOOTAGE --hook "..."   # one local file, no services
     python job.py --list                          # catalogue, JSON
     python pipeline.py --dry-run                  # whole chain, uploads nothing
+
+## Before implementing anything new (standing rule)
+
+Check the installed skills first and say which ones apply and which do not.
+They exist because each one encodes a mistake already made on this project.
+
+| Doing | Read first |
+|---|---|
+| Hook, title, description copy | `short-video-hook-research` |
+| Cuts, transitions, visual polish | `short-video-editing-grammar` |
+| Any content/topic decision | `content-trend-research` |
+| Changing Python | `python-review-and-qa` |
+| About to say "done"/"fixed" | `verification-before-completion` |
+| Multi-step feature | `writing-plans`, then `brainstorming` |
+| Acting on review feedback | `receiving-code-review` |
+
+Rule: load the skill only when it changes what you do. Naming a skill without
+following it is worse than not loading it, because it implies a check happened.
+State plainly when a skill adds nothing to the task at hand.
+
+Source repos are mirrored at `~/skill-sources/` (superpowers, agency-agents,
+gstack, awesome-agent-skills) for pulling further material without re-cloning.
 
 ## House rules
 

@@ -5,6 +5,7 @@ Config from clipper/.env (NINEROUTER_BASE_URL, NINEROUTER_API_KEY).
 """
 import json
 import os
+import sys
 import time
 
 import requests
@@ -28,16 +29,29 @@ _load_env()
 BASE_URL = os.environ.get("NINEROUTER_BASE_URL", "http://localhost:20128/v1")
 API_KEY = os.environ.get("NINEROUTER_API_KEY", "")
 MODEL = os.environ.get("NINEROUTER_MODEL", "ds/deepseek-v4-pro")
+# When the primary model is rate-limited, the work is not wrong — the queue is
+# full. Swapping to a second combo costs one retry and saves the whole job.
+FALLBACK_MODEL = os.environ.get("NINEROUTER_FALLBACK_MODEL", "")
 TIMEOUT = 120
 # PRD §5 (rate-limit awareness): a tunnel hiccup or a 5xx from the router is
 # transient, and one of them used to fail a whole task. Retry with backoff;
-# 4xx is a bad request and is raised straight away.
+# 4xx is a bad request and is raised straight away — except 429, which is a
+# queue signal rather than a malformed request and gets the same treatment as
+# a 5xx.
 RETRIES = int(os.environ.get("NINEROUTER_RETRIES", "3"))
 BACKOFF = float(os.environ.get("NINEROUTER_BACKOFF", "2.0"))
 
 
+def _is_rate_limit(exc):
+    """True for the router's 'slow down' signals, as opposed to a bad request."""
+    resp = getattr(exc, "response", None)
+    if resp is not None and resp.status_code == 429:
+        return True
+    return "429" in str(exc) or "rate" in str(exc).lower()
+
+
 def _post(system, user, model, temperature):
-    """POST one completion, retrying transport errors and 5xx with backoff."""
+    """POST one completion, retrying transport errors, 5xx and 429 with backoff."""
     last = None
     for attempt in range(RETRIES):
         try:
@@ -59,10 +73,18 @@ def _post(system, user, model, temperature):
         except requests.RequestException as e:
             last = e
         else:
-            if resp.status_code < 500:
+            # 429 is not a client mistake: the request was fine and the queue
+            # was not. Treat it like a 5xx so it reaches the backoff below
+            # rather than failing the job on the first try.
+            if resp.status_code == 429:
+                last = requests.HTTPError("429 rate limited by router",
+                                          response=resp)
+            elif resp.status_code < 500:
                 resp.raise_for_status()
                 return resp
-            last = requests.HTTPError(f"{resp.status_code} from router")
+            else:
+                last = requests.HTTPError(f"{resp.status_code} from router",
+                                          response=resp)
         if attempt < RETRIES - 1:
             time.sleep(BACKOFF * (2 ** attempt))
     raise last
@@ -70,8 +92,20 @@ def _post(system, user, model, temperature):
 
 def chat_json(system, user, model=MODEL, temperature=0.7):
     """One chat completion that must return a JSON object. Returns parsed dict.
-    Raises on transport error or unparseable output — caller decides fallback."""
-    resp = _post(system, user, model, temperature)
+
+    A rate-limited primary model falls back to FALLBACK_MODEL once before
+    giving up: the request was well formed, so a different queue is far more
+    likely to answer it than a fourth attempt at the same one.
+    Raises on transport error or unparseable output — caller decides fallback.
+    """
+    try:
+        resp = _post(system, user, model, temperature)
+    except Exception as e:
+        if not (_is_rate_limit(e) and FALLBACK_MODEL and FALLBACK_MODEL != model):
+            raise
+        print("  ai: %s rate limited, switching to %s" % (model, FALLBACK_MODEL),
+              file=sys.stderr)
+        resp = _post(system, user, FALLBACK_MODEL, temperature)
     # 9Router labels the reply text/event-stream with no charset, so requests
     # would guess ISO-8859-1 and mangle emoji — decode UTF-8 explicitly. It
     # also appends "data: [DONE]" after the JSON body, so raw_decode takes the

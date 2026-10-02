@@ -1,5 +1,98 @@
 # Clipper — Release Notes
 
+**v0.3.0 "editorial captions, stress from audio, b-roll search"** · branch `claude/code-clipper-review-v9e3im`
+10 files · new: `emphasis.py`, `broll.py`, `censor.py`, `bgm_add.py`, `docs/`
+
+_Dalmislave_
+
+---
+
+## What this is
+
+Project #1 of **Oden Tal Company** (`docs/ODEN_TAL_COMPANY.md`). This release
+adds a third caption style, derives word emphasis from the speaker's audio
+instead of guessing, sources b-roll from YouTube, and closes five security
+findings in the new code.
+
+## Editorial caption style
+
+`--caption-style editorial` draws serif captions with a per-line opaque plate
+(alpha 215) plus a 3px stroke, keeping the karaoke word highlight. Legibility
+needed all three layers: a shadow alone vanished over bright footage.
+
+The enlarged word is a **line break**, not an emphasis marker, so it is now
+always the last word of the phrase. Two earlier attempts (any stressed word,
+then any stressed word in the back half) both scrambled reading order —
+`tadi saya inget sudara` rendered as `tadi saya sudara / INGET`. Emphasis is
+carried by caps and colour, which do not move words.
+
+## Emphasis from audio
+
+`emphasis.py` scores each word on loudness and per-syllable pace relative to
+its **neighbours** rather than the whole clip, so quiet passages can still
+carry stress. Stopwords are blocked and at most 40% of a phrase can be marked
+(`CLIPPER_EMPH_MAX_SHARE`). `CLIPPER_EMPH_THRESHOLD` tunes how many words
+qualify; the current default of 1.15 marks ~32% of words, which may be too
+many — it is a taste call, not a bug.
+
+A failed audio read scores everything 0.0 and the captions fall back to the
+model's punchline pick, so emphasis never blocks a render.
+
+## B-roll search
+
+`broll.py` finds cutaway footage **on YouTube for the clip's own subject** —
+nothing is generated. Queries are built from proper nouns (the speaker's name
+anchors hook footage) plus content words from the phrase being spoken. The
+source video is excluded, and results are filtered by duration.
+
+## Security findings closed
+
+Five issues in code written this cycle:
+
+- `emphasis.py` — ffmpeg had no `timeout`; a stalled decode would hang the
+  render. Now bounded by `CLIPPER_EMPH_TIMEOUT` (120s) with a fail-soft return.
+- `emphasis.py` — `sys` was never imported, so the error path itself would
+  raise. Only reachable on failure, which is when it matters.
+- `broll.py` — video ids arrive over the network and were interpolated into a
+  URL unchecked. Now matched against `[A-Za-z0-9_-]{11}`; durations are
+  coerced with a guard.
+- `broll.py` — search terms came from a transcript and could contain a colon,
+  which would change what `ytsearchN:` requests. Terms are scrubbed.
+- `edit.py` — `accent_words` comes from the model and was lowercased without a
+  type check; a non-string item would raise mid-render.
+
+## Memory
+
+`_pcm()` returned a list of Python floats — 47.8 MB for an 82s clip, scaling
+with length. Now an `array('h')` with scaling folded into the reducer: 5.8 MB
+for identical output.
+
+## Also in this release
+
+- `censor.py` — masks profanity and anatomical terms with asterisks.
+- `bgm_add.py` — downloads background music tagged by mood; ducking is 0.8
+  under the hook and 0.2 under speech, 0.6s fade.
+- Zoom cycles on a cosine (~12s) because a single slow push across 82s is not
+  visible.
+- `docs/9ROUTER.md` — tunnel and model-routing notes, no keys.
+- `segments.py` — the topical picker's exception is printed instead of
+  swallowed. A transient router error had been presenting as "no good segment".
+
+## Still broken / not done
+
+- **BGM library has one track** (`inspiring_giants_league.mp3`, tagged
+  `inspiring`). Clips with mood `emotional` fall back to it and the log says
+  so. Needs more tracks per mood.
+- **Whisper mishears Indonesian names and particles** — `seolah` → `sololah`,
+  `saudara` → `sudara`. Captions show the mistake. No correction list yet.
+- **Punch-in cuts and flash transitions are not implemented.** B-roll search
+  works but insertion into the timeline does not.
+- `trace_path` in the newly installed codebase index misses cross-module
+  callers (it reported 1 caller for `score_words`; grep finds 3, including
+  `job.py:317`). Use `search_code` instead.
+
+---
+
 **v0.2.4 "camera that follows the speaker"** · branch `claude/code-clipper-review-v9e3im`
 1 commit · 5 files · `edit.py`: face-tracked camera (YuNet); `fetch.py`: SABR bypass
 

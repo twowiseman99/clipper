@@ -130,6 +130,25 @@ def probe_video(path):
     return _video_from_banner(out)
 
 
+def probe_has_audio(path):
+    """True when the file carries an audio stream.
+
+    Same `ffmpeg -i` banner as the probes above, for the same reason: a static
+    ffmpeg build often ships without ffprobe beside it. A b-roll with no audio
+    track has to be padded with silence instead of concatenated, so the caller
+    needs to know which it is before building the filter graph.
+    """
+    import subprocess
+
+    import edit
+    try:
+        out = subprocess.run([edit.FFMPEG, "-i", path], capture_output=True,
+                             text=True, timeout=30).stderr
+    except Exception:
+        return False
+    return any("Audio:" in ln for ln in out.splitlines() if "Stream #" in ln)
+
+
 def _human_bytes(n):
     return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
 
