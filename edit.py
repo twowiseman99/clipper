@@ -145,6 +145,20 @@ FILL_HEIGHT_FRAC = 0.62
 ZOOM = float(os.environ.get("CLIPPER_ZOOM", "1.0"))
 # Seconds for one in-and-out zoom cycle. 0 keeps the old single slow push.
 ZOOM_CYCLE = float(os.environ.get("CLIPPER_ZOOM_CYCLE", "12"))
+# Punch-in: a brief tighter crop on vocally stressed words. This is the
+# cheapest effect that reads as "edited" — the grammar is punch-in before
+# flash, flash before anything louder. Beats come from emphasis.py scores, so
+# a clip with no vocal emphasis gets no punches rather than invented ones.
+PUNCH = os.environ.get("CLIPPER_PUNCH", "1") not in ("0", "", "false")
+# How much tighter the crop gets at the peak. 0.06 is ~6%: visible on a phone
+# without looking like a zoom transition.
+PUNCH_AMOUNT = float(os.environ.get("CLIPPER_PUNCH_AMOUNT", "0.06"))
+# Seconds from start to finish of one punch, ramped in and out.
+PUNCH_HOLD = float(os.environ.get("CLIPPER_PUNCH_HOLD", "0.9"))
+# One effect per 8-12s is plenty for a 60-90s clip; closer together and the
+# clip reads as a template rather than an edit.
+PUNCH_MIN_GAP = float(os.environ.get("CLIPPER_PUNCH_MIN_GAP", "9"))
+PUNCH_MAX = int(os.environ.get("CLIPPER_PUNCH_MAX", "8"))
 # Follow the speaker's face when zooming, instead of staying centred. Detection
 # uses a YuNet face detector on the cropped 9:16 frame; no face, and the
 # camera stays centred. cv2 is imported lazily so the self-check runs without it.
@@ -795,17 +809,80 @@ def _zoom_parts(dur, fps):
     return n, z
 
 
-def _zoompan(dur, fps=FPS):
+def _punch_times(words, clip_start, dur, threshold=EMPH_THRESHOLD):
+    """Clip-relative times of the words worth punching in on.
+
+    The cut has to land on a real beat or it reads as a mistake, so the beat
+    comes from the same stress scores the captions use — loudness and pace,
+    not a timer. Spaced by PUNCH_MIN_GAP because one effect every 8-12s is
+    plenty for a 60-90s clip; more and it reads as a template.
+
+    Returns [] when nothing qualifies, which is a valid outcome: a clip with
+    no vocal emphasis should not be given invented emphasis.
+    """
+    if not PUNCH or dur <= 0:
+        return []
+    scored = []
+    for item in words or ():
+        if float(item.get("stress") or 0.0) < threshold:
+            continue
+        t = float(item.get("start") or 0.0) - clip_start
+        if 0.5 <= t <= dur - 0.5:
+            scored.append((t, float(item["stress"])))
+    # Strongest first, so when two beats are too close the louder one wins.
+    scored.sort(key=lambda p: -p[1])
+    kept = []
+    for t, _score in scored:
+        if all(abs(t - k) >= PUNCH_MIN_GAP for k in kept):
+            kept.append(t)
+        if len(kept) >= PUNCH_MAX:
+            break
+    return sorted(kept)
+
+
+def _punch_expr(times, fps):
+    """A zoom-factor term that adds a brief tighter crop at each time.
+
+    Shaped as a sum of cosine bumps rather than a step: an instant scale jump
+    on one frame reads as a glitch, while a ~PUNCH_HOLD ramp reads as a camera
+    move. Each bump is zero outside its own window, so they add without
+    interacting, and the expression stays valid for zoompan's single-pass
+    evaluator (no state, no branches beyond between()).
+    """
+    half = max(1, int(PUNCH_HOLD * fps / 2))
+    terms = []
+    for t in times:
+        c = int(t * fps)
+        a, b = c - half, c + half
+        # between() gates the bump; the cosine runs 0 -> 1 -> 0 across it.
+        terms.append(f"{PUNCH_AMOUNT:.4f}*between(on,{a},{b})"
+                     f"*(0.5-0.5*cos(2*PI*(on-{a})/{2 * half}))")
+    return "+".join(terms)
+
+
+def _zoompan(dur, fps=FPS, words=None, clip_start=0.0):
     """Centred push-in (no tracking), or None when zoom is off.
 
     The footage is normalised to `fps` first so the zoom spreads evenly across
     the full clip whatever the source's native rate: `on` then counts output
     frames at a known speed, and the target factor is reached exactly on the
     last frame. 1.0 is no zoom; a higher ZOOM pushes in that many percent.
+
+    Punch-ins ride on top of the base zoom instead of replacing it, so the
+    clip keeps its slow drift and gains a tighter crop on stressed words.
     """
+    punch = _punch_expr(_punch_times(words, clip_start, dur), fps)
     if ZOOM <= 1.0:
-        return None
+        if not punch:
+            return None
+        # No base zoom, but punches still need a zoompan pass to live in.
+        return (f"fps={fps},"
+                f"zoompan=z='1+{punch}':"
+                f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                f"d=1:fps={fps}:s={CANVAS_W}x{CANVAS_H}")
     _n, z = _zoom_parts(dur, fps)
+    if punch:
+        z = f"{z}+{punch}"
     return (f"fps={fps},"
             f"zoompan=z='{z}':"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
@@ -1198,7 +1275,11 @@ def render_clip(video_path, start, end, words, out_path, *,
             if ZOOM > 1.0:
                 if cover_v is None and FACE_TRACK:
                     zoom = _face_zoompan(video_path, start, end, dur, fps)
-                zoom = zoom or _zoompan(dur, fps)
+                zoom = zoom or _zoompan(dur, fps, words, start)
+            else:
+                # Punch-ins are independent of the slow drift: a clip with zoom
+                # off should still land a tighter crop on stressed words.
+                zoom = _zoompan(dur, fps, words, start)
             chains.append(f"[0:v]{cover_v or cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
                           + f"[{base_label}]")

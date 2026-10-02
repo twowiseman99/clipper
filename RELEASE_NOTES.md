@@ -1,5 +1,75 @@
 # Clipper — Release Notes
 
+**v0.3.1 "punch-in on the beat, transcript reviewed before it becomes a subtitle"** · branch `claude/code-clipper-review-v9e3im`
+4 files · new: `language.py`
+
+_Dalmislave_
+
+---
+
+## Punch-in cuts
+
+A brief tighter crop on vocally stressed words, riding on top of the existing
+slow zoom. Beats come from `emphasis.py` scores, not a timer — a cut that does
+not land on a beat reads as a mistake. Spacing is capped at one per 9s
+(`CLIPPER_PUNCH_MIN_GAP`), because one effect per 8-12s is plenty and more
+makes a clip read as a template.
+
+Measured on the Gontor clip: 5 punches at 11.5s, 23.0s, 34.2s, 55.0s, 67.0s —
+gaps of 11.5 / 11.2 / 20.8 / 12.0s, every one on a word that passed the stress
+threshold. Rendered frames put the subject at ~46% of frame height at rest and
+~52% at the peak of a punch: visible on a phone, not a zoom transition.
+
+Shaped as summed cosine bumps rather than a step, so each punch ramps in and
+out like a camera move. A clip with no vocal emphasis gets no punches rather
+than invented ones, and `CLIPPER_PUNCH=0` turns it off.
+
+## Transcript accuracy
+
+Three changes, in the order they run:
+
+**Beam search** (`CLIPPER_WHISPER_BEAM=5`) instead of greedy decoding.
+Measured on 245-290s of the Gontor speech against words the press transcripts
+confirm: greedy 8/12, beam 10/12 — it recovered `dibom`, `kurang`, `berdaya`.
+Costs 72s → 91s on this box, against a ~220s render.
+
+**Topic prompt** — the `--context` line is now also passed to the decoder, so
+names it has never seen in Indonesian stop being rewritten into common words
+that sound similar.
+
+**Language review** (`language.py`) — the remaining errors are lexical, not
+acoustic, so no decoder setting fixes them: `sololah` for `seolah`, `sudara`
+for `saudara`. A reviewer corrects those **in place, one word for one word**.
+
+Word timings must survive, because captions are drawn from them. The guards
+come from the `translation-quality` skill's anti-fabrication checklist
+(senshinji/claude-translation-skill), enforced in code rather than asked for in
+the prompt:
+
+- a reply of the wrong length is rejected outright — merged or split words
+  would desynchronise every later caption
+- a single word replaced by something unrelated is rejected (edit distance)
+- more than 25% of a long transcript changed is treated as a paraphrase and
+  discarded wholesale
+- any failure returns the transcript untouched
+
+On the real passage the reviewer changed exactly 2 of 48 words
+(`sudara-sudara` → `saudara-saudara`, `sololah` → `seolah`) with timings
+byte-identical. `CLIPPER_LANG_REVIEW=0` disables it.
+
+## Still broken / not done
+
+- **BGM library still has one track.** Mood tagging has nothing to choose from.
+- **Flash transitions and b-roll insertion are not implemented.** `broll.py`
+  finds footage; nothing places it on the timeline yet.
+- **The language reviewer costs one model call per job** and is not cached, so
+  a re-render re-reviews. The transcript sidecar caches the raw Whisper output,
+  not the reviewed version.
+- **Accuracy is measured on one passage of one video.** 10/12 on a 45s window
+  is not a 99% claim — it is one data point.
+
+---
+
 **v0.3.0 "editorial captions, stress from audio, b-roll search"** · branch `claude/code-clipper-review-v9e3im`
 10 files · new: `emphasis.py`, `broll.py`, `censor.py`, `bgm_add.py`, `docs/`
 

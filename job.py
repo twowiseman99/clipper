@@ -50,6 +50,9 @@ def _load_dotenv():
 _load_dotenv()
 
 OUT_DIR = os.environ.get("CLIPPER_JOB_OUT", os.path.join(_BASE, "jobs"))
+# Run a language reviewer over the transcript before captions are drawn. Costs
+# one model call per job and only ever corrects words in place.
+LANG_REVIEW = os.environ.get("CLIPPER_LANG_REVIEW", "1") not in ("0", "", "false")
 LOCK_PATH = os.environ.get("CLIPPER_JOB_LOCK", os.path.join(_BASE, ".job.lock"))
 # Seconds to wait for a job already running. Zero means refuse immediately,
 # which is the right answer over chat: a caller would rather be told to try
@@ -263,6 +266,7 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     import edit
     import emphasis
     import fetch
+    import language
     import metadata
     import segments as selector
     import transcribe
@@ -278,9 +282,19 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     opening = _fetch_one(opening_url, "opening") if opening_url else None
 
     _log("transcribing (cached beside the video)...")
-    words, info = transcribe.transcribe(content)
+    # The context line doubles as the decoder's topic prompt: it carries the
+    # speaker and place names Whisper's Indonesian model otherwise rewrites
+    # into similar-sounding common words.
+    words, info = transcribe.transcribe(content, topic_prompt=context or None)
     if not words:
         raise RuntimeError("no speech found in the content video")
+
+    # Beam search cuts mishearings but does not end them — the remaining ones
+    # are lexical, not acoustic (`sololah` for `seolah`). A language reviewer
+    # fixes those in place; word timings are required to survive untouched, and
+    # language.review returns the transcript unchanged if they would not.
+    if LANG_REVIEW:
+        words = language.review(words, context=context or "")
 
     lo, hi = selector.duration_window(platform)
     if start is not None:

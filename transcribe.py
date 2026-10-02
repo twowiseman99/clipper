@@ -9,6 +9,15 @@ import os
 import time
 
 MODEL_SIZE = os.environ.get("CLIPPER_WHISPER_MODEL", "small")
+# Beam search instead of greedy decoding. Measured on the Gontor speech
+# (245-290s) against words the press transcripts confirm: greedy got 8/12,
+# beam 5 got 10/12 — it recovered "dibom", "kurang" and "berdaya". Costs about
+# 25% more time (72s -> 91s on this box), which is cheap against a 220s render.
+BEAM_SIZE = int(os.environ.get("CLIPPER_WHISPER_BEAM", "5"))
+# Carrying prior text forward lets one mishearing bias the next segment. With
+# beam search on, dropping it measured no worse and removes that path.
+CONDITION_ON_PREVIOUS = os.environ.get(
+    "CLIPPER_WHISPER_CONDITION", "0") not in ("0", "", "false")
 # ponytail: module-level singleton, fine for single-worker; pool if we ever go multi-process
 _model = None
 
@@ -21,9 +30,15 @@ def _get_model():
     return _model
 
 
-def transcribe(video_path, language="id"):
+def transcribe(video_path, language="id", topic_prompt=None):
     """Transcribe one video. Returns (words, info). Caches to sidecar JSON —
-    re-running on the same file is a cheap read, keeping the stage idempotent."""
+    re-running on the same file is a cheap read, keeping the stage idempotent.
+
+    `topic_prompt` primes the decoder with names and terms the speech is about.
+    Whisper scores candidates against it, so a proper noun it has never met in
+    Indonesian ("Gontor", a politician's name) stops being rewritten into a
+    common word that sounds similar.
+    """
     sidecar = os.path.splitext(video_path)[0] + ".words.json"
     if os.path.exists(sidecar):
         with open(sidecar, encoding="utf-8") as f:
@@ -32,7 +47,11 @@ def transcribe(video_path, language="id"):
 
     model = _get_model()
     t0 = time.time()
-    segments, info = model.transcribe(video_path, language=language, word_timestamps=True)
+    segments, info = model.transcribe(
+        video_path, language=language, word_timestamps=True,
+        beam_size=BEAM_SIZE,
+        condition_on_previous_text=CONDITION_ON_PREVIOUS,
+        initial_prompt=topic_prompt or None)
     words = []
     for seg in segments:  # generator — transcription happens during iteration
         for w in seg.words or []:
@@ -42,6 +61,7 @@ def transcribe(video_path, language="id"):
         "language": info.language,
         "elapsed_sec": round(time.time() - t0, 1),
         "model": MODEL_SIZE,
+        "beam_size": BEAM_SIZE,
     }
     with open(sidecar, "w", encoding="utf-8") as f:
         json.dump({"words": words, "info": meta}, f, ensure_ascii=False)
