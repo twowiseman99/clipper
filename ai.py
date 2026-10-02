@@ -32,7 +32,10 @@ MODEL = os.environ.get("NINEROUTER_MODEL", "ds/deepseek-v4-pro")
 # When the primary model is rate-limited, the work is not wrong — the queue is
 # full. Swapping to a second combo costs one retry and saves the whole job.
 FALLBACK_MODEL = os.environ.get("NINEROUTER_FALLBACK_MODEL", "")
-TIMEOUT = 120
+# A transcript review sends 400+ words and waits for all of them back, which
+# ran past the old 120s ceiling and silently cost a render its caption fixes.
+# Configurable because the right value depends on the model behind the router.
+TIMEOUT = int(os.environ.get("NINEROUTER_TIMEOUT", "300"))
 # PRD §5 (rate-limit awareness): a tunnel hiccup or a 5xx from the router is
 # transient, and one of them used to fail a whole task. Retry with backoff;
 # 4xx is a bad request and is raised straight away — except 429, which is a

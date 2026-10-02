@@ -21,6 +21,7 @@ from collections import namedtuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+import broll_place
 import censor
 import emphasis
 
@@ -159,6 +160,19 @@ PUNCH_HOLD = float(os.environ.get("CLIPPER_PUNCH_HOLD", "0.9"))
 # clip reads as a template rather than an edit.
 PUNCH_MIN_GAP = float(os.environ.get("CLIPPER_PUNCH_MIN_GAP", "9"))
 PUNCH_MAX = int(os.environ.get("CLIPPER_PUNCH_MAX", "8"))
+# Flash: a brief white pop on the very strongest beats. Off by default —
+# "transitions serve the narrative, not the ego", and a punch-in already marks
+# the beat. Turn on with CLIPPER_FLASH=1 when a clip needs more lift.
+FLASH = os.environ.get("CLIPPER_FLASH", "0") not in ("0", "", "false")
+# Brightness added at the peak. 0.35 is clearly visible without blowing the
+# image out to white, which loses the speaker's face for those frames.
+FLASH_AMOUNT = float(os.environ.get("CLIPPER_FLASH_AMOUNT", "0.35"))
+FLASH_HOLD = float(os.environ.get("CLIPPER_FLASH_HOLD", "0.22"))
+# Harder cap than punches: a flash interrupts the image, so three in a 90s
+# clip is already a lot.
+FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "3"))
+# Ceiling on one ffmpeg render. Only ever trips on a stall — see the call site.
+RENDER_TIMEOUT = int(os.environ.get("CLIPPER_RENDER_TIMEOUT", "2400"))
 # Follow the speaker's face when zooming, instead of staying centred. Detection
 # uses a YuNet face detector on the cropped 9:16 frame; no face, and the
 # camera stays centred. cv2 is imported lazily so the self-check runs without it.
@@ -809,6 +823,36 @@ def _zoom_parts(dur, fps):
     return n, z
 
 
+def _flash_expr(times, dur):
+    """An `eq` brightness term that pops white briefly at each time, or "".
+
+    A flash is a brightness pulse, not a pasted white image: an overlay PNG has
+    fixed alpha, so fading one in and out means generating frames, while `eq`
+    evaluates an expression per frame for free. Shaped as a sharp attack and a
+    slower fall, which is what a camera flash does — a symmetric bump reads as
+    a lighting error instead of a beat.
+
+    Separate from punch-in by design: the grammar is hard cut, then punch-in,
+    then flash. Flashes are capped harder because they interrupt the image,
+    and they only ever land where a punch already landed, so the clip never
+    gains a beat that the audio did not have.
+    """
+    if not FLASH or not times:
+        return ""
+    terms = []
+    for t in times[:FLASH_MAX]:
+        # between() gates it; the ramp runs 1 -> 0 across FLASH_HOLD seconds.
+        a = max(0.0, t - FLASH_HOLD / 2)
+        b = min(dur, a + FLASH_HOLD)
+        if b <= a:
+            continue
+        terms.append(f"{FLASH_AMOUNT:.3f}*between(t,{a:.3f},{b:.3f})"
+                     f"*pow(1-(t-{a:.3f})/{b - a:.4f},2)")
+    if not terms:
+        return ""
+    return "+".join(terms)
+
+
 def _punch_times(words, clip_start, dur, threshold=EMPH_THRESHOLD):
     """Clip-relative times of the words worth punching in on.
 
@@ -1149,7 +1193,8 @@ def render_clip(video_path, start, end, words, out_path, *,
                 bitrate=BITRATE, preset=PRESET, threads=THREADS,
                 caption_style=CAPTION_STYLE, accent_words=(),
                 frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE,
-                hook_style=HOOK_STYLE, intro=None, intro_seconds=None):
+                hook_style=HOOK_STYLE, intro=None, intro_seconds=None,
+                inserts=()):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -1258,6 +1303,15 @@ def render_clip(video_path, start, end, words, out_path, *,
             inputs += ["-stream_loop", "-1", "-t", f"{dur + intro_dur}",
                        "-i", os.path.abspath(bgm_path)]
         first_overlay_idx = base + (1 if bg_video else 0) + (1 if bgm_path else 0)
+        # B-roll cutaways are inputs too, placed before the caption PNGs so the
+        # captions composite on top of them: an insert that covered the subtitle
+        # would hide the line the viewer is reading.
+        ins = [i for i in (inserts or ())
+               if i and i.get("path") and os.path.exists(i["path"])]
+        insert_base = first_overlay_idx
+        for i in ins:
+            inputs += ["-i", os.path.abspath(i["path"])]
+        first_overlay_idx += len(ins)
         for ov in overlays:
             inputs += ["-i", os.path.basename(ov.path)]  # cwd is tmp_dir
 
@@ -1271,6 +1325,7 @@ def render_clip(video_path, start, end, words, out_path, *,
             # push-in over it stays centred; tracking inside an already-tracked
             # window would just fight it.
             cover_v = _pan_cover(video_path, start, end) if FACE_TRACK else None
+            punches = _punch_times(words, start, dur)
             zoom = None
             if ZOOM > 1.0:
                 if cover_v is None and FACE_TRACK:
@@ -1280,8 +1335,12 @@ def render_clip(video_path, start, end, words, out_path, *,
                 # Punch-ins are independent of the slow drift: a clip with zoom
                 # off should still land a tighter crop on stressed words.
                 zoom = _zoompan(dur, fps, words, start)
+            # Flashes land on beats the punches already chose, so the clip never
+            # gains emphasis the audio did not have.
+            flash = _flash_expr(punches, dur)
             chains.append(f"[0:v]{cover_v or cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
+                          + (f",eq=brightness='{flash}':eval=frame" if flash else "")
                           + f"[{base_label}]")
         elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
@@ -1315,14 +1374,28 @@ def render_clip(video_path, start, end, words, out_path, *,
             chains.insert(0, f"[{intro_idx}:v]{cover},setsar=1[intro]")
             chains.append("[intro][vmain]concat=n=2:v=1:a=0[v0]")
 
+        # Cutaways go on before the captions, and their windows are shifted by
+        # the intro: the times come from the transcript, which knows nothing
+        # about the hook footage concatenated in front of it.
+        ins_label = "[v0]"
+        for n, item in enumerate(ins):
+            nxt = f"[bi{n}]"
+            chains.append(broll_place.overlay_chain(
+                ins_label, insert_base + n,
+                float(item["start"]) + intro_dur,
+                float(item["end"]) + intro_dur, nxt))
+            ins_label = nxt
+
         for i, ov in enumerate(overlays):
-            src_label = f"[v{i}]"
+            src_label = ins_label if i == 0 else f"[v{i}]"
             dst_label = f"[v{i + 1}]"
             chains.append(
                 f"{src_label}[{first_overlay_idx + i}:v]"
                 f"overlay={ov.x}:{ov.y}:enable='between(t,{ov.t_start:.3f},{ov.t_end:.3f})'"
                 f"{dst_label}")
-        vlabel = f"[v{len(overlays)}]"
+        # With no caption overlays the insert chain is the last video stage, so
+        # the output label has to come from it or the cutaways are discarded.
+        vlabel = f"[v{len(overlays)}]" if overlays else ins_label
 
         total = dur + intro_dur
         if intro:
@@ -1393,7 +1466,12 @@ def render_clip(video_path, start, end, words, out_path, *,
                 "-c:a", "aac", "-b:a", "128k",
                 "-threads", str(threads), "-movflags", "+faststart",
                 os.path.abspath(out_path)])
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_dir)
+        # A generous ceiling, not a performance target: a 90s clip renders in
+        # ~220s on this box, so 40 minutes only ever trips on a stall. Without
+        # it a wedged ffmpeg holds the job lock forever and every later request
+        # is told the renderer is busy.
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_dir,
+                              timeout=RENDER_TIMEOUT)
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[:600]}")
         return out_path
@@ -1558,7 +1636,8 @@ if __name__ == "__main__":
                  "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=8",
                  "-f", "lavfi", "-i", "sine=frequency=180:duration=8",
                  "-c:v", CODEC, "-pix_fmt", "yuv420p", "-c:a", "aac",
-                 "-shortest", vid], capture_output=True, text=True)
+                 "-shortest", vid], capture_output=True, text=True,
+                timeout=600)
             if gen.returncode != 0:
                 print(f"smoke skipped: ffmpeg cannot generate footage "
                       f"({gen.stderr.strip()[:120]})")

@@ -38,6 +38,12 @@ _STEMS = (
     ("genosida", 4),     # geno*ida
     ("teroris", 3),      # ter*ris
     ("bom", 1),          # b*m
+    # Attack words, which a political clip leans on constantly. Two entries
+    # because meN-/peN- turn the s into ny (serang -> menyerang), so the bare
+    # stem is no longer in the word to find. "serangga" and "serangkaian" do
+    # not match: the closed suffix list means a stem must end the word.
+    ("serang", 3),       # ser*ng, diserang, serangan
+    ("nyerang", 4),      # menyerang, penyerangan
     ("ledak", 3),        # led*k
     ("sadis", 3),
     ("siksa", 3),
@@ -187,7 +193,12 @@ _SUFFIX = r"(?:an|nya|kan|ku|mu|lah|kah|es|s|ed|ing)?\b"
 # Stems that only ever appear with a prefix attached must not fire bare — "sabu"
 # inside "kesabu" is a coincidence, while "dibantai" is not. These require a
 # real word boundary on both sides, no prefix allowed.
-_STRICT = {"sabu", "bom", "mati", "sex", "gore", "meth", "weed", "kys"}
+#
+# "bom" was in this set and so "dibom" shipped unmasked in a clip about Gaza,
+# which is exactly the word that needed masking. It is safe to allow prefixes:
+# the closed suffix list means "bombardir", "bomber" and "bombai" still do not
+# match, because none of them end at the stem.
+_STRICT = {"sabu", "mati", "sex", "gore", "meth", "weed", "kys"}
 
 _COMPILED = tuple(
     (re.compile(r"\b" + ("" if stem in _STRICT else _PREFIX)
@@ -266,9 +277,22 @@ def _selfcheck():
                   "digital", "kapital", "titik", "kampung", "kampus",
                   "identitas", "ideologi", "membaca", "sangat", "sangka",
                   "sanggup", "tiket", "cocok", "cokelat", "dokter",
-                  "bolos", "bola", "horor", "horizon", "policy"):
+                  "bolos", "bola", "horor", "horizon", "policy",
+                  # Added with the attack stems: "serang" must not fire inside
+                  # an insect or a series, and allowing prefixes on "bom" must
+                  # not reach "bombardir".
+                  "serangga", "serangkaian", "bombardir", "seruan", "seram",
+                  "berseru", "serangga di taman"):
         got = mask(clean)
         assert got == clean, f"false positive: {clean!r} -> {got!r}"
+
+    # The words this clip actually says. "dibom" and "diserang" shipped
+    # unmasked once, so they are asserted rather than assumed.
+    for word, want in (("dibom", "dib*m"), ("diserang", "diser*ng"),
+                       ("menyerang", "menyer*ng"), ("serangan", "ser*ngan"),
+                       ("penyerangan", "penyer*ngan"),
+                       ("dibantai", "dibant*i")):
+        assert mask(word) == want, (word, mask(word))
 
     assert mask("") == ""
     assert mask(None) is None

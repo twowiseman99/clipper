@@ -46,6 +46,29 @@ State plainly when a skill adds nothing to the task at hand.
 Source repos are mirrored at `~/skill-sources/` (superpowers, agency-agents,
 gstack, awesome-agent-skills) for pulling further material without re-cloning.
 
+## Tuned settings (what the knobs are set to and why)
+
+These live in `.env` on the box. Recorded here because the values are decisions,
+not defaults: each one is the result of watching a rendered clip and changing it.
+
+| Setting | Value | Why |
+|---|---|---|
+| `CLIPPER_PAN` | `0` | Camera movement was distracting on talking-head footage. |
+| `ZOOM_CYCLE` | `12` | One slow zoom per ~12s; faster reads as a wobble. |
+| `CLIPPER_CAPTION_STYLE` | `editorial` | Plate alpha 215 + 3px stroke for legibility. Karaoke kept. |
+| hook font | `64` | Larger wrapped to three lines and hit the UI band. |
+| `CLIPPER_EMPH_THRESHOLD` | `1.15` | Tunes how many words `emphasis.py` uppercases. |
+
+Two traps worth knowing before you restyle captions:
+
+- The enlarged word must be the **last** word of its phrase. Anywhere else and
+  the reading order scrambles, because the big word pulls the eye first.
+- BGM runs at 80% through the hook, then ducks to 20% under speech with a 0.6s
+  fade. B-roll audio is muted in the hook so two voices never overlap.
+
+BGM files live at `/home/ubuntu/background_music/<mood>_<name>.mp3`, added with
+`bgm_add.py --mood X <url>`.
+
 ## House rules
 
 - Every module has a `__main__` self-check. Run the ones you touched; they are

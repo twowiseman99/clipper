@@ -29,6 +29,7 @@ import re
 import sys
 
 import ai
+import glossary
 
 # Hard ceiling on how much of a transcript may change. A reviewer rewriting
 # half the words is not correcting mishearings, it is paraphrasing, and the
@@ -74,18 +75,37 @@ def _edit_ratio(a, b):
     return 1.0 - difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-def review(words, context="", **kwargs):
+def review(words, context="", learn=True, status=None, **kwargs):
     """Return `words` with mishearings corrected, timings untouched.
+
+    Runs the dictionary first: names already corrected twice are applied
+    without a model call, so a recurring mishearing stops being re-litigated
+    every render. Whatever the reviewer then fixes is recorded, which is how
+    entries get there in the first place.
 
     Returns the input unchanged on any failure or any sign the reviewer did not
     follow the one-for-one rule. Captions with a known mishearing are a
     cosmetic problem; captions desynchronised from the audio are a broken clip,
     so every ambiguous case resolves to "leave it alone".
+
+    Pass a dict as `status` to find out WHICH of those happened. Failing soft is
+    correct — one unreachable model should not cost a whole render — but failing
+    soft and silently is not: a clip shipped with "sololah" in the captions and
+    the only trace was a stderr line nobody read. The caller fills in
+    status["ok"] and status["reason"] and can surface it beside the result.
     """
+    def _done(ok, reason=""):
+        if status is not None:
+            status["ok"] = ok
+            status["reason"] = reason
+        return None
+
     items = list(words or ())
     if not items:
+        _done(True, "no words")
         return items
 
+    items, _n = glossary.apply(items)
     original = [str(w.get("word", "")) for w in items]
     prompt = INSTRUCTIONS % (len(original), context or "(tidak diberikan)",
                              len(original), " ".join(original))
@@ -97,17 +117,21 @@ def review(words, context="", **kwargs):
     except Exception as exc:
         print("language: review unavailable (%s: %s)"
               % (type(exc).__name__, exc), file=sys.stderr)
+        _done(False, "model unreachable (%s)" % type(exc).__name__)
         return items
 
     fixed = out.get("words")
     if not isinstance(fixed, list):
         print("language: reviewer returned no word list", file=sys.stderr)
+        _done(False, "reviewer returned no word list")
         return items
     if len(fixed) != len(original):
         # The one guarantee the whole design rests on. A different length means
         # words were merged or split, and every later timing would be wrong.
         print("language: length mismatch (%d in, %d back) — transcript kept"
               % (len(original), len(fixed)), file=sys.stderr)
+        _done(False, "length mismatch (%d in, %d back)"
+              % (len(original), len(fixed)))
         return items
 
     changes = []
@@ -131,10 +155,13 @@ def review(words, context="", **kwargs):
         print("language: %d/%d words rewritten (%.0f%%) — looks like a "
               "paraphrase, transcript kept"
               % (len(changes), len(original), share * 100), file=sys.stderr)
+        _done(False, "%d/%d words rewritten (%.0f%%) — looks like a paraphrase"
+              % (len(changes), len(original), share * 100))
         return items
 
     if not changes:
         print("language: no mishearings found", file=sys.stderr)
+        _done(True, "no mishearings found")
         return items
 
     out_items = [dict(w) for w in items]
@@ -144,12 +171,26 @@ def review(words, context="", **kwargs):
           % (len(changes),
              ", ".join("%s->%s" % (w, n) for _i, w, n in changes[:12])),
           file=sys.stderr)
+    if learn:
+        # Record only what survived every guard. The dictionary is a cache of
+        # accepted decisions, so a correction that was rejected above must not
+        # reach it through the back door.
+        glossary.record([(was, now) for _i, was, now in changes])
+    _done(True, "%d fixed" % len(changes))
     return out_items
 
 
 if __name__ == "__main__":
     # Offline check: the guards, with a stubbed reviewer. No model needed.
+    # glossary is stubbed both ways so a self-check neither reads nor writes
+    # the real dictionary on this box.
+    import functools
+
     real = ai.chat_json
+    real_apply, real_record = glossary.apply, glossary.record
+    glossary.apply = lambda words, *a, **k: (list(words), 0)
+    glossary.record = lambda *a, **k: 0
+    review = functools.partial(review, learn=False)
     try:
         base = [{"word": w, "start": i * 0.4, "end": i * 0.4 + 0.3}
                 for i, w in enumerate("tadi saya inget sudara kita".split())]
@@ -206,3 +247,4 @@ if __name__ == "__main__":
         print("language.py self-check OK")
     finally:
         ai.chat_json = real
+        glossary.apply, glossary.record = real_apply, real_record

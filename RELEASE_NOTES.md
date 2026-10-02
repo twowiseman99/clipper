@@ -1,5 +1,107 @@
 # Clipper — Release Notes
 
+**v0.4.0 "cutaways you can actually see, and failures that say so"** · branch `claude/code-clipper-review-v9e3im`
+6 files · new: `broll_place.py`, `glossary.py`
+
+_Dalmislave_
+
+---
+
+## B-roll cutaways, mid-clip
+
+The clip now cuts away to real footage while the speaker keeps talking. The
+insert is a timed overlay, not a concat: audio runs underneath untouched, so
+nothing of the speech is lost.
+
+Footage is searched on YouTube and never generated. Four gates stand between a
+search result and the frame, and each one exists because something got through:
+
+1. **Repeated names only.** A name has to recur at least twice. A one-off
+   sentence-case capital — "Apalagi" at the start of a sentence — was read as a
+   name and cut a Palestine clip to cartoon game art.
+2. **Trusted spelling.** Names from `--context` are treated as correct; names
+   from the transcript must snap to one of them (edit distance ≤ 0.2) or they
+   are dropped rather than searched. `Gontar` searches as `Gontor`; `Gorontalo`
+   stays `Gorontalo`, because it is a different place and 0.34 wrongly merged
+   them.
+3. **Title relevance.** The result's title must carry one of the search words.
+4. **Credibility floor** (`broll.credible`): min 20k views, verified channel or
+   50k+ followers, uploaded within four years, and a title free of
+   game/animasi/AI/hoax/trailer markers. A missing upload date is a rejection,
+   not a pass.
+
+On the Gontor clip the floor rejected three candidates with reasons: 8,046 views
+below the minimum, 1,606 days old past the 1,460 ceiling, and an unverified
+channel with 684 followers.
+
+### Stressed words open a window too
+
+A name alone searches the subject in the abstract and returns more podium
+footage — which is what the clip is already showing. The moment the speech
+stresses **dibom**, **diserang**, **dibantai**, **mengungsi** or **kelaparan**,
+the viewer is picturing the event, and the query becomes the subject plus that
+action: `Palestina` + `dibom serangan` returns news coverage of what is being
+described.
+
+The action list is hand-written and closed, 19 entries. Not a model call: a
+wrong guess spends a download and puts unrelated footage on screen, and a closed
+list cannot drift onto an arbitrary word.
+
+### Hold and spacing
+
+A cutaway holds **3.5s** (`CLIPPER_BROLL_HOLD`), up to **5 per clip**, no closer
+than **9s** apart. The first version held 2.2s and the operator could not find
+it on playback — it read as a glitch rather than a shot. 9s is the floor the
+editing-grammar skill sets at one effect per 8-12s.
+
+## Failures now travel with the result
+
+`job.py` returns a `warnings` list. Failing soft is correct — one unreachable
+model should not cost a whole render — but failing soft and silently is not.
+
+A clip shipped with `sololah` burned into its captions because the transcript
+reviewer timed out and the only evidence was one line on stderr. Now:
+
+```json
+"warnings": ["transcript review skipped: model unreachable (ReadTimeout)
+              — captions are raw Whisper output"]
+```
+
+`language.review()` takes an optional `status` dict and fills in which guard
+fired: model unreachable, length mismatch, paraphrase rejected, or clean.
+
+The reviewer's timeout went from a hardcoded 120s to `NINEROUTER_TIMEOUT`,
+default 300s. A 400-word transcript round trip did not fit in 120s.
+
+## Censor: two words that should never have shipped
+
+`dibom` and `diserang` were passing through unmasked — the two words this clip
+leans on hardest.
+
+`bom` sat in `_STRICT`, the set of stems that match only bare with no prefix
+allowed. The intent was to keep "bom" out of "bombardir"; the effect was that
+`dibom` sailed past. And `serang` was not in the stem list at all.
+
+Both fixed, and the reason prefixes are safe here is the closed suffix list: a
+stem must END the word, so `bombardir`, `serangga` (an insect) and
+`serangkaian` stay clean. Indonesian meN-/peN- also mutates the first letter, so
+`nyerang` is a second entry covering `menyerang` and `penyerangan`.
+
+Verified both directions in the self-check — the masked forms are asserted, not
+assumed, and 60+ innocent words are checked for false positives.
+
+## Still broken
+
+- **Transcript accuracy is not measured end to end.** 10/12 words on one 45s
+  passage is one data point, not a 99% claim.
+- **The action list is Indonesian political vocabulary only.** A clip about
+  something else gets name-driven cutaways and nothing more.
+- **Cutaway placement is not verified automatically.** Finding the insert in a
+  delivered clip still means extracting frames and looking at them. A reported
+  insert at 50s was actually at 60s, and only frame extraction caught it.
+
+---
+
 **v0.3.1 "punch-in on the beat, transcript reviewed before it becomes a subtitle"** · branch `claude/code-clipper-review-v9e3im`
 4 files · new: `language.py`
 

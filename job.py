@@ -53,6 +53,9 @@ OUT_DIR = os.environ.get("CLIPPER_JOB_OUT", os.path.join(_BASE, "jobs"))
 # Run a language reviewer over the transcript before captions are drawn. Costs
 # one model call per job and only ever corrects words in place.
 LANG_REVIEW = os.environ.get("CLIPPER_LANG_REVIEW", "1") not in ("0", "", "false")
+# Search YouTube for b-roll and cut away to it mid-clip. Off by default: it adds
+# a download per insert, and a clip without cutaways is still a clip.
+BROLL_INSERT = os.environ.get("CLIPPER_BROLL_INSERT", "0") not in ("0", "", "false")
 LOCK_PATH = os.environ.get("CLIPPER_JOB_LOCK", os.path.join(_BASE, ".job.lock"))
 # Seconds to wait for a job already running. Zero means refuse immediately,
 # which is the right answer over chat: a caller would rather be told to try
@@ -258,6 +261,108 @@ def _delivery_copy(path, max_mb):
     return small
 
 
+def _gather_inserts(seg_words, seg_start, dur, context, source_path):
+    """Search, download and cut b-roll for this segment. [] on any failure.
+
+    Footage is searched on YouTube, never generated: the clips have to be real
+    material on the same subject. Each stage is wrapped because all of them talk
+    to something outside this box — the network, yt-dlp, ffmpeg — and none of
+    them failing is a reason to lose the clip.
+    """
+    try:
+        import broll
+        import broll_place
+        import edit
+        import fetch
+
+        text = " ".join(str(w.get("word", "")) for w in seg_words)
+        # Only names the clip returns to: a one-off capital is usually
+        # sentence-case noise, and acting on it produced a cutaway to cartoon
+        # game art in a clip about Palestine.
+        repeated = broll.repeated_names(text, context)
+        # A name Whisper mis-hears ("Gontor" -> "Gontar") still has to search
+        # under the correct spelling, or the query finds unrelated footage
+        # instead of nothing. anchor_names() only trusts what the operator
+        # typed in --context; a mis-heard name with no match there is dropped,
+        # not guessed.
+        anchors = broll.anchor_names(context, text)
+        names = set()
+        for n in repeated:
+            fixed = anchors.get(n.lower())
+            if fixed:
+                names.add(fixed.lower())
+            elif n.lower() in {a.lower() for a in broll.proper_nouns(context or "")}:
+                names.add(n.lower())
+            # else: heard repeatedly but not in --context and not close to
+            # anything that is — no anchor to check it against, so it is
+            # dropped rather than searched under a possibly wrong spelling.
+        if not names:
+            return []
+        # The transcript still carries the mis-heard spelling, so matching on
+        # the trusted name alone would never fire. Accept a word when either
+        # its own spelling or its anchored spelling is a wanted name.
+        #
+        # Actions open a window too. A name alone searches the subject in the
+        # abstract and returns more podium footage; the moment a clip stresses
+        # "dibom" or "diserang", the viewer is picturing the event, and that is
+        # the shot worth cutting to. Actions are a closed list, so this cannot
+        # fire on arbitrary words.
+        def _wanted(word):
+            key = str(word).lower()
+            if key in names or anchors.get(key, "").lower() in names:
+                return True
+            return bool(broll.action_terms(key))
+
+        wins = broll_place.phrase_windows(
+            seg_words, seg_start, dur, terms_fn=_wanted)
+        if not wins:
+            return []
+
+        source_id = os.path.splitext(os.path.basename(source_path or ""))[0]
+        out = []
+        used = {source_id}
+        # The subject the clip keeps returning to, used to qualify action
+        # searches: "dibom" on its own could return any war footage, while
+        # "Palestina dibom" returns the event being talked about.
+        subject = sorted(names)[0] if names else ""
+        for t0, t1, heard_term in wins:
+            # Search under the trusted spelling, not whatever Whisper wrote at
+            # this exact word — that is the whole point of anchoring.
+            term = anchors.get(heard_term.lower(), heard_term)
+            actions = broll.action_terms(heard_term)
+            if actions and subject:
+                # News footage of the event, qualified by subject so the result
+                # belongs to this story rather than a similar one elsewhere.
+                terms = [subject.title(), actions[0]]
+            else:
+                terms = broll.insert_terms(term, context)
+            # relevant() filters the title; vetted() then probes each survivor
+            # for views, upload date and channel standing — the operator's
+            # rule that footage be recent, actually watched, and not a hoax or
+            # AI generation. Rejections are logged with a reason.
+            hits = broll.vetted(
+                broll.search(terms, exclude_ids=used, results=8), terms)
+            if not hits:
+                _log(f"b-roll: nothing credible for '{term}', skipping")
+                continue
+            hit = hits[0]
+            used.add(hit["id"])
+            paths = fetch.fetch("youtube", hit["url"], f"broll-{hit['id']}")
+            if not paths:
+                continue
+            cut = os.path.join(os.path.dirname(paths[0]),
+                               f"insert-{hit['id']}.mp4")
+            if not broll_place.prepare(paths[0], cut, seconds=t1 - t0,
+                                       canvas=(edit.CANVAS_W, edit.CANVAS_H)):
+                continue
+            out.append({"path": cut, "start": t0, "end": t1, "term": term,
+                        "title": hit.get("title", "")})
+        return out
+    except Exception as exc:
+        _log(f"b-roll unavailable ({type(exc).__name__}: {exc})")
+        return []
+
+
 def run(content_url, opening_url=None, hook=None, platform="youtube",
         start=None, seconds=None, mood=None, out=None, max_mb=0, context=None,
         copy_style=None, **style):
@@ -293,8 +398,14 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     # are lexical, not acoustic (`sololah` for `seolah`). A language reviewer
     # fixes those in place; word timings are required to survive untouched, and
     # language.review returns the transcript unchanged if they would not.
+    #
+    # The outcome is carried out to the result. Failing soft here is right, but
+    # a clip shipped with `sololah` in the captions and the only evidence was a
+    # stderr line, so the caller gets told rather than having to read logs.
+    review_status = {"ok": None, "reason": "disabled"}
     if LANG_REVIEW:
-        words = language.review(words, context=context or "")
+        words = language.review(words, context=context or "",
+                                status=review_status)
 
     lo, hi = selector.duration_window(platform)
     if start is not None:
@@ -342,13 +453,22 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     track, why = bgm.pick(mood or meta.get("mood"), key=f"job:{int(seg_start)}")
     _log(f"bgm: {why}")
 
+    # Cutaways: find footage on the same subject, cut it to length, and hand it
+    # over for the render. Every stage is allowed to come back empty — a clip
+    # with no b-roll is the current product, so nothing here may block a render.
+    inserts = _gather_inserts(seg_words, seg_start, seg_end - seg_start,
+                              context, content) if BROLL_INSERT else []
+    if inserts:
+        _log("b-roll: %s" % ", ".join(
+            "%s @%.0fs" % (i["term"], i["start"]) for i in inserts))
+
     out = out or os.path.join(
         OUT_DIR, f"clip_{int(time.time())}_{int(seg_start)}.mp4")
     _log(f"rendering {seg_end - seg_start:.0f}s...")
     edit.render_clip(content, seg_start, seg_end, seg_words, out,
                      hook=meta["hook"], bgm=track["path"] if track else False,
                      accent_words=meta.get("punchline_words") or (),
-                     intro=opening, **style)
+                     intro=opening, inserts=inserts, **style)
 
     small = _delivery_copy(out, max_mb)
     return {
@@ -368,6 +488,12 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         "mood": meta.get("mood"),
         "music": track["file"] if track else None,
         "attribution": (track or {}).get("attribution") or None,
+        # Anything that degraded the clip without failing the job. An empty
+        # list means every stage did its work; a non-empty one is the honest
+        # answer to "why does the caption say sololah".
+        "warnings": ([] if review_status.get("ok") is not False else
+                     ["transcript review skipped: %s — captions are raw "
+                      "Whisper output" % review_status.get("reason", "?")]),
         "elapsed_sec": round(time.time() - t0, 1),
     }
 
@@ -437,6 +563,11 @@ def main(argv=None):
     p.add_argument("--caption-style", dest="caption_style",
                    choices=("phrase", "karaoke", "editorial"))
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
+    p.add_argument("--broll", dest="broll", action="store_true", default=None,
+                   help="cut away to b-roll found on YouTube at phrases that "
+                        "name a person or place. Adds a download per insert")
+    p.add_argument("--flash", dest="flash", action="store_true", default=None,
+                   help="brief white pop on the strongest beats")
     p.add_argument("--wait", type=float, default=None,
                    help="seconds to wait if another job holds the host")
     p.add_argument("--max-mb", dest="max_mb", type=float, default=0,
@@ -458,6 +589,15 @@ def main(argv=None):
     style = {k: v for k, v in
              (("frame_mode", a.frame_mode), ("caption_style", a.caption_style),
               ("hook_style", a.hook_style)) if v}
+    # Both are read at import time by the modules that own them, so a CLI flag
+    # has to set the environment before those reads matter. Set here rather than
+    # threaded through run(): edit.py reads its own module constants.
+    if a.broll:
+        global BROLL_INSERT
+        BROLL_INSERT = True
+    if a.flash:
+        import edit as _edit
+        _edit.FLASH = True
     try:
         with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
             res = run(a.content, a.opening, hook=a.hook, platform=a.platform,

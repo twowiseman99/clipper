@@ -14,6 +14,8 @@ import os
 import re
 import subprocess
 import sys
+import datetime
+import difflib
 
 import fetch
 
@@ -38,11 +40,90 @@ _NOISE = {
 
 # Common openers that sentence-case capitalises. A first word in this set is
 # not treated as a name; anything else at position 0 is.
+#
+# This list is a filter, not a guarantee: `Apalagi` at the start of a sentence
+# got through an earlier version and sent a cutaway search after a word that
+# names nothing, which returned cartoon game art. Callers that act on the result
+# should also require the name to recur — see `repeated_names`.
 _SENTENCE_CASE = {
     "saya", "kita", "mereka", "kami", "para", "momen", "ini", "itu", "dia",
     "sebuah", "setelah", "ketika", "karena", "bahwa", "namun", "tapi", "dan",
     "video", "klip", "pidato", "mengapa", "kenapa", "bagaimana", "ribuan",
+    # Sentence openers and conjunctions that are not subjects.
+    "apalagi", "jangan", "kalau", "tetapi", "sebab", "sehingga", "maka",
+    "selain", "bahkan", "memang", "sebagai", "sementara", "meski", "meskipun",
+    "walaupun", "sedangkan", "supaya", "agar", "hingga", "sampai", "ketika",
+    "sekarang", "nanti", "kemudian", "akhirnya", "pertama", "kedua", "banyak",
+    "semoga", "mudah", "harus", "bisa", "akan", "sudah", "belum", "pernah",
+    "setiap", "seluruh", "segala", "beberapa", "sebagian", "masing",
+    # Verbs and adjectives that sentence-case turns into fake names.
+    "mendorong", "membela", "membantu", "melihat", "mengatakan", "berbicara",
+    "terima", "tolong", "mari", "ayo", "demi", "lewat", "tanpa", "dalam",
 }
+
+
+# Actions that carry their own footage. A name alone searches badly: "Palestina"
+# returns more speeches, which is what the clip already shows. "Palestina dibom"
+# returns news coverage of the event being described, which is the shot the
+# viewer is picturing while the speaker talks. Values are the search wording,
+# keyed by what the transcript might say.
+#
+# Deliberately a small hand-written list, not a model call. These are the words
+# a political clip actually stresses, and a wrong guess here spends a download
+# and puts unrelated footage on screen.
+_ACTION_TERMS = {
+    "dibom": "dibom serangan",
+    "bom": "dibom serangan",
+    "pemboman": "dibom serangan",
+    "diserang": "diserang serangan",
+    "serang": "diserang serangan",
+    "serangan": "diserang serangan",
+    "dibantai": "korban serangan",
+    "bantai": "korban serangan",
+    "dibunuh": "korban serangan",
+    "korban": "korban",
+    "mengungsi": "pengungsi",
+    "pengungsi": "pengungsi",
+    "kelaparan": "kelaparan krisis",
+    "hancur": "kehancuran reruntuhan",
+    "reruntuhan": "kehancuran reruntuhan",
+    "demonstrasi": "demonstrasi aksi",
+    "aksi": "demonstrasi aksi",
+    "bantuan": "bantuan kemanusiaan",
+    "kemanusiaan": "bantuan kemanusiaan",
+}
+
+
+def action_terms(phrase):
+    """Footage-bearing actions mentioned in `phrase`, as search wording.
+
+    Returns the search phrasing rather than the word that was said: the
+    transcript may carry any of several forms ("bom", "dibom", "pemboman") and
+    they all want the same footage.
+    """
+    out = []
+    for raw in re.findall(r"\w+", str(phrase or "").lower()):
+        term = _ACTION_TERMS.get(raw)
+        if term and term not in out:
+            out.append(term)
+    return out
+
+
+def repeated_names(*texts, minimum=2):
+    """Proper nouns that appear at least `minimum` times.
+
+    A cutaway is only worth searching for when the clip keeps returning to the
+    subject. A name mentioned once is usually sentence-case noise, and acting on
+    it is how a Palestine clip ended up cutting to cartoon game art.
+    """
+    counts = {}
+    for text in texts:
+        if not text:
+            continue
+        for name in proper_nouns(text):
+            counts[name] = counts.get(name, 0) + text.count(name)
+    return sorted((n for n, c in counts.items() if c >= minimum),
+                  key=lambda n: (-counts[n], n))
 
 
 def proper_nouns(*texts):
@@ -74,6 +155,45 @@ def proper_nouns(*texts):
                     continue
                 counts[word] = counts.get(word, 0) + 1
     return sorted(counts, key=lambda w: (-counts[w], w))
+
+
+def anchor_names(context, transcript, max_distance=0.2):
+    """Trusted spellings for search terms: context wins, transcript snaps to it.
+
+    Two sources disagree about how a name is spelled and they are not equal.
+    The context line is typed by the operator, so it is correct by definition.
+    The transcript is what Whisper heard, and it rewrites names it does not know
+    ("Gontor" into "Gontar", "Prabowo" into "Prabowa"). Searching the heard
+    spelling returns footage of something else entirely.
+
+    So: every context name is trusted as-is. A transcript name is kept only if
+    it is already close to a context name, in which case the CONTEXT spelling is
+    returned in its place. Transcript names with no anchor are dropped, because
+    an unanchored name cannot be checked against anything.
+
+    Returns {heard_or_typed: trusted_spelling}. Lowercase keys, original case
+    values, so a caller can map either direction.
+
+    This is deliberately narrow. It does not correct names the operator never
+    mentioned — there is nothing to correct them against, and guessing is how a
+    wrong name becomes a wrong cutaway.
+    """
+    trusted = proper_nouns(context or "")
+    out = {n.lower(): n for n in trusted}
+    if not trusted:
+        return out
+    for heard in proper_nouns(transcript or ""):
+        key = heard.lower()
+        if key in out:
+            continue
+        best, best_d = None, 1.0
+        for name in trusted:
+            d = 1.0 - difflib.SequenceMatcher(None, key, name.lower()).ratio()
+            if d < best_d:
+                best, best_d = name, d
+        if best is not None and best_d <= max_distance:
+            out[key] = best
+    return out
 
 
 def hook_terms(transcript, context="", speaker=""):
@@ -198,6 +318,162 @@ def search(terms, exclude_ids=(), results=RESULTS):
     return out
 
 
+def relevant(hits, terms, require=1):
+    """Keep only hits whose TITLE carries at least `require` of the terms.
+
+    yt-dlp returns whatever the search ranks, and the ranking does not care what
+    the clip is about: a query built from a bad term returned cartoon game art
+    for a speech about Palestine, and nothing downstream noticed. Checking the
+    title is a weak signal, but it is the only one available before downloading,
+    and it rejects the obvious mismatches.
+    """
+    wanted = []
+    for t in (terms or ()):
+        # Terms can be multi-word ("Palestina dibom"), and a title almost never
+        # carries the exact phrase. Match on the individual words instead, or
+        # every action-driven search gets filtered out before it is probed.
+        for word in re.findall(r"\w+", str(t).lower()):
+            if len(word) >= 4 and word not in wanted:
+                wanted.append(word)
+    if not wanted:
+        return []
+    out = []
+    for hit in hits or ():
+        title = str(hit.get("title", "")).lower()
+        if sum(1 for t in wanted if t in title) >= require:
+            out.append(hit)
+    return out
+
+
+# Credibility floor for cutaway footage. The operator's rule is that b-roll must
+# be recent, actually watched, and not a hoax or AI-generated — and none of that
+# can be read off a thumbnail, so these stand in for it:
+#   * a verified channel with a real following is accountable for what it posts,
+#     which is the closest available proxy for "not a hoax";
+#   * view count filters clips nobody has watched, where fabrications survive;
+#   * an age cap keeps the footage current rather than a decade-old reupload.
+# None of this detects AI footage directly. It raises the cost of a fake passing,
+# and the title screen below rejects the labels fakes advertise.
+MIN_VIEWS = int(os.environ.get("CLIPPER_BROLL_MIN_VIEWS", "20000"))
+MAX_AGE_DAYS = int(os.environ.get("CLIPPER_BROLL_MAX_AGE_DAYS", "1460"))
+MIN_FOLLOWERS = int(os.environ.get("CLIPPER_BROLL_MIN_FOLLOWERS", "50000"))
+# Titles that advertise synthetic or unverified footage. The operator forbids
+# generated footage outright, so anything self-labelling as such is rejected
+# before it is downloaded.
+_FAKE_MARKERS = (
+    "ai generated", "ai-generated", "generated by ai", "ai video", "veo",
+    "sora", "midjourney", "runway", "deepfake", "deep fake", "sintetis",
+    "animation", "animasi", "cartoon", "kartun", "game", "gameplay",
+    "simulation", "simulasi", "ilustrasi", "illustration", "cgi", "vfx",
+    "hoax", "hoaks", "rekayasa", "parodi", "parody", "prank", "fiksi",
+    "trailer", "film", "movie", "drama", "sinopsis", "review",
+)
+
+
+def credible(hit, min_views=None, max_age_days=None, min_followers=None):
+    """(True, "") when a hit clears the credibility floor, else (False, reason).
+
+    Returns the reason so a rejection is visible in the render log instead of
+    looking like an empty search.
+    """
+    min_views = MIN_VIEWS if min_views is None else min_views
+    max_age_days = MAX_AGE_DAYS if max_age_days is None else max_age_days
+    min_followers = MIN_FOLLOWERS if min_followers is None else min_followers
+
+    title = str(hit.get("title", "")).lower()
+    for marker in _FAKE_MARKERS:
+        if marker in title:
+            return False, f"title says '{marker}'"
+
+    try:
+        views = int(hit.get("view_count") or 0)
+    except (TypeError, ValueError):
+        return False, "view count unreadable"
+    if views < min_views:
+        return False, f"{views} views below {min_views}"
+
+    # A verified channel OR a large following: either is accountability. Both
+    # are absent on the reupload accounts that carry hoax footage.
+    verified = bool(hit.get("channel_is_verified"))
+    try:
+        followers = int(hit.get("channel_follower_count") or 0)
+    except (TypeError, ValueError):
+        followers = 0
+    if not verified and followers < min_followers:
+        return False, f"unverified channel with {followers} followers"
+
+    date = str(hit.get("upload_date") or "")
+    if len(date) == 8 and date.isdigit():
+        try:
+            age = (datetime.date.today()
+                   - datetime.date(int(date[:4]), int(date[4:6]),
+                                   int(date[6:8]))).days
+        except ValueError:
+            return False, f"upload date unreadable ({date})"
+        if age > max_age_days:
+            return False, f"{age} days old, over {max_age_days}"
+    elif max_age_days > 0:
+        # No date means the age rule cannot be applied, and the rule is the
+        # operator's. Unverifiable is treated as failing, not as passing.
+        return False, "no upload date"
+    return True, ""
+
+
+def probe_meta(video_id):
+    """Views, upload date and channel standing for one video. {} on failure.
+
+    The flat search does not carry an upload date, so this is a second request
+    per candidate — about 3 seconds. Paid once per insert, and only for hits
+    that already matched on title.
+    """
+    import yt_dlp
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extractor_args": {"youtube": {"player_client": ["web_embedded"]}},
+    }
+    if fetch.YTDLP_COOKIES:
+        opts["cookiefile"] = fetch.YTDLP_COOKIES
+    if not _VIDEO_ID.fullmatch(str(video_id or "")):
+        return {}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info("https://youtu.be/%s" % video_id,
+                                    download=False) or {}
+    except Exception as exc:
+        print("broll: probe failed for %s (%s: %s)"
+              % (video_id, type(exc).__name__, exc), file=sys.stderr)
+        return {}
+    return {k: info.get(k) for k in
+            ("view_count", "upload_date", "channel_is_verified",
+             "channel_follower_count", "title", "duration")}
+
+
+def vetted(hits, terms, limit=1, **kw):
+    """Hits that match on title AND clear the credibility floor, best first.
+
+    Ordered by view count: among clips that all pass, the most watched is the
+    one most likely to be the real footage of the event rather than a reupload.
+    """
+    out = []
+    for hit in relevant(hits, terms):
+        meta = probe_meta(hit.get("id"))
+        if not meta:
+            continue
+        merged = dict(hit)
+        merged.update({k: v for k, v in meta.items() if v is not None})
+        ok, why = credible(merged, **kw)
+        if not ok:
+            print("broll: rejected %r — %s" % (merged.get("title", "")[:60],
+                                               why), file=sys.stderr)
+            continue
+        out.append(merged)
+    out.sort(key=lambda h: -int(h.get("view_count") or 0))
+    return out[:limit]
+
+
 def probe_playable(path):
     """True if ffmpeg can decode a frame — guards against truncated downloads."""
     try:
@@ -211,12 +487,69 @@ def probe_playable(path):
 
 
 if __name__ == "__main__":
-    text = sys.argv[1] if len(sys.argv) > 1 else ""
-    ctx = sys.argv[2] if len(sys.argv) > 2 else ""
-    print("HOOK terms  :", hook_terms(text, ctx))
-    for hit in search(hook_terms(text, ctx), results=4):
-        print("   %-13s %5ss  %s" % (hit["id"], hit["duration"], hit["title"][:55]))
-    phrase = "mereka dibantai mereka dibom mereka diserang terus menerus"
-    print("INSERT terms:", insert_terms(phrase, ctx))
-    for hit in search(insert_terms(phrase, ctx), results=4):
-        print("   %-13s %5ss  %s" % (hit["id"], hit["duration"], hit["title"][:55]))
+    # Offline first: the credibility floor against real shapes from the field.
+    # No network, so this runs as a gate even when YouTube is unreachable.
+    today = datetime.date.today().strftime("%Y%m%d")
+    old_date = (datetime.date.today()
+                - datetime.timedelta(days=MAX_AGE_DAYS + 30)).strftime("%Y%m%d")
+
+    # The exact clip that shipped in v6 and should never have.
+    cartoon = {"title": "PUTING BELIUNG - Game Petualangan Animasi",
+               "view_count": 734778, "channel_is_verified": True,
+               "channel_follower_count": 5_000_000, "upload_date": today}
+    ok, why = credible(cartoon)
+    # Rejected on whichever marker is hit first — 'animasi' or 'game', both
+    # correct reasons. Asserting the exact marker would test the list's order.
+    assert not ok and ("game" in why or "animasi" in why), (ok, why)
+
+    low_reach = {"title": "Serangan Gaza Terbaru", "view_count": 50000,
+                 "channel_is_verified": False, "channel_follower_count": 100,
+                 "upload_date": today}
+    ok, why = credible(low_reach)
+    assert not ok and "unverified" in why, (ok, why)
+
+    too_old = {"title": "Serangan Gaza Terbaru", "view_count": 500000,
+               "channel_is_verified": True,
+               "channel_follower_count": 1_000_000, "upload_date": old_date}
+    ok, why = credible(too_old)
+    assert not ok and "old" in why, (ok, why)
+
+    few_views = {"title": "Serangan Gaza Terbaru", "view_count": 50,
+                 "channel_is_verified": True,
+                 "channel_follower_count": 1_000_000, "upload_date": today}
+    ok, why = credible(few_views)
+    assert not ok and "views" in why, (ok, why)
+
+    no_date = {"title": "Serangan Gaza Terbaru", "view_count": 500000,
+               "channel_is_verified": True,
+               "channel_follower_count": 1_000_000}
+    ok, why = credible(no_date)
+    assert not ok and "date" in why, (ok, why)
+
+    real = {"title": "Serangan Udara Israel Bombardir Gaza Tengah - Reuters",
+            "view_count": 500000, "channel_is_verified": True,
+            "channel_follower_count": 1_000_000, "upload_date": today}
+    ok, why = credible(real)
+    assert ok, why
+
+    # relevant() is a title filter and nothing more: it must NOT be mistaken
+    # for credibility, or the cartoon passes again.
+    picks = relevant([cartoon, real], ["Gaza"])
+    assert real in picks, picks
+    assert vetted([], ["Gaza"]) == []
+
+    print("broll.py self-check OK — game/old/low-reach/low-view/no-date "
+          "rejected, real footage kept")
+
+    if len(sys.argv) > 1:
+        text, ctx = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+        print("HOOK terms  :", hook_terms(text, ctx))
+        for hit in search(hook_terms(text, ctx), results=4):
+            print("   %-13s %5ss  %s"
+                  % (hit["id"], hit["duration"], hit["title"][:55]))
+        phrase = "mereka dibantai mereka dibom mereka diserang terus menerus"
+        print("INSERT terms:", insert_terms(phrase, ctx))
+        terms = insert_terms(phrase, ctx)
+        for hit in vetted(search(terms, results=8), terms, limit=3):
+            print("   VETTED %-13s %8s views  %s"
+                  % (hit["id"], hit.get("view_count"), hit["title"][:50]))
