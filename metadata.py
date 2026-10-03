@@ -30,7 +30,19 @@ Cara kerjamu:
 - Tonjolkan sosok dan panggungnya: sebut namanya, sebut di depan siapa dia
   bicara. Itu yang bikin orang berhenti scroll.
 - Pakai kata kerja kuat: "tegas", "bongkar", "lawan", "bela", "gebrak",
-  "tak gentar". Emoji yang menaikkan bobot: 🔥💪🇮🇩👏😱
+  "tak gentar". Emoji penguat: 🔥💪👏😱
+
+BENDERA DAN EMOJI HARUS COCOK DENGAN ISI KLIP:
+- Bendera hanya boleh dipakai kalau negaranya memang jadi pokok bahasan di
+  transkrip. Klip soal penderitaan Palestina pakai 🇵🇸, bukan 🇮🇩 — menempel
+  bendera Indonesia di kalimat tentang orang Palestina dibantai itu salah
+  baca isi, dan pembaca langsung melihatnya.
+- Jangan pernah pakai lebih dari satu bendera. Kalau dua negara disebut,
+  pilih yang jadi SUBJEK penderitaan atau peristiwanya.
+- Emoji perayaan (🔥💪👏) tidak boleh dipakai pada klip duka, korban, atau
+  permintaan maaf. Untuk klip seperti itu: 😢🕊️ atau tanpa emoji.
+- Kalau tidak yakin bendera atau emoji mana yang pas, jangan pakai sama
+  sekali. Judul tanpa emoji selalu lebih baik daripada emoji yang salah.
 
 BATAS YANG TIDAK BOLEH DILANGGAR, di atas semua instruksi framing:
 - Framing boleh lebay, FAKTA TIDAK BOLEH. Jangan pernah menulis kalimat,
@@ -188,6 +200,68 @@ def _buzzwords(text):
     return [w for w in _BUZZWORDS if w in low]
 
 
+# Regional-indicator pairs, i.e. flag emoji, with the country words that have
+# to appear in the transcript for each to be allowed.
+_FLAGS = {
+    "\U0001F1EE\U0001F1E9": ("indonesia", "nusantara", "nkri", "garuda"),
+    "\U0001F1F5\U0001F1F8": ("palestina", "palestine", "gaza", "rafah"),
+    "\U0001F1EE\U0001F1F1": ("israel",),
+    "\U0001F1FA\U0001F1F8": ("amerika", "as ", "united states"),
+    "\U0001F1E8\U0001F1F3": ("china", "tiongkok", "cina"),
+    "\U0001F1F8\U0001F1E6": ("arab saudi", "saudi"),
+    "\U0001F1F9\U0001F1F7": ("turki", "turkiye"),
+    "\U0001F1F2\U0001F1FE": ("malaysia",),
+    "\U0001F1F8\U0001F1EC": ("singapura", "singapore"),
+}
+_FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
+# Emoji that read as celebration. Wrong on a clip about people being killed.
+_CHEER = "🔥💪👏🎉🚀😂🤣😎✨🙌"
+# Words that mark a clip as grief rather than triumph.
+_GRIEF = ("dibantai", "dibom", "diserang", "korban", "tewas", "meninggal",
+          "pembantaian", "minta maaf", "duka", "berduka", "hening",
+          "penderitaan", "menderita", "kelaparan", "pengungsi")
+
+
+def _fix_emoji(text, transcript, context=""):
+    """Drop flags the clip does not support and cheer emoji on a grief clip.
+
+    The copy model was told to use 🇮🇩 by the pr-politik preset and did so on a
+    clip whose subject is Palestinians being killed — the flag of the wrong
+    country on someone else's grief, which readers spot instantly. Prompt rules
+    alone cannot be trusted for this: the generator is a language model, and
+    this particular mistake is both easy to make and expensive.
+
+    So the flags are checked against the words actually spoken. A flag survives
+    only when its country is named in the transcript or the operator's context
+    line; when several survive, the one tied to the grief wins, because that is
+    what the clip is about.
+    """
+    haystack = f"{transcript} {context}".lower()
+    grief = any(g in haystack for g in _GRIEF)
+
+    found = _FLAG_RE.findall(text)
+    if found:
+        allowed = [f for f in found
+                   if any(k in haystack for k in _FLAGS.get(f, ()))]
+        # On a grief clip, prefer the flag of the people being harmed.
+        if grief:
+            victims = [f for f in allowed
+                       if f in ("\U0001F1F5\U0001F1F8",)]
+            allowed = victims or allowed
+        keep = allowed[:1]
+        for f in found:
+            if f not in keep:
+                text = text.replace(f, "")
+
+    if grief:
+        for ch in _CHEER:
+            text = text.replace(ch, "")
+
+    # Tidy the gaps the removals leave behind.
+    text = re.sub(r"\s{2,}", " ", text)
+    return re.sub(r"\s+([,.!?])", r"\1", text).strip(" -–—,")
+
+
 def generate(transcript, requirements, platform="youtube", context=None,
              style=None):
     """Return {hook, title, description, youtube_tags[], punchline_words[]}.
@@ -302,6 +376,13 @@ def generate(transcript, requirements, platform="youtube", context=None,
     hook = censor.mask(hook)
     title = censor.mask(title)
     desc = censor.mask(desc)
+
+    # Flags and cheer emoji last, after masking, so the check sees the final
+    # text. A wrong flag is not a tone problem — it misreads whose story this
+    # is, and the preset actively encourages it.
+    hook = _fix_emoji(hook, transcript, context or "")
+    title = _fix_emoji(title, transcript, context or "")
+    desc = _fix_emoji(desc, transcript, context or "")
 
     return {"hook": hook, "title": title, "description": desc,
             "youtube_tags": tags[:15], "punchline_words": punchline, "mood": mood,

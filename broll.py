@@ -109,6 +109,47 @@ def action_terms(phrase):
     return out
 
 
+# What each action has to LOOK like, for the frame gate. The search wording
+# above gets the right video; this gets the right second of it.
+#
+# The gap these close: a clip said "mereka dibom" over footage of people
+# picking through rubble. Rubble is the aftermath of a bombing, and the source
+# video was correct, but the word was "bombed" and the frame showed no bombing.
+# The operator's verdict was blunt: "mereka di bom tapi footagenya bukan bom."
+# A subject-only gate cannot catch that — it asked "is this Gaza?", never "is
+# this the thing the sentence just said?".
+_ACTION_LOOKS = {
+    "dibom serangan": ("an explosion, airstrike impact, blast fireball, or the "
+                       "smoke plume rising from a strike"),
+    "diserang serangan": ("an attack in progress — explosions, strikes, armed "
+                          "assault, firing, or impacts"),
+    "korban serangan": ("casualties — wounded or dead people, bodies, "
+                        "stretchers, funerals, medics carrying victims"),
+    "korban": ("casualties — wounded or dead people, bodies, stretchers, "
+               "medics carrying victims"),
+    "pengungsi": ("people displaced — families fleeing, carrying belongings, "
+                  "refugee tents or camps"),
+    "kelaparan krisis": ("hunger — food queues, aid distribution, emaciated "
+                         "people, empty markets"),
+    "kehancuran reruntuhan": ("destruction — collapsed or flattened buildings, "
+                              "rubble, ruined streets"),
+    "demonstrasi aksi": ("a protest — crowds marching, banners, placards, "
+                         "flags raised"),
+    "bantuan kemanusiaan": ("aid — trucks, supply convoys, distribution of "
+                            "food or medical help"),
+}
+
+
+def action_look(term):
+    """How footage for `term` has to look on screen. "" when unknown.
+
+    Unknown actions return "" on purpose: the frame gate then falls back to
+    judging the subject alone, which is weaker but never blocks a cutaway for
+    a word this table has not learned yet.
+    """
+    return _ACTION_LOOKS.get(str(term or "").strip().lower(), "")
+
+
 def repeated_names(*texts, minimum=2):
     """Proper nouns that appear at least `minimum` times.
 
@@ -355,6 +396,15 @@ def relevant(hits, terms, require=1):
 # None of this detects AI footage directly. It raises the cost of a fake passing,
 # and the title screen below rejects the labels fakes advertise.
 MIN_VIEWS = int(os.environ.get("CLIPPER_BROLL_MIN_VIEWS", "20000"))
+# The view floor exists to screen out reupload accounts, and on a verified
+# channel that job is already done by the verification itself. Keeping one
+# number for both cost real footage: searches for the Gaza strikes returned
+# 7-8 relevant Kompas/CNN packages and exactly ONE cleared 20k, so the frame
+# gate had a single source to judge and a clip shipped with no cutaways at
+# all. A verified broadcaster's 600-view upload is not a hoax risk; it is a
+# quiet news day.
+MIN_VIEWS_VERIFIED = int(os.environ.get("CLIPPER_BROLL_MIN_VIEWS_VERIFIED",
+                                        "500"))
 MAX_AGE_DAYS = int(os.environ.get("CLIPPER_BROLL_MAX_AGE_DAYS", "1460"))
 MIN_FOLLOWERS = int(os.environ.get("CLIPPER_BROLL_MIN_FOLLOWERS", "50000"))
 # Titles that advertise synthetic or unverified footage. The operator forbids
@@ -385,13 +435,6 @@ def credible(hit, min_views=None, max_age_days=None, min_followers=None):
         if marker in title:
             return False, f"title says '{marker}'"
 
-    try:
-        views = int(hit.get("view_count") or 0)
-    except (TypeError, ValueError):
-        return False, "view count unreadable"
-    if views < min_views:
-        return False, f"{views} views below {min_views}"
-
     # A verified channel OR a large following: either is accountability. Both
     # are absent on the reupload accounts that carry hoax footage.
     verified = bool(hit.get("channel_is_verified"))
@@ -401,6 +444,18 @@ def credible(hit, min_views=None, max_age_days=None, min_followers=None):
         followers = 0
     if not verified and followers < min_followers:
         return False, f"unverified channel with {followers} followers"
+
+    try:
+        views = int(hit.get("view_count") or 0)
+    except (TypeError, ValueError):
+        return False, "view count unreadable"
+    # Accountability first, reach second: a verified broadcaster clears a much
+    # lower floor, because on that channel the view count is measuring interest
+    # rather than trustworthiness.
+    floor = MIN_VIEWS_VERIFIED if (verified or followers >= min_followers) \
+        else min_views
+    if views < floor:
+        return False, f"{views} views below {floor}"
 
     date = str(hit.get("upload_date") or "")
     if len(date) == 8 and date.isdigit():
@@ -456,6 +511,12 @@ def vetted(hits, terms, limit=1, **kw):
 
     Ordered by view count: among clips that all pass, the most watched is the
     one most likely to be the real footage of the event rather than a reupload.
+
+    `limit` defaults to 1 for callers that only want a single source, but the
+    frame gate can now reject an entire video, so a caller that means to try
+    several must ask for several. Returning one hit while the caller believed
+    it had a shortlist is how a clip shipped with every cutaway dropped and
+    "1 sources checked" in the warning.
     """
     out = []
     for hit in relevant(hits, terms):

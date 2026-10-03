@@ -22,6 +22,7 @@ own transport. What it gets from here is a stable contract.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -56,6 +57,10 @@ LANG_REVIEW = os.environ.get("CLIPPER_LANG_REVIEW", "1") not in ("0", "", "false
 # Search YouTube for b-roll and cut away to it mid-clip. Off by default: it adds
 # a download per insert, and a clip without cutaways is still a clip.
 BROLL_INSERT = os.environ.get("CLIPPER_BROLL_INSERT", "0") not in ("0", "", "false")
+# How many search hits to actually open per cutaway. The frame gate can reject
+# an entire source (no window shows the action), so trying only the top hit
+# loses the cutaway whenever that one video happens to be aftermath footage.
+BROLL_SOURCE_TRIES = int(os.environ.get("CLIPPER_BROLL_TRIES", "3"))
 LOCK_PATH = os.environ.get("CLIPPER_JOB_LOCK", os.path.join(_BASE, ".job.lock"))
 # Seconds to wait for a job already running. Zero means refuse immediately,
 # which is the right answer over chat: a caller would rather be told to try
@@ -261,14 +266,182 @@ def _delivery_copy(path, max_mb):
     return small
 
 
-def _gather_inserts(seg_words, seg_start, dur, context, source_path):
+# Prepositions that mark the following proper noun as a place rather than the
+# subject of the story. The operator writes the context line as a sentence, so
+# "... di Gontor" says plainly that Gontor is where this happened.
+_VENUE_MARKERS = ("di", "dari", "ke", "pada", "kepada")
+# Words inside a place name itself, so the whole name is caught rather than its
+# first token: "di Pondok Modern Gontor" is one venue, not three names.
+_PLACE_WORDS = ("pondok", "pesantren", "masjid", "istana", "gedung", "aula",
+                "kampus", "universitas", "sekolah", "lapangan", "stadion",
+                "balai", "kantor", "desa", "kota", "kabupaten", "provinsi")
+
+
+def _venue_names(context, names):
+    """Names in `context` that read as the location, not the subject.
+
+    A cutaway to the venue is a cutaway to the same event: the clip was already
+    shot there. One shipped clip cut to an audience shot of Gontor exactly as
+    the speaker said "Gontor", which looks like a continuity mistake rather
+    than an edit. Only names the operator marked with a place preposition are
+    excluded, so a story genuinely about a place still gets its footage.
+    """
+    tokens = re.findall(r"\w+", str(context or ""))
+    venues = set()
+    for i, tok in enumerate(tokens):
+        key = tok.lower()
+        if key not in names:
+            continue
+        # Kept in original case: capitalisation is the signal that a word is
+        # part of the place name ("Pondok Modern Gontor"), so lowercasing here
+        # would make the istitle() check below dead code.
+        prev = tokens[max(0, i - 3):i]
+        if not prev:
+            continue
+        # "di Gontor" — directly after a place preposition.
+        if prev[-1].lower() in _VENUE_MARKERS:
+            venues.add(key)
+            continue
+        # "di Pondok Modern Gontor" — preposition a little further back, with
+        # only place words or more of the name in between.
+        for j in range(len(prev) - 1, -1, -1):
+            low = prev[j].lower()
+            if low in _VENUE_MARKERS:
+                if all(p.lower() in _PLACE_WORDS or p.istitle()
+                       or p.lower() in names for p in prev[j + 1:]):
+                    venues.add(key)
+                break
+            if low not in _PLACE_WORDS and not prev[j].istitle():
+                break
+    return venues
+
+
+def _clip_topic(context, names=(), venues=()):
+    """Where the footage has to have been SHOT. Decided once per clip.
+
+    Two mistakes are baked into this function's history, both shipped:
+
+    1. Asked per word ("does this frame show dibom"), which rejected real
+       footage of the same event because the verb was not literally visible.
+
+    2. Asked as the speech topic ("Prabowo membela Palestina"), which let a
+       pro-Palestine rally in JAKARTA through — the gate could see it was
+       Jakarta and still answered on_topic=true, because an Indonesian name
+       plus Palestine describes that rally perfectly. It is a correct answer
+       to the wrong question.
+
+    What the operator actually requires is a place: "semua frame harus bener
+    footage dari palestina yang dibahas". So the speaker's name and the verbs
+    are stripped out and what survives is the location and the event there.
+    """
+    skip = {v.lower() for v in (venues or ())}
+    text = str(context or "")
+    # Phrases that describe the speaking occasion rather than the event.
+    occasion = (r"di depan [^,;]*", r"di hadapan [^,;]*",
+                r"dalam pidato[^,;]*", r"saat pidato[^,;]*",
+                r"ketika berpidato[^,;]*", r"berpidato[^,;]*",
+                r"pada acara[^,;]*", r"dalam acara[^,;]*",
+                r"di acara[^,;]*", r"peringatan [^,;]*",
+                r"forum [^,;]*", r"sidang [^,;]*")
+    # What the SPEAKER does. Keeping these made the subject a person talking,
+    # and footage of people talking about a place then counted as that place.
+    stance = (r"\bmembela\b", r"\bmenyinggung\b", r"\bbicara soal\b",
+              r"\bbicara tentang\b", r"\bbicara\b", r"\bmenyoroti\b",
+              r"\bmengecam\b", r"\bmendukung\b", r"\bkomentar soal\b",
+              r"\bsoal\b", r"\btentang\b", r"\bmengenai\b")
+    parts = []
+    for clause in re.split(r"[,;]", text):
+        c = clause.strip()
+        if not c:
+            continue
+        for pat in occasion:
+            c = re.sub(pat, "", c, flags=re.IGNORECASE).strip()
+        if not c:
+            continue
+        # Drop everything up to and including the stance verb: what is left is
+        # what the speaker was talking ABOUT, which is the place and event.
+        for pat in stance:
+            m = re.search(pat, c, flags=re.IGNORECASE)
+            if m:
+                c = c[m.end():].strip()
+                break
+        if not c:
+            continue
+        # Strip a trailing venue mention: "Palestina di Gontor" would ask the
+        # gate for Gaza footage shot in East Java.
+        for v in sorted(skip, key=len, reverse=True):
+            c = re.sub(r"\b(?:di|dari|ke)\s+%s\b" % re.escape(v), "", c,
+                       flags=re.IGNORECASE).strip()
+            c = re.sub(r"\b%s\b" % re.escape(v), "", c,
+                       flags=re.IGNORECASE).strip()
+        c = re.sub(r"\s{2,}", " ", c).strip(" -—,")
+        if not c:
+            continue
+        words = re.findall(r"[\w'-]+", c.lower())
+        if words and all(w in skip or w in ("di", "dari", "ke", "yang")
+                         for w in words):
+            continue
+        parts.append(c)
+    topic = " ".join(parts).strip(" -—")
+    if topic:
+        return topic
+    # No usable context: fall back to the subjects heard in the clip itself,
+    # minus the venue, in the order they were ranked.
+    rest = [n for n in (names or ()) if n.lower() not in skip]
+    return ", ".join(rest)
+
+
+def _footage_subject(context, term, venues=()):
+    """What the b-roll frame gate should be asked to look for.
+
+    --context describes the SPEECH, not the footage: "Prabowo membela Palestina
+    di depan banyak pemimpin negara, di Gontor". Handing that whole string to a
+    frame gate asks whether Gaza footage shows Gontor and a podium, which real
+    Gaza footage does not, so correct material was logged as "off topic".
+
+    The venue is dropped — the same names already excluded as cutaway triggers
+    — along with the clauses that describe the speaking occasion rather than the
+    event. What is left is the subject the cutaway is actually about.
+    """
+    parts = []
+    skip = {v.lower() for v in (venues or ())}
+    # Clauses about the speaking occasion, not about the event being discussed.
+    occasion = ("di depan", "di hadapan", "dalam pidato", "saat pidato",
+                "berpidato", "acara", "peringatan", "forum", "sidang")
+    for clause in re.split(r"[,;]", str(context or "")):
+        c = clause.strip()
+        if not c:
+            continue
+        low = c.lower()
+        if any(o in low for o in occasion):
+            continue
+        words = [w for w in re.findall(r"[\w'-]+", low)]
+        # A clause that is only a venue mention ("di Gontor") carries no
+        # information about the footage.
+        if words and all(w in skip or w in ("di", "dari", "ke") for w in words):
+            continue
+        parts.append(c)
+    if term:
+        t = str(term).strip()
+        if t.lower() not in skip:
+            parts.append(t)
+    return " — ".join(parts) if parts else str(term or "").strip()
+
+
+def _gather_inserts(seg_words, seg_start, dur, context, source_path,
+                    warnings=None):
     """Search, download and cut b-roll for this segment. [] on any failure.
 
     Footage is searched on YouTube, never generated: the clips have to be real
     material on the same subject. Each stage is wrapped because all of them talk
     to something outside this box — the network, yt-dlp, ffmpeg — and none of
     them failing is a reason to lose the clip.
+
+    Pass `warnings` to be told about cutaways that were dropped because no
+    footage showed the action. A silently empty b-roll list is how v22 shipped
+    with no cutaways at all and nothing in the result to say so.
     """
+    notes = warnings if warnings is not None else []
     try:
         import broll
         import broll_place
@@ -307,9 +480,23 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path):
         # "dibom" or "diserang", the viewer is picturing the event, and that is
         # the shot worth cutting to. Actions are a closed list, so this cannot
         # fire on arbitrary words.
+        #
+        # The venue is excluded. "Gontor" is where the speech is being given,
+        # so footage of it is footage of this same event from another angle —
+        # an audience shot at the moment the speaker says the word, which reads
+        # as a continuity error rather than a cutaway. The subject of the story
+        # is worth cutting to; the room the story is told in is not.
+        venues = _venue_names(context or "", names)
+        if venues:
+            _log(f"b-roll: venue not used as a cutaway trigger: "
+                 f"{', '.join(sorted(venues))}")
+
         def _wanted(word):
             key = str(word).lower()
-            if key in names or anchors.get(key, "").lower() in names:
+            anchored = anchors.get(key, "").lower()
+            if key in venues or anchored in venues:
+                return False
+            if key in names or anchored in names:
                 return True
             return bool(broll.action_terms(key))
 
@@ -321,15 +508,43 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path):
         source_id = os.path.splitext(os.path.basename(source_path or ""))[0]
         out = []
         used = {source_id}
-        # The subject the clip keeps returning to, used to qualify action
-        # searches: "dibom" on its own could return any war footage, while
-        # "Palestina dibom" returns the event being talked about.
-        subject = sorted(names)[0] if names else ""
+        # Which subject an action belongs to is decided per window, not once per
+        # clip. `sorted(names)[0]` picked "gontor" over "palestina" purely on
+        # alphabetical order, so "mereka dibom" searched Gontor footage and cut
+        # to an audience shot of the venue instead of the event being described.
+        #
+        # Preference order: a name inside this phrase, then a name from
+        # --context in the order the operator WROTE it, then whatever remains.
+        # proper_nouns() returns its own sorted order, so the context string is
+        # re-scanned here: "Prabowo membela Palestina ... di Gontor" names the
+        # subject before the venue, and that order is the operator's intent.
+        ctx_all = {n.lower() for n in broll.proper_nouns(context or "")}
+        ctx_names = []
+        for word in re.findall(r"\w+", str(context or "")):
+            key = word.lower()
+            if key in ctx_all and key not in ctx_names:
+                ctx_names.append(key)
+        ordered = ([n for n in ctx_names if n in names]
+                   + sorted(n for n in names if n not in ctx_names))
+
+        # Decided once, before the loop: every cutaway in this clip is judged
+        # against the same event.
+        topic = _clip_topic(context, ordered, venues)
+        _log(f"b-roll: topic for every cutaway = {topic!r}")
+
+        def _subject_for(phrase):
+            said = {w.lower() for w in re.findall(r"\w+", str(phrase or ""))}
+            for n in ordered:
+                if n in said:
+                    return n
+            return ordered[0] if ordered else ""
+
         for t0, t1, heard_term in wins:
             # Search under the trusted spelling, not whatever Whisper wrote at
             # this exact word — that is the whole point of anchoring.
             term = anchors.get(heard_term.lower(), heard_term)
             actions = broll.action_terms(heard_term)
+            subject = _subject_for(heard_term)
             if actions and subject:
                 # News footage of the event, qualified by subject so the result
                 # belongs to this story rather than a similar one elsewhere.
@@ -341,22 +556,56 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path):
             # rule that footage be recent, actually watched, and not a hoax or
             # AI generation. Rejections are logged with a reason.
             hits = broll.vetted(
-                broll.search(terms, exclude_ids=used, results=8), terms)
+                broll.search(terms, exclude_ids=used, results=8), terms,
+                limit=BROLL_SOURCE_TRIES)
             if not hits:
                 _log(f"b-roll: nothing credible for '{term}', skipping")
                 continue
-            hit = hits[0]
-            used.add(hit["id"])
-            paths = fetch.fetch("youtube", hit["url"], f"broll-{hit['id']}")
-            if not paths:
-                continue
-            cut = os.path.join(os.path.dirname(paths[0]),
-                               f"insert-{hit['id']}.mp4")
-            if not broll_place.prepare(paths[0], cut, seconds=t1 - t0,
-                                       canvas=(edit.CANVAS_W, edit.CANVAS_H)):
+            # What the footage has to show: the EVENT the clip is about, decided
+            # once for the whole clip, not the verb under this caption.
+            #
+            # Asking per word was wrong. A news package about Gaza is footage of
+            # one event; demanding each frame depict "dibantai" specifically
+            # threw away a funeral procession from that same event, and the
+            # whole source went with it. The operator's rule is that the footage
+            # be real material of the Palestine being discussed — a question
+            # about the event, not about the word.
+            #
+            # The venue stays out: --context describes the speech, and asking
+            # whether Gaza footage shows Gontor correctly returns no.
+            look = ""
+            subject = topic
+            # Try more than the top hit. The frame gate rejects whole sources
+            # now, and asking only hits[0] meant one rejected video dropped the
+            # cutaway entirely: v22 shipped with zero b-roll because both top
+            # hits failed while later candidates were never opened.
+            cut = None
+            chosen = None
+            for hit in hits[:BROLL_SOURCE_TRIES]:
+                paths = fetch.fetch("youtube", hit["url"], f"broll-{hit['id']}")
+                if not paths:
+                    continue
+                candidate = os.path.join(os.path.dirname(paths[0]),
+                                         f"insert-{hit['id']}.mp4")
+                if broll_place.prepare(paths[0], candidate, seconds=t1 - t0,
+                                       canvas=(edit.CANVAS_W, edit.CANVAS_H),
+                                       subject=subject, action=look):
+                    used.add(hit["id"])
+                    cut = candidate
+                    chosen = hit
+                    break
+                used.add(hit["id"])
+            if cut is None:
+                notes.append(
+                    f"b-roll: no real footage of {topic!r} found for "
+                    f"'{heard_term.strip()}' "
+                    f"({len(hits[:BROLL_SOURCE_TRIES])} sources checked), "
+                    f"cutaway dropped")
+                _log(f"b-roll: no source showed {topic!r} for "
+                     f"'{term}', cutaway dropped")
                 continue
             out.append({"path": cut, "start": t0, "end": t1, "term": term,
-                        "title": hit.get("title", "")})
+                        "title": (chosen or {}).get("title", "")})
         return out
     except Exception as exc:
         _log(f"b-roll unavailable ({type(exc).__name__}: {exc})")
@@ -394,18 +643,18 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     if not words:
         raise RuntimeError("no speech found in the content video")
 
-    # Beam search cuts mishearings but does not end them — the remaining ones
-    # are lexical, not acoustic (`sololah` for `seolah`). A language reviewer
-    # fixes those in place; word timings are required to survive untouched, and
-    # language.review returns the transcript unchanged if they would not.
-    #
-    # The outcome is carried out to the result. Failing soft here is right, but
-    # a clip shipped with `sololah` in the captions and the only evidence was a
-    # stderr line, so the caller gets told rather than having to read logs.
+    # The reviewer runs AFTER the segment is chosen, further down: reviewing the
+    # whole video sends every word of a one-hour source when the clip uses about
+    # sixty of them, and that is what kept timing out. Selection itself does not
+    # need corrected spelling — it works on stress and topic, not orthography.
     review_status = {"ok": None, "reason": "disabled"}
-    if LANG_REVIEW:
-        words = language.review(words, context=context or "",
-                                status=review_status)
+
+    # Everything that degraded the clip without failing the job, collected as
+    # it happens and returned in the result. Declared before segment selection
+    # because that is the first stage allowed to fall back. Fail-soft is fine;
+    # fail-silent is what shipped `sololah` burned into a caption, and what
+    # shipped the opening greeting when the operator asked for Palestina.
+    warnings = []
 
     lo, hi = selector.duration_window(platform)
     if start is not None:
@@ -422,7 +671,15 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
             # Same ladder the pipeline uses: an unreachable router costs the
             # topic-aware cut, not the clip. Without this a 9Router hiccup
             # takes the whole chat flow down.
+            #
+            # But it must be said out loud. The heatmap does not know what the
+            # clip is about, so this silently shipped the opening greeting of a
+            # speech when the operator asked for the part about Palestina — and
+            # the only trace was one line on stderr.
             _log("topical selection unavailable — falling back to heatmap")
+            warnings.append(
+                "topic-aware cut unavailable (model unreachable) — segment "
+                "chosen by watch-time heatmap, which ignores --context")
             heat = fetch.heatmap_for(content)
             picks = [{"start": s, "end": e, "hook": None}
                      for s, e in selector.pick_segments(
@@ -435,6 +692,27 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         topic_hook = picks[0].get("hook")
 
     seg_words = selector.words_in(words, seg_start, seg_end)
+
+    # Beam search cuts mishearings but does not end them — the remaining ones
+    # are lexical, not acoustic (`sololah` for `seolah`, `darah` for `dakwah`).
+    # The reviewer fixes those in place; word timings are required to survive
+    # untouched, and language.review returns the transcript unchanged if they
+    # would not.
+    #
+    # Scoped to the chosen segment on purpose. Reviewing the whole transcript
+    # sent 522 words of a one-hour video to correct the 61 that reach the
+    # screen, which timed out at both 120s and 300s; the segment alone comes
+    # back in about 11s. The outcome travels out in `warnings`, because a clip
+    # once shipped with `sololah` burned in and the only evidence was a line on
+    # stderr.
+    if LANG_REVIEW:
+        seg_words = language.review(seg_words, context=context or "",
+                                    status=review_status)
+
+    if review_status.get("ok") is False:
+        warnings.append("transcript review skipped: %s — captions are raw "
+                        "Whisper output" % review_status.get("reason", "?"))
+
     # Measure which words the speaker actually leaned on before captions are
     # drawn. Failure here scores every word 0.0 and the captions fall back to
     # the model's punchline pick, so a broken audio read never blocks a render.
@@ -452,15 +730,28 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
 
     track, why = bgm.pick(mood or meta.get("mood"), key=f"job:{int(seg_start)}")
     _log(f"bgm: {why}")
+    # A clip shipping without music is a product decision, not a detail: it
+    # happens when the stock would actively fight the clip. Say so in the
+    # result rather than leaving the operator to notice the silence.
+    if track is None:
+        warnings.append(f"no background music: {why}")
+    elif "no " in why and "using" in why:
+        warnings.append(f"background music substituted: {why}")
 
     # Cutaways: find footage on the same subject, cut it to length, and hand it
     # over for the render. Every stage is allowed to come back empty — a clip
     # with no b-roll is the current product, so nothing here may block a render.
     inserts = _gather_inserts(seg_words, seg_start, seg_end - seg_start,
-                              context, content) if BROLL_INSERT else []
+                              context, content,
+                              warnings=warnings) if BROLL_INSERT else []
     if inserts:
         _log("b-roll: %s" % ", ".join(
             "%s @%.0fs" % (i["term"], i["start"]) for i in inserts))
+    elif BROLL_INSERT:
+        # Silence here is how v22 shipped with no cutaways and a clean
+        # warnings list. If nothing even got as far as being rejected, say so.
+        if not any(w.startswith("b-roll:") for w in warnings):
+            warnings.append("b-roll: no cutaways were placed")
 
     out = out or os.path.join(
         OUT_DIR, f"clip_{int(time.time())}_{int(seg_start)}.mp4")
@@ -468,7 +759,9 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     edit.render_clip(content, seg_start, seg_end, seg_words, out,
                      hook=meta["hook"], bgm=track["path"] if track else False,
                      accent_words=meta.get("punchline_words") or (),
-                     intro=opening, inserts=inserts, **style)
+                     intro=opening, inserts=inserts,
+                     mood=(track or {}).get("mood") or meta.get("mood"),
+                     **style)
 
     small = _delivery_copy(out, max_mb)
     return {
@@ -491,9 +784,7 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         # Anything that degraded the clip without failing the job. An empty
         # list means every stage did its work; a non-empty one is the honest
         # answer to "why does the caption say sololah".
-        "warnings": ([] if review_status.get("ok") is not False else
-                     ["transcript review skipped: %s — captions are raw "
-                      "Whisper output" % review_status.get("reason", "?")]),
+        "warnings": warnings,
         "elapsed_sec": round(time.time() - t0, 1),
     }
 

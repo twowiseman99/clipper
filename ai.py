@@ -3,6 +3,7 @@
 OpenAI-compatible chat completions over plain requests; no SDK dependency.
 Config from clipper/.env (NINEROUTER_BASE_URL, NINEROUTER_API_KEY).
 """
+import base64
 import json
 import os
 import sys
@@ -91,6 +92,91 @@ def _post(system, user, model, temperature):
         if attempt < RETRIES - 1:
             time.sleep(BACKOFF * (2 ** attempt))
     raise last
+
+
+def _post_vision(system, user, images, model, temperature):
+    """POST one completion carrying images, with the same retry policy.
+
+    Images are inlined as base64 data URLs because the router is loopback-only:
+    there is no public URL we could hand the model instead.
+    """
+    content = [{"type": "text", "text": user}]
+    for raw in images:
+        b64 = base64.b64encode(raw).decode("ascii")
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    last = None
+    for attempt in range(RETRIES):
+        try:
+            resp = requests.post(
+                f"{BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": content},
+                    ],
+                    "temperature": temperature,
+                    "stream": False,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=TIMEOUT,
+            )
+        except requests.RequestException as e:
+            last = e
+        else:
+            if resp.status_code == 429:
+                last = requests.HTTPError("429 rate limited by router",
+                                          response=resp)
+            elif resp.status_code < 500:
+                resp.raise_for_status()
+                return resp
+            else:
+                last = requests.HTTPError(f"{resp.status_code} from router",
+                                          response=resp)
+        if attempt < RETRIES - 1:
+            time.sleep(BACKOFF * (2 ** attempt))
+    raise last
+
+
+def _parse_json_body(resp):
+    """Decode a router reply into a dict. See chat_json for why this is fussy."""
+    body, _ = json.JSONDecoder().raw_decode(resp.content.decode("utf-8").strip())
+    text = body["choices"][0]["message"]["content"].strip()
+    # Reasoning models emit a <think> block ahead of the answer; the JSON object
+    # is what follows it. raw_decode on the first "{" handles both shapes.
+    if "<think>" in text:
+        cut = text.rfind("{")
+        if cut > 0:
+            text = text[cut:]
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text[4:] if text.startswith("json") else text
+    return json.loads(text)
+
+
+def vision_json(system, user, images, model=MODEL, temperature=0.0):
+    """Ask about one or more images and get a JSON object back.
+
+    `images` is a list of raw JPEG/PNG bytes. Temperature is zero, not merely
+    low: this is a gate, and at 0.2 the same frame of an airstrike smoke plume
+    was accepted on one call and refused on another. A gate whose answer moves
+    between runs cannot be reasoned about from a log — the render says the
+    footage was off topic and a re-check says it was fine.
+
+    Raises on transport error or unparseable output, exactly like chat_json —
+    callers that only want a hint must catch and carry on without it.
+    """
+    try:
+        resp = _post_vision(system, user, images, model, temperature)
+    except Exception as e:
+        if not (_is_rate_limit(e) and FALLBACK_MODEL and FALLBACK_MODEL != model):
+            raise
+        print("  ai: %s rate limited, switching to %s" % (model, FALLBACK_MODEL),
+              file=sys.stderr)
+        resp = _post_vision(system, user, images, FALLBACK_MODEL, temperature)
+    return _parse_json_body(resp)
 
 
 def chat_json(system, user, model=MODEL, temperature=0.7):

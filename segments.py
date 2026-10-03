@@ -80,10 +80,39 @@ def _overlaps(start, dur, taken, gap=MIN_GAP):
                for t_start, t_end in taken)
 
 
-def _snap_end(words, start, max_end):
-    """Latest word end within (start, max_end]; None if no speech in range."""
-    ends = [w["end"] for w in words if start < w["end"] <= max_end]
-    return max(ends) if ends else None
+def _snap_end(words, start, max_end, grace=7.0):
+    """Latest word end within (start, max_end]; None if no speech in range.
+
+    Prefers a sentence boundary. Cutting on whichever word happens to fall
+    under the ceiling ends clips mid-thought — one shipped ending on
+    "...memicu suatu kehendak," with the actual close ("untuk belajar
+    sungguh-sungguh.") 6.6s past the cut. A clip that stops mid-clause reads as
+    a broken file rather than an edit.
+
+    So: if a sentence ends within `grace` seconds beyond the ceiling, run on to
+    it. Seven seconds covers a trailing subordinate clause at speech pace while
+    staying far short of a new thought; the first attempt used 3.5 and still
+    cut the Gontor clip mid-sentence.
+    """
+    in_range = [w for w in words if start < w["end"] <= max_end]
+    if not in_range:
+        return None
+    plain = max(w["end"] for w in in_range)
+
+    # Already ending on a sentence? Nothing to do.
+    def _is_end(w):
+        return str(w.get("word", "")).strip().endswith((".", "?", "!"))
+
+    if any(_is_end(w) for w in in_range if w["end"] == plain):
+        return plain
+
+    extended = [w for w in words
+                if max_end < w["end"] <= max_end + grace and _is_end(w)]
+    if extended:
+        return max(w["end"] for w in extended)
+    # No sentence boundary nearby: fall back to the last word under the
+    # ceiling rather than running past it.
+    return plain
 
 
 def pick_segments(video_duration, heatmap, words, platform, count,

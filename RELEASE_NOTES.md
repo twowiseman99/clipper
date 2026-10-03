@@ -1,5 +1,125 @@
 # Clipper — Release Notes
 
+**v0.5.0 "the frame has to be shot where the clip says it is"** · branch `claude/code-clipper-review-v9e3im`
+9 files · new: `tests/` (18 regression tests + runner)
+
+_Dalmislave_
+
+---
+
+## What this release is about
+
+One rule, stated by the operator and broken by this pipeline four separate
+times in a day:
+
+> "semua frame harus bener footage dari palestina yang dibahas, itu rule
+> kunci, kalau cuman gambaran dari footage lain, gw gamau"
+
+Every fix below came from watching a delivered clip and measuring it, not from
+a failing test. The tests came after, and are in `tests/` so the next change
+cannot quietly undo them.
+
+### The same bug, four wrong answers
+
+The b-roll gate asks a vision model whether a frame belongs in the clip. It
+worked correctly every time. The question was wrong four times:
+
+| asked | result |
+| --- | --- |
+| "is this frame readable?" | generic crowd footage under a massacre caption |
+| "does this frame show *dibom*?" | real footage of the same event discarded; **zero cutaways shipped** |
+| "does this frame show *Prabowo membela Palestina*?" | a solidarity rally in **Jakarta** shipped under "mereka diserang" |
+| "was this frame **shot on location** at *Palestina*?" | correct |
+
+The lesson is in the shape of that table: a gate that is broken by its own
+prompt looks exactly like a gate that is working. Diagnosis has to start from
+the delivered artefact.
+
+## The gate
+
+**The unit is the clip, not the word.** `job._clip_topic()` computes one subject
+for the whole clip, above the window loop. Asking per word rejected a funeral
+procession as "not dibantai" and then threw away the entire source — and a veto
+has no fallback, so over-strictness shows up as *no* b-roll, not worse b-roll.
+
+**The subject is a place.** The speaker's name, the stance verb (`membela`,
+`bicara soal`, `menyinggung`) and the venue are stripped, so
+`"Prabowo membela Palestina di depan banyak pemimpin negara, di Gontor"`
+becomes `"Palestina"`. Keeping the name is what let Jakarta through: an
+Indonesian politician plus a cause describes Indonesian solidarity footage
+perfectly.
+
+**`on_topic` means shot there.** The prompt now names the rejects: a solidarity
+march or rally in another country ("banners and flags about a place are not
+that place"), another country's streets or skyline, an official at a podium
+anywhere, studios, maps, stock imagery. Measured:
+
+```
+Jakarta rally                  reject   6/6 on repeat (shipped in v27)
+Israeli spokesman at podium    reject
+funeral procession, West Bank  accept
+man searching rubble, Gaza     accept
+crowds at Rafah crossing       accept
+```
+
+**Temperature 0.0, not 0.2.** The same airstrike frame was rejected during a
+render and accepted 6/6 on re-check. A gate that samples cannot be debugged
+from its own log. `chat_json` stays at 0.7 — hooks and titles need variety.
+
+**8 finalists, judged 4 at a time.** Three was tuned for "is this readable",
+where almost any live frame passes. Under "is this the event", only 2 of 14
+windows in a real Kompas package qualified and neither was in the top 3 by
+motion. Parallel because eight sequential calls add ~30s per source.
+
+**One rejected source no longer costs the cutaway.** `vetted()` defaulted to
+`limit=1`, so the retry loop had nothing to retry: the log said "1 sources
+checked" while the code intended three. Both caps are gone.
+
+**A verified channel clears a lower view floor.** The 20k floor existed to
+screen out reupload accounts, and on a verified channel verification already
+does that job. Real Kompas footage at 603, 5 480 and 7 214 views was being
+discarded; unverified channels still face the full floor.
+
+## Failures that say so
+
+Zero cutaways with `warnings: []` shipped once. Any dropped cutaway now appends
+a warning naming the topic that had no footage, and `_gather_inserts` takes the
+warning list so it cannot report success while silently producing nothing.
+
+## Overlay
+
+The cutaway is masked to the upper band via `geq` on the alpha plane — **not**
+crop, which would change framing. 1080x1920 and 9:16 are untouched, per
+"jgn diakalin dgn ratio videonya diubah ya pantang jg tu". Measured on the
+delivered file, inside the cutaway window:
+
+```
+y=0     9.96   band
+y=720   3.81   feather
+y=1440  1.60   lectern, clean
+```
+
+Opacity inside the band is 0.78, raised from 0.55: at full frame a 0.55 blend
+"actively degrades the evidence", with the keffiyeh pattern colliding with the
+rubble texture and both layers weakened.
+
+## Tests
+
+`bash tests/run_all.sh` — 9 module self-checks, `job.py --selftest`, and 18
+regression tests, each named for the render that exposed its bug. See
+`tests/README.md` for the table.
+
+They invoke real ffmpeg and the real router. Every bug in that table passed a
+string-level assertion first: `hue` has no `eval` option, ffmpeg rejects the
+whole graph, and a test asserting on the filter *string* stays green while the
+render dies after download and transcription.
+
+Four of these tests had to be **rewritten** during this work, because the rule
+they encoded was the bug: `_v27` asserted the topic was two words or more,
+which is exactly what kept "Prabowo" in the prompt.
+
+---
+
 **v0.4.0 "cutaways you can actually see, and failures that say so"** · branch `claude/code-clipper-review-v9e3im`
 6 files · new: `broll_place.py`, `glossary.py`
 

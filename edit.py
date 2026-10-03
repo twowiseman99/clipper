@@ -171,6 +171,53 @@ FLASH_HOLD = float(os.environ.get("CLIPPER_FLASH_HOLD", "0.22"))
 # Harder cap than punches: a flash interrupts the image, so three in a 90s
 # clip is already a lot.
 FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "3"))
+# Outro: how the clip closes. Two shapes, because the ending has to match what
+# the clip is about — a flash stinger under a man apologising for people being
+# killed is the wrong register, and reads as a template applied without
+# listening.
+#
+#   "stinger"    fast bright pulses, the jedak-jeduk ending. Energy, outrage,
+#                hype. Chosen for angry/energetic moods.
+#   "melancholy" the footage drains to black and white and dims as it ends.
+#                Grief, reflection, an apology. Chosen for emotional/sad moods.
+#   "none"       no treatment.
+#
+# Default "auto" picks from the clip's mood, which bgm.py already derives from
+# the transcript, so the ending follows the content rather than a flag.
+OUTRO = os.environ.get("CLIPPER_OUTRO", "auto").strip().lower()
+# How long the closing treatment runs. 3s read as too short on playback: by the
+# time a viewer registers the colour leaving, the clip is over. 5s lets the
+# drain land as a deliberate ending.
+OUTRO_SECONDS = float(os.environ.get("CLIPPER_OUTRO_SECONDS", "5.0"))
+# Stinger shape. Pulses per second: 4 reads as rhythm, past about 6 it is a
+# strobe, which is unpleasant and an accessibility problem.
+OUTRO_RATE = float(os.environ.get("CLIPPER_OUTRO_RATE", "4"))
+OUTRO_AMOUNT = float(os.environ.get("CLIPPER_OUTRO_AMOUNT", "0.42"))
+OUTRO_HOLD = float(os.environ.get("CLIPPER_OUTRO_HOLD", "0.12"))
+# Melancholy shape. How far colour drains. Full greyscale was the first attempt
+# and the operator called it "aneh": a face drained to pure grey reads as the
+# visual language of an obituary, and the man is mid-speech. 0.5 shifts the
+# register without killing the image.
+OUTRO_DESAT = float(os.environ.get("CLIPPER_OUTRO_DESAT", "0.5"))
+# And how far it dims by the final frame. Zero by default now: with the partial
+# desaturation above, a dim on top read as two effects stacked, and the dim was
+# the part that made the ending feel like a fade-to-nothing rather than a held
+# moment. Raise it if a clip's footage is bright enough to need it.
+OUTRO_DIM = float(os.environ.get("CLIPPER_OUTRO_DIM", "0.0"))
+# Slow-motion on the closing seconds. The last line lands and the image eases
+# off rather than stopping at full speed, which is what the operator asked for
+# and what a held final beat actually needs. 0.7 = 70% speed; low enough to
+# read as deliberate, high enough that lip movement does not turn into a
+# stutter. Implemented with setpts (no frame interpolation), so the audio is
+# untouched: the speech must stay in sync.
+OUTRO_SLOWMO = float(os.environ.get("CLIPPER_OUTRO_SLOWMO", "0.7"))
+# Moods that get the quiet ending. Everything else gets the stinger.
+OUTRO_SAD_MOODS = ("emotional", "sad", "reflective", "somber", "serious")
+# Every mood the pipeline is known to produce (bgm.py's buckets plus the sad
+# list). A mood outside this set means the caller and this module disagree, so
+# the stinger default is a guess rather than a decision — worth a warning.
+_OUTRO_KNOWN_MOODS = OUTRO_SAD_MOODS + (
+    "hype", "funny", "inspiring", "tense", "mysterious", "chill")
 # Ceiling on one ffmpeg render. Only ever trips on a stall — see the call site.
 RENDER_TIMEOUT = int(os.environ.get("CLIPPER_RENDER_TIMEOUT", "2400"))
 # Follow the speaker's face when zooming, instead of staying centred. Detection
@@ -823,6 +870,120 @@ def _zoom_parts(dur, fps):
     return n, z
 
 
+def _mood_words(mood):
+    """Mood as a list of lowercase words, whatever shape the caller passed.
+
+    bgm.pick() returns a track whose "mood" is a LIST (a file can carry several
+    mood words), and job.py forwards that straight through. `str(["emotional"])`
+    is `"['emotional']"`, which matched nothing, so every clip with music fell
+    through to the stinger branch: a grief clip about Palestinians being killed
+    shipped with 20 white flashes in its final five seconds, twice, while the
+    settings all read correctly in Python. Accepting both shapes here is the fix;
+    the lesson is that a silent fallback on a mood mismatch is the bug, which is
+    why _outro_kind now warns instead of guessing.
+    """
+    if mood is None:
+        return []
+    if isinstance(mood, str):
+        items = [mood]
+    elif isinstance(mood, (list, tuple, set)):
+        items = list(mood)
+    else:
+        items = [mood]
+    return [str(m).strip().lower() for m in items if str(m).strip()]
+
+
+def _outro_kind(mood=None):
+    """Which ending this clip gets: "stinger", "melancholy" or "none".
+
+    CLIPPER_OUTRO forces one; the default "auto" reads the mood. A clip about
+    people being killed closes quietly whatever the platform convention says —
+    the stinger belongs to outrage and hype, not to grief.
+    """
+    choice = (OUTRO or "").strip().lower()
+    if choice in ("0", "false", "no", "none", "off"):
+        return "none"
+    if choice in ("stinger", "flash", "1", "true", "yes"):
+        return "stinger"
+    if choice in ("melancholy", "sad", "fade"):
+        return "melancholy"
+    # auto
+    words = _mood_words(mood)
+    if any(w in OUTRO_SAD_MOODS for w in words):
+        return "melancholy"
+    if not words:
+        # No mood at all is a real case (no music, no transcript signal) and the
+        # stinger is the documented default. Only warn when a mood was supplied
+        # and simply did not match: that is the shape bug above, and it must not
+        # be silent — the wrong ending is a register error, not a cosmetic one.
+        return "stinger"
+    if not any(w in _OUTRO_KNOWN_MOODS for w in words):
+        sys.stderr.write(
+            f"edit: unrecognised mood {words!r}; defaulting to the stinger "
+            f"ending. Add it to OUTRO_SAD_MOODS if this clip should close "
+            f"quietly.\n")
+    return "stinger"
+
+
+def _outro_filters(dur, mood=None, seconds=None):
+    """(brightness_term, extra_filters) for the closing treatment.
+
+    The brightness term joins the beat-flash expression in one `eq`; the extra
+    filters are appended to the video chain. Both are "" / [] when the clip is
+    too short to give the ending its own space — a treatment covering most of
+    the clip is not an ending.
+    """
+    kind = _outro_kind(mood)
+    span = float(seconds if seconds is not None else OUTRO_SECONDS)
+    if kind == "none" or span <= 0 or dur < span * 3:
+        return "", []
+    start = max(0.0, dur - span)
+
+    if kind == "stinger":
+        count = max(2, int(round(span * OUTRO_RATE)))
+        terms = []
+        for i in range(count):
+            # Quadratic spacing: the gaps tighten toward the end of the run.
+            t = start + ((i / count) ** 0.82) * span
+            b = min(dur, t + OUTRO_HOLD)
+            if b > t:
+                terms.append(
+                    f"{OUTRO_AMOUNT:.3f}*between(t,{t:.3f},{b:.3f})"
+                    f"*pow(1-(t-{t:.3f})/{b - t:.4f},2)")
+        return "+".join(terms), []
+
+    # melancholy: colour drains and the image dims, both ramping across the
+    # window. `hue` evaluates its expressions per frame already — it is marked
+    # timeline-capable, and unlike `eq` it has no `eval` option at all. Passing
+    # one is not a no-op: ffmpeg 6.1 rejects the whole filter graph with
+    # "Option not found", which killed a render after the download and
+    # transcribe had already been paid for.
+    ramp = f"min(1,max(0,(t-{start:.3f})/{span:.4f}))"
+    bright = f"-{OUTRO_DIM:.3f}*{ramp}" if OUTRO_DIM > 0 else ""
+    desat = []
+    if OUTRO_DESAT > 0:
+        desat.append(f"hue=s='1-{OUTRO_DESAT:.3f}*{ramp}'")
+    if 0 < OUTRO_SLOWMO < 1:
+        # Stretch presentation timestamps from `start` onward. Frames before the
+        # window keep their own timestamps, so only the ending slows down.
+        #
+        # Video only, deliberately: slowing the audio would detune the speech
+        # and drift it out of sync with the captions, which are burned in at
+        # the original times. The clip therefore runs slightly longer than its
+        # audio and the last word lands before the final frame, which is the
+        # intended held beat.
+        factor = 1.0 / OUTRO_SLOWMO
+        desat.append(
+            f"setpts='if(lt(T,{start:.3f}),PTS,"
+            f"({start:.3f}/TB)+(PTS-{start:.3f}/TB)*{factor:.4f})'")
+    return bright, desat
+
+
+def _outro_expr(dur, mood=None, seconds=None):
+    """Brightness-only view of the outro, kept for callers that want the term."""
+    return _outro_filters(dur, mood=mood, seconds=seconds)[0]
+
+
 def _flash_expr(times, dur):
     """An `eq` brightness term that pops white briefly at each time, or "".
 
@@ -1194,7 +1355,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 caption_style=CAPTION_STYLE, accent_words=(),
                 frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE,
                 hook_style=HOOK_STYLE, intro=None, intro_seconds=None,
-                inserts=()):
+                inserts=(), mood=None):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -1230,6 +1391,13 @@ def render_clip(video_path, start, end, words, out_path, *,
     instead, losing nothing but showing the subject smaller. Either way the
     footage sits over a blurred copy of itself. split_screen=True keeps the
     legacy gameplay-bg layout (per-campaign toggle, PRD §3.6).
+
+    mood is the clip's emotional register (bgm.py derives it from the
+    transcript, and it already picks the music). It decides how the clip ends:
+    an "emotional" clip drains to black and white over the last seconds, while
+    anything else gets the bright stinger. Endings are the one place where the
+    wrong default is actively offensive — a flash montage under an apology for
+    people being killed reads as not having listened.
     Returns out_path.
     """
     dur = end - start
@@ -1338,9 +1506,23 @@ def render_clip(video_path, start, end, words, out_path, *,
             # Flashes land on beats the punches already chose, so the clip never
             # gains emphasis the audio did not have.
             flash = _flash_expr(punches, dur)
+            # The closing treatment joins the same brightness expression, and
+            # may add filters of its own (the melancholy ending desaturates).
+            #
+            # Applied to [0:v], which is the speech segment BEFORE the intro is
+            # concatenated in front of it, so its window is measured against
+            # `dur` alone. Passing the combined length here would place the
+            # ending `intro_dur` seconds early — the v17 render put a 5s outro
+            # at t=84 of an 89s timeline whose own clock only reached 82, so
+            # the treatment landed mid-speech and the last seconds shipped
+            # untouched. Measured on the delivered file: SATAVG 7.0 -> 6.9
+            # across the supposed ramp, i.e. nothing happened.
+            outro, outro_filters = _outro_filters(dur, mood=mood)
+            bright = "+".join(x for x in (flash, outro) if x)
             chains.append(f"[0:v]{cover_v or cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
-                          + (f",eq=brightness='{flash}':eval=frame" if flash else "")
+                          + (f",eq=brightness='{bright}':eval=frame" if bright else "")
+                          + "".join(f",{f}" for f in outro_filters)
                           + f"[{base_label}]")
         elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
@@ -1383,7 +1565,8 @@ def render_clip(video_path, start, end, words, out_path, *,
             chains.append(broll_place.overlay_chain(
                 ins_label, insert_base + n,
                 float(item["start"]) + intro_dur,
-                float(item["end"]) + intro_dur, nxt))
+                float(item["end"]) + intro_dur, nxt,
+                canvas_h=CANVAS_H))
             ins_label = nxt
 
         for i, ov in enumerate(overlays):
@@ -1446,8 +1629,13 @@ def render_clip(video_path, start, end, words, out_path, *,
                     f"{BGM_VOLUME}))'[bgm]")
             else:
                 chains.append(f"[{bgm_idx}:a]volume={BGM_VOLUME}[bgm]")
+            # normalize=0 is load-bearing. amix defaults to normalize=1, which
+            # divides every input by the number of inputs, so adding music
+            # silently halves the speech: the clip with BGM measured 5.7 dB
+            # QUIETER overall than the same clip without it. The per-track
+            # levels above already set the balance; amix must not re-scale it.
             chains.append(f"{speech}[bgm]amix=inputs=2:duration=first:"
-                          f"dropout_transition=0,{restamp},"
+                          f"normalize=0:dropout_transition=0,{restamp},"
                           f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
         else:
             chains.append(f"{speech}{restamp},"
@@ -1476,7 +1664,14 @@ def render_clip(video_path, start, end, words, out_path, *,
             raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()[:600]}")
         return out_path
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # CLIPPER_KEEP_TMP leaves the filter graph and overlay PNGs on disk.
+        # The graph is the only honest record of what ffmpeg was actually asked
+        # to do: a setting can read correctly in Python and still never reach
+        # the render, which is exactly the bug this was added for.
+        if os.environ.get("CLIPPER_KEEP_TMP") in ("1", "true", "yes"):
+            print(f"edit: kept {tmp_dir}")
+        else:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _preview_cli(argv):
