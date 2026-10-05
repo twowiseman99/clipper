@@ -1272,7 +1272,7 @@ def _punch_expr(times, fps):
     return "+".join(terms)
 
 
-def _zoompan(dur, fps=FPS, words=None, clip_start=0.0):
+def _zoompan(dur, fps=FPS, words=None, clip_start=0.0, frame_mode=None):
     """Centred push-in (no tracking), or None when zoom is off.
 
     The footage is normalised to `fps` first so the zoom spreads evenly across
@@ -1282,9 +1282,26 @@ def _zoompan(dur, fps=FPS, words=None, clip_start=0.0):
 
     Punch-ins ride on top of the base zoom instead of replacing it, so the
     clip keeps its slow drift and gains a tighter crop on stressed words.
+
+    In "pillar" framing the base zoom is skipped. Pillar exists to show the
+    whole 16:9 frame that `cover` was cutting, and this pass runs AFTER the
+    pillar composite — so CLIPPER_ZOOM=1.2 cropped the finished card and put
+    the sliced banner and the cut-off face straight back. Measured on the
+    first pillar render: the news chyron read "...RAL GIBRAN SARANKAN SISWA
+    BAWA BEKAL DARI RUM..." with both ends gone. Punch-ins still apply; they
+    are brief and intentional, not a standing crop.
+
+    `frame_mode` must be passed by the caller. Reading the module-level
+    FRAME_MODE here was wrong and silently so: that constant is the .env
+    default ("cover"), while --frame-mode travels as a function argument, so
+    `pillar` renders kept the base zoom and two consecutive "fixed" renders
+    came out byte-identical. Defaults to the module constant only when the
+    caller has nothing better.
     """
+    if frame_mode is None:
+        frame_mode = FRAME_MODE
     punch = _punch_expr(_punch_times(words, clip_start, dur), fps)
-    if ZOOM <= 1.0:
+    if ZOOM <= 1.0 or frame_mode == "pillar":
         if not punch:
             return None
         # No base zoom, but punches still need a zoompan pass to live in.
@@ -1769,6 +1786,29 @@ def render_clip(video_path, start, end, words, out_path, *,
         elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
             chains.append(f"[0:v]scale=-2:980,crop=min(iw\\,1040):980[mn]")
+        elif frame_mode == "pillar" and not split_screen:
+            # pillar builds its own background and foreground inside `cover`
+            # above, so it is already a finished 1080x1920 frame. Falling into
+            # the "fill" branch below re-cropped that finished frame to canvas
+            # width and undid the whole point: the first pillar render shipped
+            # with the news banner sliced at both ends
+            # ("...RAL GIBRAN SARANKAN SISWA BAWA BEKAL DARI RUM...") and the
+            # speaker's face cut, which is the exact damage pillar exists to
+            # prevent. Checked by reading a frame out of the delivered file;
+            # the graph string and the 1080x1920 probe both looked correct.
+            #
+            # zoom and the outro are computed here rather than reused from the
+            # cover branch above: that branch never runs in pillar mode, so
+            # its locals do not exist. _zoompan skips the standing CLIPPER_ZOOM
+            # in pillar mode and keeps only the punch-ins.
+            p_zoom = _zoompan(dur, fps, words, start, frame_mode=frame_mode)
+            p_bright, p_filters = _outro_filters(dur, mood=mood)
+            chains.append(f"[0:v]{cover},setsar=1"
+                          + (f",{p_zoom}" if p_zoom else "")
+                          + (f",eq=brightness='{p_bright}':eval=frame"
+                             if p_bright else "")
+                          + "".join(f",{f}" for f in p_filters)
+                          + f"[{base_label}]")
         else:
             # reference style: the footage itself, blurred, fills the frame
             chains.append(f"[0:v]split=2[bgsrc][mnsrc]")
@@ -1790,7 +1830,10 @@ def render_clip(video_path, start, end, words, out_path, *,
                 chains.append(f"[mnsrc]scale=-2:{h},"
                               f"scale=w='max(iw,{CANVAS_W})':h=-2,"
                               f"crop={CANVAS_W}:min(ih\\,{h})[mn]")
-        if not (frame_mode == "cover" and not split_screen):
+        if not (frame_mode in ("cover", "pillar") and not split_screen):
+            # cover and pillar both finish their own chain above and never
+            # create [bg]/[mn]; running this overlay for them would reference
+            # labels that do not exist.
             chains.append(f"[bg][mn]overlay=(W-w)/2:(H-h)/2,setsar=1[{base_label}]")
         if intro:
             # b-roll cropped to the canvas like any other footage, then joined

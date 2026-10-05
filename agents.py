@@ -25,6 +25,7 @@ never requires a section.
 import os
 import re
 
+import agent_skills
 import audit
 
 # Sections worth putting in front of a model, in the order they should appear.
@@ -132,18 +133,24 @@ def persona(checker):
 
 
 def system_for(checker, technical):
-    """Persona first, then Clipper's contract, with the contract winning.
+    """Persona, then the gate's skills, then Clipper's contract — contract wins.
 
     Order and the closing line are both deliberate: these agent files are
     written for a general audience and will happily suggest a 16:9 deliverable
     or an English hook. The technical half is the part that was verified against
     real renders, so it comes last and is declared authoritative.
+
+    Skills sit between the two: they belong to the agent (the operator's
+    instruction was to hand each agent the skills matching its job desk), but
+    they are advisory, so the binding contract still has the final word.
     """
     body = persona(checker)
-    if not body:
+    skills = agent_skills.block(checker)
+    if not body and not skills:
         return technical
+    parts = [p for p in (body, skills) if p]
     return (
-        f"{body}\n\n"
+        "\n\n".join(parts) + "\n\n"
         f"--- Clipper assignment: the rules below are binding and override "
         f"anything above them, including format, language and length. ---\n\n"
         f"{technical}"
@@ -180,17 +187,27 @@ def _selftest():
     assert "override" in sysmsg
     assert sysmsg.index("You are") < sysmsg.index("RETURN JSON ONLY")
 
-    # An unknown or missing agent degrades to the technical prompt unchanged,
-    # rather than raising mid-render.
+    # An unknown agent degrades to the technical prompt unchanged, rather than
+    # raising mid-render.
     assert system_for("nope", "X") == "X"
     saved = audit.AGENTS_ROOT
+    saved_skills = dict(agent_skills.SKILL_ROOTS)
     try:
         audit.AGENTS_ROOT = "/nonexistent"
         _cache.clear()
         assert persona("copy") == ""
+        # With the agent file gone the persona is empty, but the gate's skills
+        # are a separate source and still apply — so the prompt is NOT bare.
+        # Both must be unavailable before falling all the way back.
+        assert "### Skills" in system_for("copy", "X")
+        for k in agent_skills.SKILL_ROOTS:
+            agent_skills.SKILL_ROOTS[k] = "/nonexistent"
+        agent_skills._cache.clear()
         assert system_for("copy", "X") == "X"
     finally:
         audit.AGENTS_ROOT = saved
+        agent_skills.SKILL_ROOTS.update(saved_skills)
+        agent_skills._cache.clear()
         _cache.clear()
 
     print("agents: self-check ok")

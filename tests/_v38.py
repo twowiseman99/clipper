@@ -22,6 +22,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import agent_skills  # noqa: E402
 import agents  # noqa: E402
 import ai  # noqa: E402
 import audit  # noqa: E402
@@ -109,19 +110,50 @@ for label, body in (("copy", copy_body), ("language", lang_body)):
     assert "You are " not in body[m:], label
 
 # --- 4. a missing agent file must not break a render ------------------------
+# The agent file and the gate's skills are two independent sources, so losing
+# the .md does not strip the prompt bare — the skills block still applies, and
+# the technical contract is still declared binding. Only when BOTH are gone
+# does it fall back to the plain hand-written prompt.
 saved = audit.AGENTS_ROOT
+saved_roots = dict(agent_skills.SKILL_ROOTS)
 try:
     audit.AGENTS_ROOT = "/nonexistent-agency-root"
     agents._cache.clear()
-    fallback = capture(run_copy)
-    assert fallback, "render died when the agent file was missing"
-    body = fallback[0]
-    assert "--- Clipper assignment" not in body, body[:200]
+    degraded = capture(run_copy)
+    assert degraded, "render died when the agent file was missing"
+    body = degraded[0]
+    assert "You are " not in body.split("--- Clipper assignment")[0]
+    assert "### Skills" in body, body[:200]
     assert "Output strictly a JSON object" in body, "technical prompt lost"
-    assert not body.startswith("You are "), body[:60]
+
+    for k in agent_skills.SKILL_ROOTS:
+        agent_skills.SKILL_ROOTS[k] = "/nonexistent-skill-root"
+    agent_skills._cache.clear()
+    bare = capture(run_copy)
+    body = bare[0]
+    assert "--- Clipper assignment" not in body, body[:200]
+    assert "### Skills" not in body, body[:200]
+    assert "Output strictly a JSON object" in body, "technical prompt lost"
 finally:
     audit.AGENTS_ROOT = saved
+    agent_skills.SKILL_ROOTS.update(saved_roots)
+    agent_skills._cache.clear()
     agents._cache.clear()
+
+# --- 4b. each gate is handed the skills matching its job desk ---------------
+# The operator's instruction was "cukup kasi skill2 yg relevan sama job desk
+# mreka", so the pairing is asserted at the prompt, not just in the table.
+assert not agent_skills.missing(), agent_skills.missing()
+for checker in audit.DIVISIONS:
+    assert checker in agent_skills.SKILLS, f"{checker}: no skills decision"
+copy_skills = agent_skills.block("copy")
+assert "brainstorming" in copy_skills
+assert "/skill-sources/" in copy_skills, "skill path not given to the agent"
+# The sound gate is deliberately empty: neither repo has an audio skill, and a
+# near-miss pairing would repeat the invented-label mistake.
+assert agent_skills.block("sound") == ""
+# Skills are advisory and must sit BEFORE the binding contract.
+assert copy_body.index("### Skills") < copy_body.index("--- Clipper assignment")
 
 # --- 5. the persona is bounded ---------------------------------------------
 # These files run 900-1400 words. The technical half is the verified one; it
