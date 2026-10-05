@@ -100,14 +100,31 @@ with tempfile.TemporaryDirectory() as tmp:
          "-of", "csv=p=0", out], capture_output=True, text=True).stdout.strip()
     assert dims.startswith("1080,1920"), dims
 
-    # The freeze must actually freeze, and the shake must actually move. These
-    # are measurements on the rendered file, not assertions about a string.
+    # The freeze must actually freeze, and the shake must actually move.
+    # These are measurements on the rendered file, not assertions about a
+    # string — but note WHAT is frozen. The shake now runs ON the still
+    # (operator: "videonya dah ga di play, jadi image gitu"), so a plain
+    # frame-difference reads motion throughout the ending: the picture is
+    # being translated on the beat. It is the underlying picture that stops,
+    # which _v40 verifies by compensating for that translation.
+    #
+    # This test asserted frozen < 1.0 at the start of the ending, which only
+    # held while the shake began AFTER the still — i.e. while the bug was
+    # present. What belongs here is the shake's amplitude, and that the clip
+    # grew by the freeze's duration because `loop` inserts real frames.
     span = edit.OUTRO_JAMET_SECONDS
-    frozen = probe_moves(out, 22.0 - span + 0.02, 0.1)
     shaking = probe_moves(out, 22.0 - span + 0.6, 0.25)
-    assert frozen is not None and shaking is not None, (frozen, shaking)
-    assert frozen < 1.0, f"the freeze is not frozen: {frozen}"
+    assert shaking is not None, shaking
     assert shaking > 3.0, f"the shake does not move: {shaking}"
 
-print(f"_v36 ok — jamet fits a 22s clip (freeze {frozen:.3f}, "
-      f"shake {shaking:.1f}), melancholy still needs 24s, 1080x1920 kept")
+    dur = float(subprocess.run(
+        [os.environ.get("CLIPPER_FFPROBE", "ffprobe"), "-v", "error",
+         "-select_streams", "v", "-show_entries", "format=duration",
+         "-of", "csv=p=0", out],
+        capture_output=True, text=True).stdout.strip())
+    assert dur > 22.0 + edit.OUTRO_FREEZE - 0.4, (
+        "the frozen frames were not inserted: %.2fs for a 22s clip plus a "
+        "%.2fs hold" % (dur, edit.OUTRO_FREEZE))
+
+print(f"_v36 ok — jamet fits a 22s clip (shake {shaking:.1f}, "
+      f"clip grew to {dur:.1f}s), melancholy still needs 24s, 1080x1920 kept")

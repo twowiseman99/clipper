@@ -292,9 +292,14 @@ OUTRO_SAD_MOODS = ("emotional", "sad", "reflective", "somber", "serious")
 # it on the beat. This is the loud sibling of the melancholy ending and is only
 # reachable by asking for it (CLIPPER_OUTRO=jamet) or via a hype/funny mood.
 #
-# How long the freeze holds before the shaking starts. Short: the pause is a
-# beat of anticipation, not a still image.
-OUTRO_FREEZE = float(os.environ.get("CLIPPER_OUTRO_FREEZE", "0.5"))
+# How long the frozen frame holds. The operator's spec, from the reference
+# tutorial: "nanti berakhirnya di gibran setelah ngomong suruh bawa bekal,
+# selesai itu jeda 2 detik jedag jedug, lu liat kan itu videonya dah ga di
+# play, jadi image gitu" — the picture STOPS and the beat-shake happens on the
+# still, which is the whole jedag-jedug convention. At 0.5s the clip went back
+# to moving video almost immediately and the ending read as a stumble rather
+# than a freeze.
+OUTRO_FREEZE = float(os.environ.get("CLIPPER_OUTRO_FREEZE", "2.0"))
 # Shakes per second. This must match the music or the edit looks drunk rather
 # than on-beat, so it is MEASURED, not guessed: 1.923 Hz is one shake per beat
 # of the jedag-jedug track at 115.4 BPM (beat = 0.520s), found by onset-envelope
@@ -1087,7 +1092,18 @@ def _outro_filters(dur, mood=None, seconds=None):
         # to buy a look.
         frames = max(1, int(round(OUTRO_FREEZE * FPS)))
         pad = OUTRO_SHAKE_PX
-        shake_from = start + OUTRO_FREEZE
+        # The shake runs ON the frozen frame, not after it. `loop` inserts
+        # `frames` copies of one frame at `start`, so the still occupies
+        # start .. start+OUTRO_FREEZE on the output timeline and everything
+        # after it is pushed back by the same amount.
+        #
+        # This used to read `start + OUTRO_FREEZE`, which put the shake in the
+        # moving video that follows the still — so the picture stopped, sat
+        # there motionless, and only then started shaking once it was playing
+        # again. The operator's spec is the opposite and is the actual
+        # jedag-jedug convention: "videonya dah ga di play, jadi image gitu",
+        # the beats land on the still.
+        shake_from = start
         end = dur + OUTRO_FREEZE
         win = f"between(t,{shake_from:.3f},{end:.3f})"
         # One beat period. The shake is keyed to the track, not to taste:
