@@ -168,6 +168,59 @@ def pick_segments(video_duration, heatmap, words, platform, count,
     return out
 
 
+def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2):
+    """Pull `seg_end` back to where the speech inside the segment stops.
+
+    Returns (new_end, reason) or (None, reason) when nothing should change.
+
+    `--start` plus `--seconds` makes the operator guess how long a thought
+    runs. On the Gibran clip the sentence was 6.5s and the guess was 22s, so
+    the clip kept rolling through an unrelated aside and the crowd noise after
+    it. The transcript already knows where speech stops: find the last word
+    before a silence longer than `gap`, and end just after it.
+
+    The result is clamped at `min_dur` because the jamet ending needs room —
+    _outro_filters returns nothing when the clip is shorter than 3x its span,
+    which is how an earlier render lost its outro silently. Returning None
+    rather than a too-short segment keeps that decision visible to the caller.
+    """
+    inside = [w for w in words
+              if seg_start <= float(w.get("start", 0)) < seg_end]
+    if len(inside) < 2:
+        return None, f"only {len(inside)} word(s) in the segment"
+
+    # Collect every silence in range, then take the FIRST one that still
+    # leaves a usable clip.
+    #
+    # Taking the first silence outright does not work: --start is set by eye,
+    # so a segment often opens on the tail of the previous sentence. At
+    # --start 140.4 the words in range begin "Ya, Pak." and the first gap is
+    # the 3.0s pause after them — cutting there leaves 0.8s. An earlier
+    # attempt stripped leading words one at a time, but the gap sits AFTER
+    # those words rather than before them, so the strip loop broke on the
+    # first iteration and changed nothing. Skipping short candidates handles
+    # both shapes without special-casing either.
+    holes = []
+    for a, b in zip(inside, inside[1:]):
+        hole = float(b.get("start", 0)) - float(a.get("end", 0))
+        if hole >= gap:
+            holes.append((float(a.get("end", 0)), hole,
+                          str(a.get("word", ""))))
+    holes.append((float(inside[-1].get("end", seg_end)), 0.0, ""))
+
+    for cut, hole, word in holes:
+        new_end = min(seg_end, cut + 0.35)   # a breath, not a hard chop
+        if new_end >= seg_end - 0.05:
+            return None, "speech runs to the end of the segment already"
+        if new_end - seg_start >= min_dur:
+            reason = (f"{hole:.1f}s silence after {word!r}" if hole
+                      else "no silence found; kept the last word")
+            return new_end, reason
+
+    return None, (f"every speech break leaves under {min_dur:.1f}s, which is "
+                  f"less than the ending needs")
+
+
 def words_in(words, start, end):
     return [w for w in words if start <= w["start"] < end]
 

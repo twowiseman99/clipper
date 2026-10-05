@@ -310,18 +310,31 @@ OUTRO_SHAKE_HZ = float(os.environ.get("CLIPPER_OUTRO_SHAKE_HZ", "1.923"))
 # Shake amplitude in pixels on a 1080-wide canvas. 28 is visible without
 # tearing the subject off-frame; past ~60 the face leaves the safe area.
 OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "28"))
-# Hits per beat. The reference short spends 40% of its frames above 6.0 motion;
-# one hit per beat (1.923 Hz) only reached 13% — the punches were the right
-# size (peak 27.9 against the reference's 28.4) but too far apart, so the
-# stretch between them read as dead air. Two hits per beat doubles the density
-# without touching amplitude.
-OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "3"))
-# How fast each hit decays inside its slot. 8 puts nearly all of the travel in
-# the first ~15%: the frame snaps, then settles, then snaps again. A sine (the
-# previous shape) spends most of its time mid-travel, so the frame-to-frame
-# change stays small and even — it reads as a slow slide, which is what the
-# operator rejected. Lower this for a looser, rubberier shake.
-OUTRO_PUNCH_DECAY = float(os.environ.get("CLIPPER_OUTRO_PUNCH_DECAY", "2"))
+# Hits per beat. MEASURED against the reference, not chosen: the operator's
+# CapCut tutorial (youtube AGv6G13TPUc, 30-34s) runs 8 hits in 4.0s — 2.00 per
+# second, one hit every 0.500s. At 1.923 Hz the track's own beat gives 1.92/s,
+# so one hit per beat matches the reference within 4%.
+#
+# This was 3 (5.77 hits/s, one every 0.173s), tuned against a DIFFERENT
+# reference short (shorts/twn4fIJ0PUk) where the brief was "40% of frames
+# above 6.0 motion". Carrying that number over to this ending made it nearly
+# 3x denser than the clip it was supposed to look like, and the operator's
+# verdict was "getarannya terlalu gitu". Two references, two answers: the
+# density belongs to whichever clip is being matched, so re-measure instead of
+# inheriting.
+OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "1"))
+# How fast each hit decays inside its slot. The envelope is exp(-DECAY*phase)
+# where phase runs 0..1 across ONE BEAT, so this number is only meaningful
+# together with the period — it is not an absolute speed.
+#
+# That coupling bit once already: at 3 hits/beat the slot was 0.173s and
+# DECAY=2 put the whole excursion in 0.087s, a snap. Dropping to 1 hit/beat
+# stretches the slot to 0.520s, and the same DECAY=2 would spread that one
+# excursion over 0.260s — a slow drift, exactly the thing the operator
+# rejected earlier ("itu kan geser doang"). DECAY=6 restores the 0.087s snap
+# at the new period, so the ending gets FEWER hits with the same attack
+# instead of fewer, mushier ones.
+OUTRO_PUNCH_DECAY = float(os.environ.get("CLIPPER_OUTRO_PUNCH_DECAY", "6"))
 # Zoom punch depth as a scale factor on top of the positional kick. The
 # reference short pairs every hit with a scale pop; position alone looked like
 # a camera bump rather than an edit. 0.08 = an 8% snap in on each beat.
@@ -854,6 +867,29 @@ def _editorial_layer(words, clip_start, tmp_dir, accent_words=(),
 
             top_w = sum(t.width for t in tiles_top)
             top_h = max((t.height for t in tiles_top), default=0)
+            # If the top line does not fit, WRAP it instead of letting the
+            # paste loop below silently drop the overflow.
+            #
+            # That drop was real and expensive: emphasis.py uppercases stressed
+            # words, so "-anaknya membawa kotak" became "-anaknya MEMBAWA
+            # KOTAK" at 1003px against a 943px limit, and "kotak" — the word
+            # the whole clip was about — never reached the frame. The operator
+            # caught it by reading the caption ("Mana gibran ngomong kasih
+            # bekal?"); nothing in the logs mentioned it, because dropping a
+            # tile is not an error anywhere in this function.
+            #
+            # Caption text is not optional content. A phrase that cannot fit on
+            # one line gets two.
+            rows = [[]]
+            row_w = [0]
+            for t in tiles_top:
+                if row_w[-1] + t.width > max_w and rows[-1]:
+                    rows.append([])
+                    row_w.append(0)
+                rows[-1].append(t)
+                row_w[-1] += t.width
+            top_h = sum(max((t.height for t in r), default=0) for r in rows)
+            top_w = max(row_w) if row_w else 0
             block_w = min(max_w, max(top_w, punch.width))
             block_h = top_h + EDIT_LINE_GAP + punch.height
             block = Image.new("RGBA", (max(1, block_w), block_h), (0, 0, 0, 0))
@@ -863,21 +899,29 @@ def _editorial_layer(words, clip_start, tmp_dir, accent_words=(),
             # small line; a single rounded bar per line reads as deliberate.
             if EDIT_BOX_ALPHA:
                 d = ImageDraw.Draw(block)
-                if tiles_top:
-                    d.rounded_rectangle([(0, 0), (min(top_w, block_w) - 1, top_h - 1)],
+                y = 0
+                for r, rw in zip(rows, row_w):
+                    if not r:
+                        continue
+                    rh = max(t.height for t in r)
+                    d.rounded_rectangle([(0, y), (min(rw, block_w) - 1, y + rh - 1)],
                                         radius=EDIT_BOX_RADIUS,
                                         fill=(0, 0, 0, EDIT_BOX_ALPHA))
+                    y += rh
                 d.rounded_rectangle([(0, block_h - punch.height),
                                      (punch.width - 1, block_h - 1)],
                                     radius=EDIT_BOX_RADIUS,
                                     fill=(0, 0, 0, EDIT_BOX_ALPHA))
 
-            cx = 0
-            for t in tiles_top:
-                if cx + t.width > block_w:
-                    break
-                block.paste(t, (cx, 0), t)
-                cx += t.width
+            y = 0
+            for r in rows:
+                if not r:
+                    continue
+                cx = 0
+                for t in r:
+                    block.paste(t, (cx, y), t)
+                    cx += t.width
+                y += max(t.height for t in r)
             block.paste(punch, (0, block_h - punch.height), punch)
 
             path = os.path.join(tmp_dir, _name("e"))

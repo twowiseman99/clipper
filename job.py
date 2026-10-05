@@ -760,7 +760,7 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
 
 def run(content_url, opening_url=None, hook=None, platform="youtube",
         start=None, seconds=None, mood=None, out=None, max_mb=0, context=None,
-        copy_style=None, **style):
+        copy_style=None, snap_end=False, **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
     import edit
@@ -816,6 +816,20 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         seg_end = seg_start + float(seconds or hi)
         seg_end = min(seg_end, info["duration"])
         topic_hook = None
+        if snap_end:
+            # The operator picks --start by watching, then has to guess how
+            # long the thought runs. Guessing 22s on a 6.5s sentence shipped a
+            # clip that kept rolling into "tapi dua perempuan rekomendasi apa
+            # itu?" and "jangan dorong" — the point ended, the clip did not.
+            # Snap the tail to where speech actually stops instead.
+            snapped, why = selector.snap_to_speech_end(
+                words, seg_start, seg_end,
+                min_dur=float(os.environ.get("CLIPPER_SNAP_MIN", "9.0")))
+            if snapped is None:
+                warnings.append(f"--end-at-sentence did nothing: {why}")
+            else:
+                _log(f"end snapped {seg_end:.1f}s -> {snapped:.1f}s ({why})")
+                seg_end = snapped
     else:
         _log("choosing a segment...")
         picks = selector.pick_topical_segments(words, platform, 1,
@@ -1079,6 +1093,11 @@ def main(argv=None):
     p.add_argument("--start", type=float, help="cut from here instead of letting "
                                                "the model choose")
     p.add_argument("--seconds", type=float, help="clip length when --start is given")
+    p.add_argument("--end-at-sentence", action="store_true",
+                   dest="end_at_sentence",
+                   help="with --start: pull the end back to where speech stops "
+                        "instead of using the full --seconds, so the clip does "
+                        "not roll past the point being made")
     p.add_argument("--mood", help="override the music mood")
     p.add_argument("--context", help="what the clip is about: who is speaking, "
                                      "where, and why the moment matters. Steers "
@@ -1160,6 +1179,7 @@ def main(argv=None):
         with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
             res = run(a.content, a.opening, hook=a.hook, platform=a.platform,
                       start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
+                      snap_end=a.end_at_sentence,
                       max_mb=a.max_mb, context=a.context,
                       copy_style=a.copy_style, **style)
     except Busy as e:
