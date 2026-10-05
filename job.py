@@ -822,9 +822,17 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
             # clip that kept rolling into "tapi dua perempuan rekomendasi apa
             # itu?" and "jangan dorong" — the point ended, the clip did not.
             # Snap the tail to where speech actually stops instead.
+            # A silence alone is not the right boundary. Opening earlier to
+            # include build-up puts several silences before the actual point,
+            # and the first of them cuts the clip BEFORE the line it exists
+            # for. The context line names the subject, so the cut goes to the
+            # first break after the subject is last mentioned.
+            keys = [t for t in re.findall(r"\w+", (context or "").lower())
+                    if len(t) > 3]
             snapped, why = selector.snap_to_speech_end(
                 words, seg_start, seg_end,
-                min_dur=float(os.environ.get("CLIPPER_SNAP_MIN", "9.0")))
+                min_dur=float(os.environ.get("CLIPPER_SNAP_MIN", "9.0")),
+                after_words=keys)
             if snapped is None:
                 warnings.append(f"--end-at-sentence did nothing: {why}")
             else:

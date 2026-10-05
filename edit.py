@@ -1089,6 +1089,22 @@ def _outro_kind(mood=None):
     return "stinger"
 
 
+def _outro_start(dur, mood=None, seconds=None):
+    """Where the closing treatment begins, or None when there is no ending.
+
+    Mirrors the span logic in _outro_filters so callers do not duplicate it.
+    The caption chain needs this because overlay windows come from the
+    transcript and would otherwise animate on top of a frozen frame.
+    """
+    kind = _outro_kind(mood)
+    span = float(seconds if seconds is not None else OUTRO_SECONDS)
+    if kind == "jamet" and seconds is None:
+        span = OUTRO_JAMET_SECONDS
+    if kind == "none" or span <= 0 or dur < span * 3:
+        return None
+    return max(0.0, dur - span)
+
+
 def _outro_filters(dur, mood=None, seconds=None):
     """(brightness_term, extra_filters) for the closing treatment.
 
@@ -1988,12 +2004,25 @@ def render_clip(video_path, start, end, words, out_path, *,
                 canvas_h=CANVAS_H))
             ins_label = nxt
 
+        # Captions must not run on over the frozen ending. The freeze turns the
+        # last frame into a still, but overlay windows come from the transcript
+        # and know nothing about it, so 6 of 21 caption tiles kept animating on
+        # top of a frozen picture — the operator's "kenapa subtitlenya masih
+        # jalan?". Clamp every window to where the ending begins.
+        outro_at = _outro_start(dur, mood=mood)
         for i, ov in enumerate(overlays):
             src_label = ins_label if i == 0 else f"[v{i}]"
             dst_label = f"[v{i + 1}]"
+            t_end = ov.t_end
+            if outro_at is not None:
+                t_end = min(t_end, outro_at + intro_dur)
+                if t_end <= ov.t_start:
+                    # Entirely inside the ending: still emit the chain so the
+                    # label sequence stays unbroken, but never enable it.
+                    t_end = ov.t_start
             chains.append(
                 f"{src_label}[{first_overlay_idx + i}:v]"
-                f"overlay={ov.x}:{ov.y}:enable='between(t,{ov.t_start:.3f},{ov.t_end:.3f})'"
+                f"overlay={ov.x}:{ov.y}:enable='between(t,{ov.t_start:.3f},{t_end:.3f})'"
                 f"{dst_label}")
         # With no caption overlays the insert chain is the last video stage, so
         # the output label has to come from it or the cutaways are discarded.

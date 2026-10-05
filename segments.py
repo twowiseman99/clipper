@@ -168,7 +168,22 @@ def pick_segments(video_duration, heatmap, words, platform, count,
     return out
 
 
-def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2):
+# Words too common to identify a subject. A key has to be rare enough that
+# hearing it means the speaker is on topic; "yang" and "dari" appear in nearly
+# every Indonesian sentence, so using them as a floor marker points at filler
+# rather than at the point being made.
+_FILLER = {
+    "yang", "dari", "saat", "untuk", "dengan", "pada", "akan", "sudah",
+    "juga", "tidak", "atau", "agar", "supaya", "karena", "sebab", "tapi",
+    "tetapi", "adalah", "ialah", "oleh", "dalam", "kepada", "bahwa", "ini",
+    "itu", "ada", "bisa", "dapat", "lagi", "saya", "kami", "kita", "mereka",
+    "anda", "kamu", "dia", "nya", "para", "serta", "seperti", "soal",
+    "lebih", "paling", "masih", "harus", "boleh", "mau", "ingin", "pernah",
+}
+
+
+def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2,
+                       after_words=()):
     """Pull `seg_end` back to where the speech inside the segment stops.
 
     Returns (new_end, reason) or (None, reason) when nothing should change.
@@ -176,8 +191,15 @@ def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2):
     `--start` plus `--seconds` makes the operator guess how long a thought
     runs. On the Gibran clip the sentence was 6.5s and the guess was 22s, so
     the clip kept rolling through an unrelated aside and the crowd noise after
-    it. The transcript already knows where speech stops: find the last word
-    before a silence longer than `gap`, and end just after it.
+    it. The transcript already knows where speech stops.
+
+    `after_words` is what makes the cut land on the right sentence rather than
+    merely on a silence. Without it this function takes the first usable break,
+    which is only correct when the clip opens on its own point: starting at
+    122.0 to include the apology, the first break is 14.7s in and lands BEFORE
+    the lunch-box line the clip exists for. Given the clip's keywords it
+    instead cuts at the first break after the last keyword, so the sentence
+    completes and nothing beyond it survives.
 
     The result is clamped at `min_dur` because the jamet ending needs room —
     _outro_filters returns nothing when the clip is shorter than 3x its span,
@@ -189,8 +211,54 @@ def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2):
     if len(inside) < 2:
         return None, f"only {len(inside)} word(s) in the segment"
 
-    # Collect every silence in range, then take the FIRST one that still
-    # leaves a usable clip.
+    # Where the clip's subject is last spoken about. Everything before this is
+    # build-up and must not be cut into.
+    #
+    # Only DISTINCTIVE keys count. Feeding the whole context line in made this
+    # worse than having no floor at all: "yang", "dari" and "saat" are in every
+    # Indonesian sentence, so the floor landed on whatever filler came last and
+    # a 143.0 start stretched to 42s. The caller passes content words; this
+    # filter is the second line of defence.
+    #
+    # Picking by POSITION does not work in either direction. The last mention
+    # anywhere in range follows "anak" into an unrelated passage 17s later
+    # (143.0 -> 42s); the first contiguous run stops on an early "anak" at
+    # 128.16 and ends the clip before the sentence it was built for.
+    #
+    # Density is what separates them. Split the segment into runs of speech and
+    # score each by how many DISTINCT keys it contains: Gibran's sentence holds
+    # four (anak, kota, rumah, dimasak), while the passages on either side hold
+    # one apiece. The densest run is the subject; the floor is its last key.
+    #
+    # Keys are matched against the RAW transcript, which still has the
+    # mishearings the glossary fixes later ("kota" for "kotak", "titik" for
+    # "titip"). That is why density beats requiring a specific word: enough of
+    # the surrounding keys survive even when the central noun is misheard.
+    floor = seg_start
+    hit = None
+    keys = {str(k).lower().strip(".,!?") for k in after_words if k}
+    keys -= _FILLER
+    if keys:
+        runs = [[]]
+        for a, b in zip(inside, inside[1:] + [None]):
+            runs[-1].append(a)
+            if b is not None and float(b["start"]) - float(a["end"]) >= gap:
+                runs.append([])
+
+        def score(run):
+            return len({str(w.get("word", "")).lower().strip(".,!?-")
+                        for w in run} & keys)
+
+        best = max(runs, key=score)
+        if score(best):
+            for w in best:
+                bare = str(w.get("word", "")).lower().strip(".,!?-")
+                if bare in keys:
+                    floor = float(w.get("end", seg_start))
+                    hit = bare
+
+    # Collect every silence in range, then take the first one that sits after
+    # `floor` and still leaves a usable clip.
     #
     # Taking the first silence outright does not work: --start is set by eye,
     # so a segment often opens on the tail of the previous sentence. At
@@ -209,12 +277,16 @@ def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2):
     holes.append((float(inside[-1].get("end", seg_end)), 0.0, ""))
 
     for cut, hole, word in holes:
+        if cut < floor:
+            continue
         new_end = min(seg_end, cut + 0.35)   # a breath, not a hard chop
         if new_end >= seg_end - 0.05:
             return None, "speech runs to the end of the segment already"
         if new_end - seg_start >= min_dur:
             reason = (f"{hole:.1f}s silence after {word!r}" if hole
                       else "no silence found; kept the last word")
+            if hit:
+                reason += f" (first break after {hit!r})"
             return new_end, reason
 
     return None, (f"every speech break leaves under {min_dur:.1f}s, which is "
