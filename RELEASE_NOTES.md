@@ -1,3 +1,50 @@
+## v0.7.4 — the ending stopped fighting the captions
+
+**Subtitles kept animating on the frozen frame.** Operator: "kenapa
+subtitlenya masih jalan?"
+
+The jamet ending holds one frame and shakes it. Overlay windows come from the
+transcript and knew nothing about that: 6 of 21 caption tiles ran past the
+freeze point at 7.80s, the last to 10.46s. Moving text on a still picture
+cancels the whole point of freezing it.
+
+New `_outro_start()` mirrors the span logic in `_outro_filters` — including the
+`dur < span*3` cutoff, so a clip with no ending gets no clamp — and the caption
+chain clamps every window to it.
+
+**The clip could not open before its own point.** 12.8s, of which 3.06s (24%)
+was ending. Snapping to the first usable silence is right when `--start` sits
+on the sentence, but it leaves no room for build-up.
+
+Opening at 122.0 to include the apology exposed the real flaw. Three
+position-based rules, all wrong:
+
+| rule | result |
+|---|---|
+| first usable silence | 14.7s, ends BEFORE the lunch-box line |
+| last keyword in range | 42.3s, follows "anak" into a passage 17s later |
+| first contiguous keyword run | 14.7s, stops on "anak" at 128.16 |
+
+**Keyword density per run of speech** separates them. Gibran's sentence holds
+four distinct keys (anak, kota, rumah, dimasak); the apology before and the
+passage after hold one each. Density also survives the raw transcript, which
+still carries the mishearings the glossary fixes later — "kota" for "kotak".
+Requiring a specific noun would have missed; four approximate keys did not.
+
+Filler words are excluded. Passing the whole context line was worse than having
+no floor at all: "yang", "dari" and "saat" are in every Indonesian sentence, so
+the floor followed filler and a 143.0 start stretched to 42s.
+
+`--start 122.0` now gives 31.81s ending on the sentence, ending at 9% of the
+clip instead of 24%.
+
+Tests: 41 ok. `_v43` checks `_outro_start` agrees with `_outro_filters` across
+five durations, that opening earlier still ends on the same sentence, that a
+tail passage reusing a keyword is not followed, and that filler-only keys
+behave as no keys at all.
+
+— Dalmislave
+
 ## v0.7.3 — captions stopped losing words
 
 **The clip did not contain the line it was built around.** Operator: "Mana
