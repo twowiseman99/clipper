@@ -1,5 +1,138 @@
 # Clipper — Release Notes
 
+**v0.7.0 "the reviewer named in the log is the reviewer that ran"** · branch `claude/code-clipper-review-v9e3im`
+new: `agents.py`, `audit_watch.py`, `tests/_v33`–`_v38`
+
+_Dalmislave_
+
+---
+
+The operator asked to see the agents working: "gw mau lihat progress dan
+decision semua agent, apa yg lu kasih ke agent2 kita dan hasilnya gimana".
+He pointed a Discord channel at it and the channel stayed empty. Two separate
+reasons, both of them mine.
+
+**The ledger was never written anywhere.** `audit.py` built the whole review
+every render — six divisions, each with the brief it was handed and the
+verdicts it returned — then printed it to stdout and dropped it. Nothing had
+ever saved it, so nothing could deliver it. What I had been showing him came
+from my own terminal.
+
+`Ledger.save()` now writes `<clip>.audit.json` and `.audit.txt` next to every
+render, and `audit_watch.py` posts the ones it has not reported yet, with the
+same dedupe shape as `campaign_watch.py`. A ledger that cannot be written
+appends a warning instead of losing the clip.
+
+**The agents were named but never consulted.** This is the worse half. The
+ledger printed `agent: TikTok Strategist` while the prompt that actually went
+to the model was a hand-written `SYSTEM` string in `metadata.py`. The division
+labels were invented too — "RESEARCH" for footage, "DESIGN" for sound. The
+agency-agents repo declares its divisions in `divisions.json` (18 of them,
+with CI that fails when the list disagrees with the directories on disk), and
+neither label is in it. `RESEARCH` holds one agent, a synthesist. `DESIGN`
+holds ten UI/UX agents and no audio.
+
+He caught it in one line: "kenapa buat2 sendiri, gw mau semuanya rapi ya".
+
+| gate | was | is | file |
+| --- | --- | --- | --- |
+| sourcing | RESEARCH (invented) | TESTING · Evidence Collector | upstream |
+| footage | RESEARCH (invented) | TESTING · Evidence Collector | upstream |
+| copy | MARKETING | MARKETING · TikTok Strategist | upstream |
+| language | SPECIALIZED | SPECIALIZED · Indonesian Transcript Linguist | **ours** |
+| sound | DESIGN (invented) | SPECIALIZED · Focus Music Architect | upstream |
+| edit | ENGINEERING | MARKETING · Short-Video Editing Coach | upstream |
+
+Five of six are upstream files, unmodified; `git status` on that repo shows
+exactly one untracked file, the Indonesian linguist. It exists because the
+repo's `specialized/language-translator.md` is Spanish ↔ English and this work
+is not translation — source and target are both Indonesian, and what gets
+repaired is Whisper mishearing. `_v37` asserts the language gate never points
+at the translator.
+
+`agents.py` now loads each agent's Identity / Core Mission / Critical Rules
+and puts it in front of the technical prompt, with a line declaring the
+Clipper half binding. The merge direction was the operator's call: persona
+from the `.md`, format and limits from the code. A wholesale swap would have
+lost the constraints that took a dozen renders to find — the character caps,
+the banned-filler list, the no-invented-numbers rule — because these files are
+written for general-purpose coding agents and know nothing about 9:16 output.
+
+Heading layout is not consistent across the repo. `tiktok-strategist` opens
+`## Critical Rules` straight into a `###` subheading, which a naive scan
+returns as empty; `evidence-collector` has no mission section at all. The
+extractor stops only at a heading of the same depth or shallower, and requires
+no section.
+
+`_v38` intercepts `ai.chat_json` and asserts on what the model would actually
+receive. It caught a real bug on the first run: `metadata.SYSTEM` opened with
+"You are a viral short-form video strategist", so the merged prompt carried two
+competing identities. Two of its earlier assertions were wrong in my favour —
+looking for `maksimal 90 karakter` and a JSON contract in the system message
+when both live in the user message — and both were fixed in the test rather
+than worked around in `agents.py`.
+
+### Two named clip types
+
+`--clip-type sedih|jamet` sets mood, outro and b-roll together. Every
+register mismatch the operator has caught had the same shape: three layers
+disagreeing about what the clip was about. A heroic anthem over people being
+bombed. A flash stinger at a funeral. `auto` cannot select `jamet` — a
+jedag-jedug shake on a grief clip is not a style, it is an error.
+
+The jamet ending went missing twice. First the shared 24s guard
+(`3 × OUTRO_SECONDS`) rejected a 22s clip, because I had given the instant
+freeze-and-shake the span budget of an eight-second melancholy ramp; now
+`OUTRO_JAMET_SECONDS = 3.0` with a nine-second guard, melancholy unchanged.
+Then I read `edit DID NOT RUN` and reported the outro as missing without
+measuring the file — the ledger was wrong, not the render. The ledger only
+ever reported cutaways, so "no outro at all" and "outro applied perfectly"
+printed identically. The outro now reports a verdict, and too-short reports a
+warning.
+
+The shake itself was wrong in shape. A sine spends most of its cycle mid-travel
+and reads as a camera bump; the reference short the operator sent spends 40% of
+its frames above 6.0 motion. Measured against it with real ffmpeg: median 4.43
+vs 4.29, peak 28.1 vs 28.4, hits three times per beat with a sharp decay.
+
+### Framing
+
+A 16:9 source cover-cropped to 1080×1920 keeps 32% of the frame width. Vision
+confirmed what that does: the speaker's face cut at both edges, the lower-third
+banner sliced in half. `--frame-mode pillar` shows the entire frame over a
+pushed-in, darkened, blurred copy of itself — 1080×1920 and 9:16 untouched, as
+required. The background needs 1.6× cover scale or the source's own banner
+reappears, ghosted, behind the card.
+
+### ffmpeg, again
+
+`crop`'s `w` and `h` are evaluated once when the filter is configured, so they
+cannot contain `t` — ffmpeg rejects the whole graph. `x` and `y` can. `zoompan`
+accepts a `t`-free expression and then takes over 400 seconds on a 22-second
+clip, so the zoom punch goes through `scale` with `eval=frame`. `zoompan`'s
+timeline variable is `time`, not `t`, and `between()` works there only with it.
+
+### RTK
+
+Installed from the official release (SHA256 verified against `checksums.txt`)
+and wired through `rtk init --agent hermes`, which writes its own plugin and
+patches `plugins.enabled`. The plugin fails open: no `rtk` in PATH, or any
+error, and the original command runs. Measured here: `git log -5` 10,125 B →
+1,614 B, `git status` 769 B → 393 B. `ls` goes **up** 26% in this repo (tree
+format, many `temp_subs_*` directories) and a 57 KB Python file is not
+compressed at all. The awareness block in `CLAUDE.md` is verbatim from the
+repo's `hooks/rtk-awareness-full.md`, with its own markers so `rtk init` can
+upsert it later.
+
+### Tests
+
+36 green. `_v9`/`_v10` still fail, and still for the same reason: they need
+`media/uf9833efdc72b/PPOKdwOCMLA.words.json`, which was overwritten by a later
+render and was never committed. Confirmed against clean HEAD with `git stash`.
+Fabricating that fixture would make the suite green and the tests meaningless.
+
+---
+
 **v0.6.1 "a watcher that can say what it could not read"** · branch `claude/code-clipper-review-v9e3im`
 new: `campaign_watch.py`, `~/.hermes/scripts/campaign_watch.sh`
 
