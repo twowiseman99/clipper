@@ -1,5 +1,66 @@
 # Clipper — Release Notes
 
+## v0.7.2 — pillar was mostly blur; footage now fills 75% of the height
+
+Operator's verdict on v0.7.1: **"jelek banget"**, **"efeknya juga ampun"**, with
+an instruction to get the footage back to at least 75%. Measured, both were
+right:
+
+```
+card 1080x608 in a 1080x1920 canvas
+  footage  32% of screen
+  blur     68% of screen
+  head    ~13% of canvas height   <- thumbnail on a phone
+```
+
+### The fix inverts the trade-off
+
+The card is now scaled by canvas **height** (`PILLAR_COVER=0.75`) instead of
+stretched to canvas width. A 16:9 source at 1440px tall is 2560 wide, so only
+42% of the source width survives the 1080 crop — the borrowed chyron **cannot**
+stay intact at this size.
+
+That is a real choice, not a regression: the banner is the broadcaster's
+furniture, the face is the clip. The subject wins.
+
+Because *which* 42% now matters, `_pillar_pan_x` reuses the existing face
+sampling and keyframe smoothing to follow the speaker rather than keeping the
+middle. On this source the window tracks `0.33 -> 0.45` across the segment.
+
+### Caption was touching the source banner
+
+The 206px editorial block at the 0.62 default lands at 1190-1396. The card's
+geometry puts the source banner at 1377 — a 19px overlap, reviewed on a
+delivered frame as *"practically touching... the eye has to work to separate
+your caption from the broadcaster's headline"*.
+
+`EDIT_Y_FRAC_PILLAR=0.56` clears it by 96px. Captions stay **on the footage**
+rather than moving into the blurred band below the card, where they would read
+as a sticker stuck over the clip.
+
+### Verified on frames, not on the graph
+
+| | v0.7.1 | v0.7.2 |
+|---|---|---|
+| footage | 32% | **75%** |
+| blur | 68% | **25%** |
+| caption to banner | 19px overlap | **96px clear** |
+| subject | thumbnail | large, inside crop |
+
+1080x1920 unchanged. md5 differs from the previous render — the check that
+caught the no-op fix in v0.7.1.
+
+`_v39` now asserts the card covers at least 60% of canvas height, blur stays
+under 40%, the pan expression is a real crop position, the caption block ends
+above the banner, and the call site passes the pillar value rather than the
+default.
+
+### Tests
+
+37 ok. `_v9`/`_v10` unchanged (missing fixture, fails on clean HEAD).
+
+— Dalmislave
+
 ## v0.7.1 — pillar was cropping twice, and the agents got their skills
 
 ### pillar framing never actually applied
