@@ -114,6 +114,15 @@ EDIT_SIZE = int(os.environ.get("CLIPPER_EDIT_SIZE", "72"))
 EDIT_PUNCH_SIZE = int(os.environ.get("CLIPPER_EDIT_PUNCH_SIZE", "132"))
 EDIT_X_FRAC = 0.09        # left margin: the block runs across the frame
 EDIT_Y_FRAC = 0.62        # block TOP, below the speaker's face
+# In pillar framing the source keeps its own lower-third banner, and the
+# card's geometry puts that banner at y=1377 of a 1920 canvas. The editorial
+# block is 206px tall, so the 0.62 default lands at 1190-1396 and overlaps it
+# by 19px — reviewed on a delivered frame as "practically touching, the eye
+# has to work to separate your caption from the broadcaster's headline".
+# 0.56 clears it by 96px. The blurred band below the card (1680-1920) also
+# fits, but a caption floating in the blur reads as a sticker rather than part
+# of the clip, so the caption stays on the footage and moves up instead.
+EDIT_Y_FRAC_PILLAR = float(os.environ.get("CLIPPER_EDIT_Y_PILLAR", "0.56"))
 EDIT_LINE_GAP = 2
 EDIT_SHADOW = (0, 0, 0, 170)
 # Legibility floor. A speaker in white clothing swallowed plain white serif, so
@@ -145,6 +154,20 @@ FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "cover")
 # Verified by eye on a real frame at 0.94: the headline was "close to the lower
 # limit for comfortable mobile viewing".
 PILLAR_FILL = float(os.environ.get("CLIPPER_PILLAR_FILL", "1.0"))
+# How much of the canvas HEIGHT the sharp footage occupies. The original
+# pillar put the whole 16:9 frame edge to edge, which is only 608px of a 1920
+# canvas: 32% footage, 68% blurred filler, and a head about 13% of the frame
+# height. The operator's verdict on that render was "jelek banget" and
+# "efeknya juga ampun", which is the correct read — on a phone the subject was
+# thumbnail-sized and two thirds of the screen carried no information.
+#
+# At 0.75 the footage is 1440px tall. A 16:9 source scaled to that height is
+# 2560 wide, so only 42% of the source width survives the 1080 crop — the
+# source's own lower-third chyron cannot stay intact at this size. That is the
+# real trade: a readable subject, or an intact borrowed banner. The banner is
+# the broadcaster's furniture, the face is the clip, so the subject wins and
+# the crop window follows it rather than keeping the middle.
+PILLAR_COVER = float(os.environ.get("CLIPPER_PILLAR_COVER", "0.75"))
 # Background blur strength. Strong enough that the duplicated frame reads as
 # texture rather than a second picture competing with the subject.
 PILLAR_BLUR = float(os.environ.get("CLIPPER_PILLAR_BLUR", "28"))
@@ -1470,6 +1493,45 @@ def _pan_cover(video_path, start, end):
             f"crop={CANVAS_W}:{CANVAS_H}:x='iw*({x})-ow/2':y='(ih-oh)/2'")
 
 
+def _pillar_pan_x(video_path, start, end, card_h):
+    """x expression for the pillar card's crop window, following the speaker.
+
+    Scaling a 16:9 source to 75% of a 1920 canvas makes it 2560 wide, so the
+    1080 crop keeps 42% of the width and the choice of WHICH 42% matters more
+    than it does in `cover`. Reuses the same face sampling and the same
+    keyframe smoothing as _pan_cover; only the window geometry differs, since
+    the card is shorter than the canvas.
+
+    Falls back to the centre when PAN is off, cv2 is missing, or no face was
+    found — a centred crop is the old behaviour, not a failure.
+    """
+    centre = "'(iw-ow)/2'"
+    if not PAN:
+        return centre
+    try:
+        import cv2
+    except ImportError:
+        return centre
+    cap = cv2.VideoCapture(video_path)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if cap.isOpened() else 0
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if cap.isOpened() else 0
+    cap.release()
+    if W <= 0 or H <= 0:
+        return centre
+    # Width the source occupies once scaled to the card height.
+    scaled_w = W * (card_h / H)
+    if scaled_w <= CANVAS_W * 1.001:      # nothing to pan: it already fits
+        return centre
+    win_frac = CANVAS_W / scaled_w
+    pts = _sample_pan_faces(video_path, start, end)
+    if not pts:
+        return centre
+    keys = _pan_keys(pts, win_frac)
+    if not keys:
+        return centre
+    return f"'iw*({_pan_expr(keys)})-ow/2'"
+
+
 def _sample_face_centers(video_path, start, end, step=1.0):
     """[(t, cx, cy)] centres of the tracked face, in cropped-frame fractions.
 
@@ -1634,7 +1696,9 @@ def render_clip(video_path, start, end, words, out_path, *,
                  and frame_mode != "cover")
         if caption_style == "editorial" and not split_screen:
             overlays = _editorial_layer(
-                words, start, tmp_dir, accent_words=accent_words)
+                words, start, tmp_dir, accent_words=accent_words,
+                y_frac=(EDIT_Y_FRAC_PILLAR if frame_mode == "pillar"
+                        else EDIT_Y_FRAC))
         elif caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
@@ -1720,7 +1784,6 @@ def render_clip(video_path, start, end, words, out_path, *,
             # canvas width, with the remainder filled by a blurred, scaled copy
             # of the same frame so there are no hard black bars. Output stays
             # exactly 1080x1920; nothing about the delivered resolution moves.
-            fg_w = int(CANVAS_W * PILLAR_FILL) // 2 * 2
             # The background copy is pushed in hard and darkened. At plain
             # cover scale the duplicated news banner reappears in the lower
             # band as a half-readable ghost of the same headline — the caption
@@ -1734,6 +1797,17 @@ def render_clip(video_path, start, end, words, out_path, *,
             # fails the pad with "Invalid too big or non positive size".
             # Measured on this source: the news banner sits at 88% of frame
             # height, and it only leaves the visible crop past ~1.6x cover.
+            # The sharp card fills PILLAR_COVER of the canvas HEIGHT and the
+            # full canvas width, so the subject is large enough to read on a
+            # phone. Scaling by height means the source is cropped
+            # horizontally; the window follows the speaker when a face track is
+            # available, exactly like `cover` does, instead of keeping the
+            # middle of the frame and hoping the subject is in it.
+            card_h = int(CANVAS_H * PILLAR_COVER) // 2 * 2
+            pan_x = _pillar_pan_x(video_path, start, end, card_h)
+            fg = (f"scale=-2:{card_h},"
+                  f"scale=w='max(iw,{CANVAS_W})':h=-2,"
+                  f"crop={CANVAS_W}:{card_h}:x={pan_x}:y='(ih-oh)/2'")
             cover = (
                 f"split=2[pbg][pfg];"
                 f"[pbg]scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
@@ -1741,7 +1815,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 f"crop={CANVAS_W}:{CANVAS_H},"
                 f"gblur=sigma={PILLAR_BLUR:.0f},"
                 f"eq=brightness=-{PILLAR_BG_DIM:.2f}:saturation={PILLAR_BG_SAT:.2f}[pbgb];"
-                f"[pfg]scale={fg_w}:-2[pfgs];"
+                f"[pfg]{fg}[pfgs];"
                 f"[pbgb][pfgs]overlay=(W-w)/2:(H-h)/2"
             )
         chains = []

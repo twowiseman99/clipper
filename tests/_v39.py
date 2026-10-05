@@ -89,17 +89,27 @@ finally:
     edit.FRAME_MODE, edit.ZOOM = saved_mode, saved_zoom
 
 # --- the pillar graph itself still produces 1080x1920 -----------------------
-fg_w = int(edit.CANVAS_W * edit.PILLAR_FILL) // 2 * 2
+# The card fills PILLAR_COVER of the canvas HEIGHT, not the full width of a
+# letterboxed 16:9 frame. The first version showed 32% footage and 68% blur,
+# with a head about 13% of the canvas height; the operator's verdict was
+# "jelek banget". Scaling by height is the fix and the cost is horizontal
+# crop, so the window follows the speaker.
+card_h = int(edit.CANVAS_H * edit.PILLAR_COVER) // 2 * 2
+pan_x = edit._pillar_pan_x(src, 0.0, 2.0, card_h)
+fg = (f"scale=-2:{card_h},"
+      f"scale=w='max(iw,{edit.CANVAS_W})':h=-2,"
+      f"crop={edit.CANVAS_W}:{card_h}:x={pan_x}:y='(ih-oh)/2'")
 graph = (
     f"split=2[pbg][pfg];"
     f"[pbg]scale={edit.CANVAS_W}:{edit.CANVAS_H}:"
     f"force_original_aspect_ratio=increase,"
+    f"scale=iw*{edit.PILLAR_BG_ZOOM:.2f}:-2,"
     f"crop={edit.CANVAS_W}:{edit.CANVAS_H},"
-    f"scale=iw*{edit.PILLAR_BG_ZOOM}:-2,"
-    f"crop={edit.CANVAS_W}:{edit.CANVAS_H},"
-    f"gblur=sigma={edit.PILLAR_BLUR},eq=brightness=-0.12[bg];"
-    f"[pfg]scale={fg_w}:-2[fg];"
-    f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+    f"gblur=sigma={edit.PILLAR_BLUR:.0f},"
+    f"eq=brightness=-{edit.PILLAR_BG_DIM:.2f}:"
+    f"saturation={edit.PILLAR_BG_SAT:.2f}[pbgb];"
+    f"[pfg]{fg}[pfgs];"
+    f"[pbgb][pfgs]overlay=(W-w)/2:(H-h)/2"
 )
 out = os.path.join(tmp, "pillar.mp4")
 r = subprocess.run(
@@ -110,11 +120,15 @@ assert r.returncode == 0, r.stderr[-700:]
 w, h = probe(out, "stream=width,height")
 assert (int(w), int(h)) == (edit.CANVAS_W, edit.CANVAS_H), (w, h)
 
-# The card must be wide enough to actually show the source. A 16:9 frame
-# scaled to PILLAR_FILL of a 1080 canvas is about a third of the height; if
-# PILLAR_FILL were ever lowered to the point where the card is a postage
-# stamp, pillar stops solving the problem it exists for.
-assert fg_w >= edit.CANVAS_W * 0.9, fg_w
+# The sharp card must dominate the canvas. Anything much under half and the
+# subject is back to thumbnail size with the screen given over to blur.
+assert card_h >= edit.CANVAS_H * 0.6, (card_h, edit.CANVAS_H)
+blur_frac = 1 - card_h / edit.CANVAS_H
+assert blur_frac <= 0.4, blur_frac
+
+# A centred fallback is acceptable (no cv2 / no face found), but the
+# expression must be a real crop position either way.
+assert "iw" in pan_x, pan_x
 
 # --- pillar must not fall into the fill branch and get re-cropped ----------
 # The first fix was a no-op and the suite stayed green, because _v39 only
@@ -147,6 +161,29 @@ assert "pillar" in guard, (
     "the [bg][mn] overlay still runs for pillar; it has no such labels\n"
     + guard[-260:])
 
+# --- the editorial caption must clear the source's own banner --------------
+# In pillar the source keeps its lower-third chyron. With the card 1440px tall
+# and centred, that banner sits around y=1377; the 206px editorial block at
+# the 0.62 default lands 1190-1396 and overlaps it. Reviewed on a delivered
+# frame: "practically touching... the eye has to work to separate your caption
+# from the broadcaster's headline".
+BLOCK_H = 206           # measured from a real _editorial_layer render
+card_top = (edit.CANVAS_H - card_h) // 2
+banner_top = card_top + card_h * 0.79    # chyron at ~79% of source height
+
+pillar_y = int(edit.EDIT_Y_FRAC_PILLAR * edit.CANVAS_H)
+assert pillar_y + BLOCK_H <= banner_top, (
+    "pillar caption overlaps the source banner: block ends %d, banner starts %d"
+    % (pillar_y + BLOCK_H, banner_top))
+
+# And the call site must actually pick the pillar value, not the default.
+cap_mark = src.index("if caption_style == \"editorial\" and not split_screen:")
+cap_branch = src[cap_mark:cap_mark + 420]
+assert "EDIT_Y_FRAC_PILLAR" in cap_branch, (
+    "editorial captions ignore pillar framing\n" + cap_branch)
+
 print("_v39 ok — pillar skips the %.2fx base zoom (cover keeps it), "
-      "graph renders %dx%d, card %dpx wide, own branch not re-cropped"
-      % (1.2, int(w), int(h), fg_w))
+      "graph renders %dx%d, card %dpx tall (%.0f%% footage / %.0f%% blur), "
+      "own branch not re-cropped, caption clears the banner by %dpx"
+      % (1.2, int(w), int(h), card_h, card_h / edit.CANVAS_H * 100,
+         blur_frac * 100, banner_top - (pillar_y + BLOCK_H)))
