@@ -1,5 +1,61 @@
 # Clipper — Release Notes
 
+## v0.7.3 — the jamet freeze shook the wrong thing
+
+Reference: [AGv6G13TPUc](https://www.youtube.com/watch?v=AGv6G13TPUc) at 30-34s,
+a CapCut *"jedag jedug zoom x out"* tutorial. Operator's spec:
+
+> selesai itu jeda 2 detik jedag jedug, lu liat kan itu videonya dah ga di play,
+> jadi image gitu
+
+The picture **stops**, and the beats land on the still.
+
+### What shipped did the opposite
+
+`loop` inserts N copies of one frame at `start`, so the still occupies
+`start .. start+freeze` on the **output** timeline. The shake window opened at
+`start + OUTRO_FREEZE` — exactly where the still ends and moving video resumes.
+
+So: the clip froze, sat there motionless for half a second, then started
+shaking once it was playing again. Both halves existed; only the arithmetic
+relating the two timelines was wrong, which is why the filter graph read as
+correct.
+
+```
+shake_from = start            (was: start + OUTRO_FREEZE)
+OUTRO_FREEZE = 2.0            (was: 0.5)
+```
+
+### Verifying it needed a different measurement
+
+The shake translates the frame, so a plain frame-difference reads motion right
+through the ending — broken and fixed score the same. `tests/tools/freeze_probe.py`
+compensates for the translation (search a small offset range, keep the best
+match). Only then is the freeze visible:
+
+```
+moving video  6.0 vs 7.3    aligned diff 25.83
+moving video  6.0 vs 6.3    aligned diff 17.34
+frozen       19.2 vs 20.9   aligned diff  5.21
+frozen       19.2 vs 20.0   aligned diff  4.84
+```
+
+### _v36 had encoded the bug
+
+It asserted `frozen < 1.0` at the start of the ending — which only holds while
+the shake begins *after* the still. A test written against broken behaviour
+passes forever and blocks the fix. It now checks the shake's amplitude and that
+the clip grew by the hold, since `loop` inserts real frames (22.0 -> 24.0s).
+
+`_v40` is new: the loop and the shake must describe the same stretch of
+timeline, and the still must not be motionless.
+
+### Tests
+
+38 ok. `_v9`/`_v10` unchanged (missing fixture).
+
+— Dalmislave
+
 ## v0.7.2 — pillar was mostly blur; footage now fills 75% of the height
 
 Operator's verdict on v0.7.1: **"jelek banget"**, **"efeknya juga ampun"**, with
