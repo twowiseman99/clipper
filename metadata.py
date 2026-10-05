@@ -8,6 +8,7 @@ import re
 import sys
 
 import ai
+import audit
 import bgm
 import censor
 
@@ -249,13 +250,24 @@ def _fix_emoji(text, transcript, context=""):
                        if f in ("\U0001F1F5\U0001F1F8",)]
             allowed = victims or allowed
         keep = allowed[:1]
-        for f in found:
-            if f not in keep:
-                text = text.replace(f, "")
+        dropped = [f for f in found if f not in keep]
+        for f in dropped:
+            text = text.replace(f, "")
+        if dropped:
+            audit.rejected("copy", "flag emoji",
+                           f"{len(dropped)} removed",
+                           "country not named in the clip")
+        elif keep:
+            audit.passed("copy", "flag emoji", f"kept {keep[0]}",
+                         "country named in the clip")
 
     if grief:
+        before = text
         for ch in _CHEER:
             text = text.replace(ch, "")
+        if text != before:
+            audit.rejected("copy", "cheer emoji", "removed",
+                           "grief clip")
 
     # Tidy the gaps the removals leave behind.
     text = re.sub(r"\s{2,}", " ", text)
@@ -362,8 +374,13 @@ def generate(transcript, requirements, platform="youtube", context=None,
     # Filler is reported rather than rewritten: cutting a phrase out of the
     # middle of a sentence tends to leave worse copy than the phrase did.
     filler = _buzzwords(" ".join((hook, title, desc)))
+    audit.briefed("copy", f"style = {style!r}",
+                  f"mood {mood}", f"hook {len(hook)} / title {len(title)} chars")
     if filler:
+        audit.rejected("copy", "marketing filler", ", ".join(filler))
         print(f"  metadata: marketing filler in the copy: {', '.join(filler)}")
+    else:
+        audit.passed("copy", "marketing filler", "none")
 
     # Last step, after every fallback has run, so nothing written later can
     # reintroduce an unmasked word. Title and description are machine-read at
@@ -372,7 +389,10 @@ def generate(transcript, requirements, platform="youtube", context=None,
     # would only break search, so they are left alone.
     risky = censor.found(" ".join((hook, title, desc)))
     if risky:
+        audit.passed("copy", "risky words", f"masked: {', '.join(risky)}")
         print(f"  metadata: masked risky words in the copy: {', '.join(risky)}")
+    else:
+        audit.passed("copy", "risky words", "none found")
     hook = censor.mask(hook)
     title = censor.mask(title)
     desc = censor.mask(desc)

@@ -20,6 +20,8 @@ import re
 import subprocess
 import sys
 
+import audit
+
 # How long one cutaway holds. 2.2s read as a glitch in a delivered clip — the
 # operator could not find it on playback — so a cutaway now holds long enough to
 # register as a shot while the speaker is still never gone for long.
@@ -58,6 +60,24 @@ BURST_HOLD = float(os.environ.get("CLIPPER_BROLL_BURST_HOLD", "3.0"))
 # the speaker is gone long enough for the viewer to lose the thread.
 BURST_MAX = int(os.environ.get("CLIPPER_BROLL_BURST", "3"))
 MAX_INSERTS = int(os.environ.get("CLIPPER_BROLL_MAX", "6"))
+# A run of short sentences on one subject is one escalating breath, not three
+# separate thoughts — "Mereka dibantai. Mereka dibom. Mereka diserang." is the
+# same rhetorical move as "dibantai, dibom, diserang" with harder punctuation.
+# Spacing by punctuation alone put all three cutaways 2.5s apart (a montage
+# across separate sentences) and spacing them as separate thoughts left exactly
+# one cutaway in an 82s clip. Neither is what the speaker did.
+#
+# Measured on the Gontor transcript, the run is unmistakable: both gaps are
+# 2.5s, both sentences are 2 words long, and all three open with the same word,
+# while every sentence after them is 8-26 words and opens differently.
+BLOCK_WORDS = int(os.environ.get("CLIPPER_BROLL_BLOCK_WORDS", "5"))
+BLOCK_GAP = float(os.environ.get("CLIPPER_BROLL_BLOCK_GAP", "3.0"))
+# How many frames of a candidate window the gate judges. One frame answers
+# "is this instant right", and the viewer watches three seconds: a handheld
+# Old City patrol passed on its opening frame and had panned off-screen by the
+# second half, so a shuttered shopfront shipped under "mereka diserang
+# terus-menerus". Start, middle and end must all pass.
+WINDOW_FRAMES = int(os.environ.get("CLIPPER_BROLL_WINDOW_FRAMES", "3"))
 # Keep inserts out of the first and last stretch: the opening belongs to the
 # hook, and cutting away from the closing line throws away the payoff.
 EDGE_PAD = float(os.environ.get("CLIPPER_BROLL_EDGE", "6"))
@@ -73,6 +93,59 @@ def _ends_sentence(word):
     across three separate thoughts is just a busy clip.
     """
     return str(word or "").strip().endswith((".", "?", "!"))
+
+
+def sentence_blocks(words, clip_start=0.0):
+    """Which timestamps sit inside a run of short sentences on one subject.
+
+    Returns the set of word start times (clip-relative, rounded to 3dp) that
+    belong to such a run. `phrase_windows` treats a sentence boundary INSIDE a
+    run as not breaking the burst, so the run is spaced as one montage.
+
+    A run needs at least two consecutive sentences that are all short
+    (<= BLOCK_WORDS words), separated by no more than BLOCK_GAP seconds, and
+    opening with the same word — the anaphora that Indonesian political speech
+    uses to escalate ("Mereka ... Mereka ... Mereka ..."). All three conditions
+    together, because each alone is common: short sentences happen anywhere, a
+    small gap happens mid-list, and a repeated opener happens across a whole
+    paragraph.
+    """
+    items = [w for w in (words or ()) if w.get("start") is not None]
+    if not items:
+        return set()
+
+    # Split into sentences, keeping each word's clip-relative start.
+    sents = []
+    buf = []
+    for w in items:
+        t = round(float(w["start"]) - clip_start, 3)
+        word = str(w.get("word", "")).strip()
+        buf.append((t, word))
+        if _ends_sentence(word):
+            sents.append(buf)
+            buf = []
+    if buf:
+        sents.append(buf)
+
+    def opener(s):
+        return s[0][1].lower().strip(".,!?-\u2014 ") if s else ""
+
+    marked = set()
+    run = [sents[0]] if sents else []
+    for prev, cur in zip(sents, sents[1:]):
+        gap = cur[0][0] - prev[-1][0]
+        joined = (len(prev) <= BLOCK_WORDS and len(cur) <= BLOCK_WORDS
+                  and gap <= BLOCK_GAP and opener(prev) == opener(cur)
+                  and opener(cur) != "")
+        if joined:
+            run.append(cur)
+            continue
+        if len(run) >= 2:
+            marked.update(t for s in run for t, _ in s)
+        run = [cur]
+    if len(run) >= 2:
+        marked.update(t for s in run for t, _ in s)
+    return marked
 
 
 def phrase_windows(words, clip_start, dur, terms_fn=None):
@@ -96,6 +169,11 @@ def phrase_windows(words, clip_start, dur, terms_fn=None):
     last = -1e9
     burst = 0
     prev_word = ""
+    prev_t = None
+    # Timestamps inside a run of short same-subject sentences. A full stop in
+    # there is the speaker punching each item, not changing thought, so it must
+    # not end the burst.
+    block = sentence_blocks(items, clip_start)
     for w in items:
         t = float(w["start"]) - clip_start
         if t < EDGE_PAD or t + HOLD > dur - EDGE_PAD:
@@ -103,7 +181,16 @@ def phrase_windows(words, clip_start, dur, terms_fn=None):
         # Inside a burst the next cutaway may follow quickly, but never before
         # the previous one has finished holding, or the two inserts overlap and
         # ffmpeg draws the second over the first.
-        in_burst = bool(burst) and burst < BURST_MAX
+        #
+        # A burst is one escalating breath. `bool(burst)` alone never cleared,
+        # so three separate sentences were spaced 2.5s apart like a montage and
+        # every cutaway in an 82s clip landed in its first 20 seconds. Clearing
+        # it on any full stop went too far the other way and left one cutaway,
+        # because this speaker ends each item with a full stop. So the question
+        # is whether the sentence that just ended is part of a run.
+        broke = (prev_t is not None and _ends_sentence(prev_word)
+                 and round(prev_t, 3) not in block)
+        in_burst = bool(burst) and burst < BURST_MAX and not broke
         hold = BURST_HOLD if in_burst else HOLD
         gap = max(BURST_GAP, hold) if in_burst else MIN_GAP
         if t - last < gap:
@@ -117,14 +204,16 @@ def phrase_windows(words, clip_start, dur, terms_fn=None):
             continue
         out.append((round(t, 3), round(min(t + hold, dur), 3), word))
         # A burst continues while the speaker is still listing: the previous
-        # accepted word was close by and the sentence has not ended. A terminal
-        # "." or "?" on the PREVIOUS word would mean a new sentence started, so
-        # the chain is broken and the normal gap applies again.
-        if out[:-1] and t - last <= MIN_GAP and not _ends_sentence(prev_word):
+        # accepted word was close by and the thought has not changed. A full
+        # stop only changes the thought when it is NOT inside a run of short
+        # same-subject sentences — "Mereka dibantai. Mereka dibom." is one
+        # escalating breath despite the punctuation.
+        if out[:-1] and t - last <= MIN_GAP and not broke:
             burst += 1
         else:
             burst = 1
         prev_word = word
+        prev_t = t
         last = t
         if len(out) >= MAX_INSERTS:
             break
@@ -283,6 +372,74 @@ def _vision_check(src, at, subject, action=None):
             str(out.get("shows") or "").strip())
 
 
+def _window_check(src, at, seconds, subject=None, action=None):
+    """Judge the WHOLE window, not one frame of it. Same 4-tuple shape.
+
+    A cutaway is three seconds of footage, so judging its first frame answers
+    the wrong question. Measured on real handheld news footage: an Old City
+    patrol was correctly accepted at the start of the window and had panned out
+    of shot by the second half, so the clip showed a shuttered shopfront under
+    the caption "mereka diserang terus-menerus". The gate, the source and the
+    cut file were all correct — the window simply did not hold.
+
+    Frames at the start, middle and end must ALL pass. The verdicts are
+    combined conservatively:
+
+      usable       — every judged frame must be usable
+      on_topic     — false if ANY judged frame says false
+      shows_action — false if ANY judged frame says false
+
+    `shows` comes from the weakest judged frame, so the log describes what made
+    the window fail rather than the one frame that looked good. A frame nobody
+    could judge (router hiccup) is skipped rather than counted as a pass; if
+    none could be judged the result is unknown, as before.
+    """
+    n = max(1, WINDOW_FRAMES)
+    span = max(0.0, float(seconds))
+    if n == 1 or span <= 0.2:
+        offsets = [0.0]
+    else:
+        # Inside the window, pulled off the very edges: the first and last
+        # frames of a cut often land on the source's own transition.
+        lead = min(0.25, span * 0.1)
+        usable_span = max(0.0, span - 2 * lead)
+        offsets = [lead + usable_span * i / (n - 1) for i in range(n)]
+
+    results = []
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=min(n, VISION_PARALLEL)) as pool:
+        futures = [pool.submit(_vision_check, src, at + off, subject, action)
+                   for off in offsets]
+        for fut in futures:
+            try:
+                results.append(fut.result())
+            except Exception:
+                results.append((None, None, None, ""))
+
+    judged = [r for r in results if r[0] is not None]
+    if not judged:
+        return None, None, None, ""
+
+    usable = all(bool(r[0]) for r in judged)
+    on_topic = None
+    if any(r[1] is False for r in judged):
+        on_topic = False
+    elif any(r[1] is True for r in judged):
+        on_topic = True
+    shows_action = None
+    if any(r[2] is False for r in judged):
+        shows_action = False
+    elif any(r[2] is True for r in judged):
+        shows_action = True
+
+    def weak(r):
+        return (r[0] is not False, r[1] is not False, r[2] is not False)
+
+    worst = min(judged, key=weak)
+    shows = worst[3] or next((r[3] for r in judged if r[3]), "")
+    return usable, on_topic, shows_action, shows
+
+
 def _vision_ok(src, at, subject=None, action=None):
     """Back-compat wrapper: all three verdicts collapsed into one."""
     usable, on_topic, shows_action, shows = _vision_check(
@@ -372,7 +529,8 @@ def _pick_window(src, dur, latest, seconds, subject=None, action=None):
         verdicts = {}
         import concurrent.futures as cf
         with cf.ThreadPoolExecutor(max_workers=VISION_PARALLEL) as pool:
-            futures = {pool.submit(_vision_check, src, c, subject, action): c
+            futures = {pool.submit(_window_check, src, c, seconds,
+                                   subject, action): c
                        for _m, c, _s, _e in finalists}
             for fut in cf.as_completed(futures):
                 try:
@@ -388,6 +546,8 @@ def _pick_window(src, dur, latest, seconds, subject=None, action=None):
                 continue       # this frame went unjudged; try the next
             asked = True
             if usable and on_topic is not False and shows_action is not False:
+                audit.passed("footage", f"{name} @{c:.0f}s",
+                             f"motion {m:.1f}", shows or "usable footage")
                 return c, f"motion {m:.1f}, shows {shows or 'usable footage'}"
             if usable and on_topic is False:
                 why = "off topic"
@@ -396,6 +556,7 @@ def _pick_window(src, dur, latest, seconds, subject=None, action=None):
             else:
                 why = "unusable frame"
             detail = f": {shows}" if shows else ""
+            audit.rejected("footage", f"{name} @{c:.0f}s", why, shows)
             print(f"  broll: {name} @{c:.0f}s rejected by vision "
                   f"({why}{detail})")
         if asked:

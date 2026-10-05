@@ -1,5 +1,147 @@
 # Clipper — Release Notes
 
+**v0.6.0 "show the brief, not just the verdict"** · branch `claude/code-clipper-review-v9e3im`
+6 files · new: `audit.py`, `tests/_v29`–`_v32`
+
+_Dalmislave_
+
+---
+
+## What this release is about
+
+Two things the operator asked for, and one the reviewer caught.
+
+> "Gw mau full log semua agent kita checking" — and then, sharper:
+> "apa yg lu kasih ke agent-agent kita dan hasilnya gimana"
+
+The first half shipped as `audit.py`: one ledger, six divisions, every verdict
+printed. The second half is what this release adds, because the ledger could
+only answer "what did it decide" — never "what was it asked".
+
+That gap hid a real failure. On the Gibran clip the footage gate logged **35
+rejects and zero cutaways**, which reads like "no usable footage exists". The
+actual cause was the question: the gate was handed the entire `--context` —
+
+```
+"Gibran minta maaf ke korban keracunan MBG, menyarankan siswa
+ bawa bekal dari rumah yang dimasak ibunya"
+```
+
+— fifteen words, and asked whether one news frame showed all of them. Nothing
+can. The rejects were correct answers to an impossible question, and the report
+showed only the rejects.
+
+### The ledger now records the brief
+
+```
+RESEARCH     footage    1 pass · 1 reject
+             GIVEN subject = 'korban keracunan MBG'  3 word(s) — from context '...'
+             NO   abc @40s  not the action — hospital corridor
+             ok   abc @65s  motion 30.3 — collapsed building
+MARKETING    copy       0 pass · 0 reject  ← BRIEFED, NO VERDICT
+```
+
+Briefs print first, are excluded from the counts (a question is not a verdict),
+and a gate that was briefed and then decided nothing is flagged — that is the
+`look = ""` shape, where a gate existed, ran, and vetoed nothing for a whole
+release behind a clean `warnings: []`.
+
+Wired in: `footage` (subject + act required), `sourcing` (search terms +
+candidate count), `copy` (style + mood), `language` (word count), `sound`
+(mood + how it was chosen).
+
+### `_clip_topic` keeps the first clause, capped
+
+`--context` is written as "<what happened>, <what was said about it>" and only
+the first half is footage-able. Advice is not a frame. Measured:
+
+| context | before | after |
+| --- | --- | --- |
+| Gibran MBG | 15 words | `korban keracunan MBG` |
+| warga Gaza kehilangan rumah akibat serangan Israel | 7 words | unchanged |
+| Prabowo membela Palestina … di Gontor | `Palestina` | `Palestina` |
+
+The cap is 7, not 6: at 6 it truncated "…serangan Israel", and that context
+genuinely describes footage. `_v27` caught it.
+
+Speaker-action verbs were missing from the stance list, which is why the whole
+sentence survived: `minta maaf`, `menyarankan`, `mengimbau`, `mengajak`,
+`menjanjikan`, `memastikan`, `menjenguk`, `mengunjungi`, `menemui`.
+
+## The endings
+
+### Longer, layered sad outro
+
+`OUTRO_SECONDS` 5 → 8, plus a vignette and film grain that only ever ramp up —
+zero pulses, because the clip is about people being killed. Measured on the
+delivered file: Y 138 → 105 across the window, and the three flashes sit at
+17.5 / 33.9 / 45.2, all before the outro starts.
+
+### Dip to black — and the reviewer's correction
+
+Shipped as `fade=t=out:st=…:d=1.2:c=black`, placed **last** so slow-motion's
+stretch is already in the timeline. Oden measured the delivered file and found
+the final frame at **Y=21 — dark grey, not black**: a fade only reaches zero at
+`st+d`, and the clip ended exactly there. `OUTRO_FADE_LEAD=0.3` now lands it
+early, so there is held black to close on.
+
+Two timelines to keep straight, both documented at the call site: these filters
+attach to `[0:v]` **before** the intro is concatenated, so every number is
+segment-relative. An 82s segment with a 7s intro delivers 92.4s with the dip at
+91.2–92.4. Adding `intro_dur` would push the fade off the end of its own stream.
+
+### `CLIPPER_OUTRO=jamet`
+
+The TikTok edit, by request: freeze the frame, then shake it on the beat.
+Measured on the delivered clip — motion 3.5 → **0.006 at the freeze** → 15.3
+shaking.
+
+- Freeze uses `loop`, not `setpts`. `setpts` produced duplicate DTS
+  ("non monotonically increasing dts to muxer") and dropped frames.
+- The shake is a moving **crop**, scaled back to canvas. A zoom pulse changes
+  output dimensions per frame, and 1080×1920 does not move to buy a look.
+- Never selected by `auto`. A shaking ending on a funeral is not a style
+  choice, so `emotional`/`sad`/`reflective` still get the melancholy ending —
+  asserted in `_v32`.
+
+### The shake tempo is measured, not guessed
+
+I wrote 2.1 Hz from "~126 BPM". Then I measured the track:
+
+| method | result |
+| --- | --- |
+| energy envelope | 76.9 BPM — half-tempo harmonic, wrong |
+| onset envelope (rising energy only) | **115.4 BPM**, beat 0.520s |
+
+So 1.923 Hz, one shake per beat. My guess was 10 BPM off, enough to read as
+off-beat. Correlate onsets, not energy.
+
+## ffmpeg filter classes, again
+
+Three filters, three different rules — and the graph is rejected whole, after
+the download and transcribe are already paid for:
+
+| filter | time expressions |
+| --- | --- |
+| `vignette` | **needs** `eval=frame`, else the ramp is a constant |
+| `hue` | per-frame already; has no `eval` option at all |
+| `gblur` | **rejects** them — gated with `enable=` instead |
+| `noise` | same — `enable='gte(t,…)'` |
+
+`_v31`/`_v32` invoke real ffmpeg per layer. A test asserting on the filter
+string passes while ffmpeg refuses the graph.
+
+## Known failing: `_v9`, `_v10`
+
+Both load `media/uf9833efdc72b/PPOKdwOCMLA.words.json` — a render working
+directory keyed by URL, never committed, and gone once a different video was
+rendered. **They fail identically on a clean HEAD**, verified with `git stash`,
+so this is not a regression from this release. They need a committed fixture;
+I tried synthesising one and stopped, because tuning fake data until hardcoded
+timestamps matched would have made the tests pass without testing anything.
+
+---
+
 **v0.5.0 "the frame has to be shot where the clip says it is"** · branch `claude/code-clipper-review-v9e3im`
 9 files · new: `tests/` (18 regression tests + runner)
 

@@ -17,6 +17,7 @@ import sys
 import datetime
 import difflib
 
+import audit
 import fetch
 
 # Hits shorter than this are usually Shorts or clipped re-uploads with burned-in
@@ -519,6 +520,12 @@ def vetted(hits, terms, limit=1, **kw):
     "1 sources checked" in the warning.
     """
     out = []
+    # The brief for this division: what was searched, and how many candidates
+    # came back. "0 pass · 12 reject" reads differently when only three
+    # candidates were ever offered.
+    hits = list(hits)
+    audit.briefed("sourcing", f"terms = {list(terms)!r}",
+                  f"{len(hits)} candidate(s)", f"want {limit}")
     for hit in relevant(hits, terms):
         meta = probe_meta(hit.get("id"))
         if not meta:
@@ -527,9 +534,12 @@ def vetted(hits, terms, limit=1, **kw):
         merged.update({k: v for k, v in meta.items() if v is not None})
         ok, why = credible(merged, **kw)
         if not ok:
+            audit.rejected("sourcing", merged.get("title", "")[:48], why)
             print("broll: rejected %r — %s" % (merged.get("title", "")[:60],
                                                why), file=sys.stderr)
             continue
+        audit.passed("sourcing", merged.get("title", "")[:48],
+                     f"{int(merged.get('view_count') or 0):,} views")
         out.append(merged)
     out.sort(key=lambda h: -int(h.get("view_count") or 0))
     return out[:limit]

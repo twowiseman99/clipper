@@ -61,6 +61,12 @@ BROLL_INSERT = os.environ.get("CLIPPER_BROLL_INSERT", "0") not in ("0", "", "fal
 # an entire source (no window shows the action), so trying only the top hit
 # loses the cutaway whenever that one video happens to be aftermath footage.
 BROLL_SOURCE_TRIES = int(os.environ.get("CLIPPER_BROLL_TRIES", "3"))
+# Longest subject handed to the b-roll frame gate, in words. The gate answers
+# "does this frame show X" reliably for a thing, badly for a sentence: each
+# extra clause is another way real footage can be scored a miss. Measured: an
+# eleven-word subject produced 35 rejects and zero cutaways on a clip where
+# usable footage existed.
+TOPIC_MAX_WORDS = int(os.environ.get("CLIPPER_TOPIC_MAX_WORDS", "7"))
 LOCK_PATH = os.environ.get("CLIPPER_JOB_LOCK", os.path.join(_BASE, ".job.lock"))
 # Seconds to wait for a job already running. Zero means refuse immediately,
 # which is the right answer over chat: a caller would rather be told to try
@@ -316,6 +322,49 @@ def _venue_names(context, names):
     return venues
 
 
+def _clip_act(seg_words):
+    """What the cutaways in this clip must actually SHOW, or "" when nothing.
+
+    Decided once per clip, like the topic. The gate already asks WHERE a frame
+    was shot; on its own that let a mass funeral and a quiet border terminal —
+    both really in Palestine, both the aftermath — run under "mereka dibantai"
+    and "mereka dibom". The operator's rule: footage for those words has to be
+    war material from the news, not its consequences.
+
+    This is deliberately NOT the verb under each caption. Per-word gating threw
+    away real footage of the same event three renders in a row. It asks instead
+    whether the clip is about violence at all, and only then demands that the
+    cutaway show it. A clip with no violence words gets "" and keeps the
+    location-only question.
+    """
+    hits = []
+    for w in seg_words or ():
+        key = re.sub(r"[^\w-]", "", str(w.get("word", ""))).lower()
+        if not key or key in hits:
+            continue
+        if key in _ACT_WORDS:
+            hits.append(key)
+    if not hits:
+        return ""
+    return _ACT_LOOK
+
+
+# Violence words that make a clip a war clip. Taken from the transcript, not
+# from --context: the speaker's own words are what the captions will show.
+_ACT_WORDS = frozenset((
+    "dibantai", "bantai", "dibom", "bom", "pemboman", "diserang", "serang",
+    "serangan", "dibunuh", "hancur", "reruntuhan", "korban", "gugur",
+    "tewas", "meninggal", "kelaparan",
+))
+
+# What the footage has to depict. Phrased as the news material itself —
+# strikes, shelling, rubble, casualties being carried — so that a calm
+# aftermath shot (an intact terminal, a street scene) does not qualify.
+_ACT_LOOK = ("the attack itself or its immediate destruction: strikes, "
+             "explosions, smoke over buildings, shelling, collapsed or "
+             "burning buildings, rubble, wounded or dead being carried")
+
+
 def _clip_topic(context, names=(), venues=()):
     """Where the footage has to have been SHOT. Decided once per clip.
 
@@ -348,6 +397,15 @@ def _clip_topic(context, names=(), venues=()):
     stance = (r"\bmembela\b", r"\bmenyinggung\b", r"\bbicara soal\b",
               r"\bbicara tentang\b", r"\bbicara\b", r"\bmenyoroti\b",
               r"\bmengecam\b", r"\bmendukung\b", r"\bkomentar soal\b",
+              # Things a speaker DOES at the event. Without these, "Gibran minta
+              # maaf ke korban keracunan MBG, menyarankan siswa bawa bekal dari
+              # rumah yang dimasak ibunya" survived whole and the frame gate was
+              # asked whether one frame showed all fifteen words. It showed
+              # nothing: 35 rejects, zero cutaways.
+              r"\bminta maaf (?:ke|kepada)\b", r"\bminta maaf\b",
+              r"\bmenyarankan\b", r"\bmengimbau\b", r"\bmengajak\b",
+              r"\bmenjanjikan\b", r"\bmemastikan\b", r"\bmenjenguk\b",
+              r"\bmengunjungi\b", r"\bmenemui\b",
               r"\bsoal\b", r"\btentang\b", r"\bmengenai\b")
     parts = []
     for clause in re.split(r"[,;]", text):
@@ -383,7 +441,22 @@ def _clip_topic(context, names=(), venues=()):
             continue
         parts.append(c)
     topic = " ".join(parts).strip(" -—")
+    # Keep the FIRST surviving clause, not all of them joined. --context is
+    # written as "<what happened>, <what was said about it>", and only the first
+    # half is footage-able: the Gibran clip's second clause ("menyarankan siswa
+    # bawa bekal dari rumah") is advice, which no news frame shows. Joining both
+    # asked the gate for a frame containing an event AND a recommendation, and
+    # nothing qualified — 35 rejects, zero cutaways.
+    if parts:
+        topic = parts[0].strip(" -—")
+    # Then cap it. A frame gate answers "does this frame show X" well when X is
+    # a thing; past a handful of words X is a sentence with clauses, and every
+    # clause is another way real footage can be judged a miss. Indonesian puts
+    # the subject first, so keeping the head keeps the event.
     if topic:
+        words = topic.split()
+        if len(words) > TOPIC_MAX_WORDS:
+            topic = " ".join(words[:TOPIC_MAX_WORDS])
         return topic
     # No usable context: fall back to the subjects heard in the clip itself,
     # minus the venue, in the order they were ranked.
@@ -443,6 +516,7 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
     """
     notes = warnings if warnings is not None else []
     try:
+        import audit
         import broll
         import broll_place
         import edit
@@ -531,6 +605,12 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
         # against the same event.
         topic = _clip_topic(context, ordered, venues)
         _log(f"b-roll: topic for every cutaway = {topic!r}")
+        # Record the question, not just the answers. An eleven-word subject was
+        # what turned a clip with usable footage into 35 rejects, and the report
+        # showed only the rejects.
+        audit.briefed("footage", f"subject = {topic!r}",
+                      f"{len(topic.split())} word(s)",
+                      f"from context {str(context or '')[:60]!r}")
 
         def _subject_for(phrase):
             said = {w.lower() for w in re.findall(r"\w+", str(phrase or ""))}
@@ -573,7 +653,27 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
             #
             # The venue stays out: --context describes the speech, and asking
             # whether Gaza footage shows Gontor correctly returns no.
-            look = ""
+            #
+            # But dropping the act question entirely went too far the other
+            # way. With look="" the gate only asked WHERE a frame was shot, so
+            # a mass funeral and a border terminal — both genuinely in
+            # Palestine, both the aftermath — shipped under "mereka dibantai"
+            # and "mereka dibom". The operator's words: "footage dibantai dan
+            # di bom harusnya cuplikan perang dari berita". So the act is asked
+            # once per clip, at the clip's own level: is this war footage, not
+            # is this the specific verb under this caption.
+            look = _clip_act(seg_words)
+            if look:
+                audit.briefed("footage", "act required", look,
+                              "violence named in the clip")
+                audit.passed("footage", "act required", "war footage only",
+                             "clip names violence")
+                print(f"b-roll: cutaways must show the act: {look}")
+            else:
+                audit.briefed("footage", "act required", "none",
+                              "no violence word in the clip")
+                audit.passed("footage", "act required", "location only",
+                             "clip names no violence")
             subject = topic
             # Try more than the top hit. The frame gate rejects whole sources
             # now, and asking only hits[0] meant one rejected video dropped the
@@ -656,6 +756,14 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     # shipped the opening greeting when the operator asked for Palestina.
     warnings = []
 
+    # One ledger per render. Every gate records here so the end of the run can
+    # say which division checked what — including gates that found nothing,
+    # because a silent gate used to be indistinguishable from a gate that was
+    # switched off. That is not hypothetical: `look = ""` disabled the act gate
+    # for a whole release and the only sign was cutaways that felt wrong.
+    import audit
+    audit.start()
+
     lo, hi = selector.duration_window(platform)
     if start is not None:
         seg_start = float(start)
@@ -706,12 +814,24 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     # once shipped with `sololah` burned in and the only evidence was a line on
     # stderr.
     if LANG_REVIEW:
+        audit.briefed("language", f"{len(seg_words)} word(s) of transcript",
+                      "after segment selection",
+                      "reviewing the whole video timed the router out once")
         seg_words = language.review(seg_words, context=context or "",
                                     status=review_status)
-
     if review_status.get("ok") is False:
+        audit.rejected("language", "transcript review", "skipped",
+                       str(review_status.get("reason", "?")))
         warnings.append("transcript review skipped: %s — captions are raw "
                         "Whisper output" % review_status.get("reason", "?"))
+    elif LANG_REVIEW:
+        # language.review puts the count in `reason` ("3 fixed", "no
+        # mishearings found"), so there is no separate counter to invent.
+        audit.passed("language", "transcript review",
+                     str(review_status.get("reason") or "reviewed"))
+    else:
+        audit.warned("language", "transcript review", "disabled",
+                     "CLIPPER_LANG_REVIEW is off")
 
     # Measure which words the speaker actually leaned on before captions are
     # drawn. Failure here scores every word 0.0 and the captions fall back to
@@ -729,6 +849,16 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     meta["hook"] = _hook_for(hook, opening, topic_hook, meta["hook"])
 
     track, why = bgm.pick(mood or meta.get("mood"), key=f"job:{int(seg_start)}")
+    audit.briefed("sound", f"mood = {mood or meta.get('mood')!r}",
+                  "operator override" if mood else "read from transcript",
+                  f"{len(bgm.load_tracks())} track(s) on this box")
+    if track:
+        audit.passed("sound", track.get("file", "?"),
+                     f"mood {track.get('mood') or meta.get('mood')}", why)
+    else:
+        # No music is a deliberate outcome, not a failure: a triumphal anthem
+        # under a clip about people being killed is worse than silence.
+        audit.warned("sound", "no music", "no track matched the mood", why)
     _log(f"bgm: {why}")
     # A clip shipping without music is a product decision, not a detail: it
     # happens when the stock would actively fight the clip. Say so in the
@@ -745,11 +875,15 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
                               context, content,
                               warnings=warnings) if BROLL_INSERT else []
     if inserts:
+        audit.passed("edit", "cutaways placed", f"{len(inserts)}",
+                     ", ".join(i["term"] for i in inserts))
         _log("b-roll: %s" % ", ".join(
             "%s @%.0fs" % (i["term"], i["start"]) for i in inserts))
     elif BROLL_INSERT:
         # Silence here is how v22 shipped with no cutaways and a clean
         # warnings list. If nothing even got as far as being rejected, say so.
+        audit.warned("edit", "cutaways placed", "0",
+                     "no footage passed the gates")
         if not any(w.startswith("b-roll:") for w in warnings):
             warnings.append("b-roll: no cutaways were placed")
 
@@ -764,7 +898,7 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
                      **style)
 
     small = _delivery_copy(out, max_mb)
-    return {
+    result = {
         "ok": True,
         "file": os.path.abspath(out),
         "size_bytes": os.path.getsize(out),
@@ -787,6 +921,17 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         "warnings": warnings,
         "elapsed_sec": round(time.time() - t0, 1),
     }
+
+    # Printed after the JSON result is assembled but before returning, so the
+    # review is the last thing on stderr and lines up with the clip just made.
+    # The checker list is explicit: a gate named here that recorded nothing
+    # prints DID NOT RUN instead of vanishing.
+    led = audit.current()
+    if led is not None:
+        led.emit(checkers=("sourcing", "footage", "copy",
+                           "language", "sound", "edit"))
+    audit.stop()
+    return result
 
 
 def _selftest():

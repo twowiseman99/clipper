@@ -186,9 +186,11 @@ FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "3"))
 # the transcript, so the ending follows the content rather than a flag.
 OUTRO = os.environ.get("CLIPPER_OUTRO", "auto").strip().lower()
 # How long the closing treatment runs. 3s read as too short on playback: by the
-# time a viewer registers the colour leaving, the clip is over. 5s lets the
-# drain land as a deliberate ending.
-OUTRO_SECONDS = float(os.environ.get("CLIPPER_OUTRO_SECONDS", "5.0"))
+# time a viewer registers the colour leaving, the clip is over. 5s let the drain
+# land; the operator then asked for longer still ("outro sedihnya panjangin"),
+# so 8s. The guard in _outro_filters keeps this from eating a short clip: the
+# treatment is skipped unless the clip is at least 3x the span, i.e. 24s here.
+OUTRO_SECONDS = float(os.environ.get("CLIPPER_OUTRO_SECONDS", "8.0"))
 # Stinger shape. Pulses per second: 4 reads as rhythm, past about 6 it is a
 # strobe, which is unpleasant and an accessibility problem.
 OUTRO_RATE = float(os.environ.get("CLIPPER_OUTRO_RATE", "4"))
@@ -211,8 +213,48 @@ OUTRO_DIM = float(os.environ.get("CLIPPER_OUTRO_DIM", "0.0"))
 # stutter. Implemented with setpts (no frame interpolation), so the audio is
 # untouched: the speech must stay in sync.
 OUTRO_SLOWMO = float(os.environ.get("CLIPPER_OUTRO_SLOWMO", "0.7"))
+# Vignette on the closing seconds: the frame edges darken inward so attention
+# collapses onto the speaker as the clip ends. This is the "agak norak" layer
+# the operator asked for — showy enough to read as a deliberate ending, and
+# unlike a flash it adds no pulses, which a grief clip must not have. In
+# radians at full strength; PI/4.5 is a visible corner fall-off, PI/2 is a
+# porthole.
+OUTRO_VIGNETTE = float(os.environ.get("CLIPPER_OUTRO_VIGNETTE", "0.698"))
+# Film grain over the same window, so the drained image reads as aged footage
+# rather than a broken encode. Low: 6 is texture, past ~15 it looks like noise
+# in the source and the operator reviews frames at full size.
+OUTRO_GRAIN = float(os.environ.get("CLIPPER_OUTRO_GRAIN", "6"))
+# Dip to black on the very last beat. Short on purpose: a dim spread across the
+# whole window is what the operator called "aneh" (OUTRO_DIM, now 0) because the
+# ending read as fading to nothing instead of holding. Confined to the final
+# ~1.2s it is a closing gesture rather than a slow drain, and it gives the clip
+# a hard end instead of cutting mid-frame on loop.
+OUTRO_FADE = float(os.environ.get("CLIPPER_OUTRO_FADE", "1.2"))
+# How far before the final frame the fade finishes. The reviewer measured the
+# last frame at Y=21 — dark grey, not black — because a fade only reaches zero
+# at st+d and the clip ended there. 0.3s of held black closes it properly.
+OUTRO_FADE_LEAD = float(os.environ.get("CLIPPER_OUTRO_FADE_LEAD", "0.3"))
 # Moods that get the quiet ending. Everything else gets the stinger.
 OUTRO_SAD_MOODS = ("emotional", "sad", "reflective", "somber", "serious")
+# --- "jamet" ending (the TikTok edit) --------------------------------------
+# Operator's brief: "editan jamet, kayak video viral tiktok, ikutin beat gambar
+# goyang-goyang setelah di pause bagian gibran". So: hold the frame, then shake
+# it on the beat. This is the loud sibling of the melancholy ending and is only
+# reachable by asking for it (CLIPPER_OUTRO=jamet) or via a hype/funny mood.
+#
+# How long the freeze holds before the shaking starts. Short: the pause is a
+# beat of anticipation, not a still image.
+OUTRO_FREEZE = float(os.environ.get("CLIPPER_OUTRO_FREEZE", "0.5"))
+# Shakes per second. This must match the music or the edit looks drunk rather
+# than on-beat, so it is MEASURED, not guessed: 1.923 Hz is one shake per beat
+# of the jedag-jedug track at 115.4 BPM (beat = 0.520s), found by onset-envelope
+# autocorrelation. A plain energy envelope reported 76.9 BPM on the same file —
+# the half-tempo harmonic — so onsets (rising energy only) are what to correlate.
+# Re-measure when the track changes; CLIPPER_OUTRO_SHAKE_HZ overrides per clip.
+OUTRO_SHAKE_HZ = float(os.environ.get("CLIPPER_OUTRO_SHAKE_HZ", "1.923"))
+# Shake amplitude in pixels on a 1080-wide canvas. 28 is visible without
+# tearing the subject off-frame; past ~60 the face leaves the safe area.
+OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "28"))
 # Every mood the pipeline is known to produce (bgm.py's buckets plus the sad
 # list). A mood outside this set means the caller and this module disagree, so
 # the stinger default is a guess rather than a decision — worth a warning.
@@ -894,11 +936,16 @@ def _mood_words(mood):
 
 
 def _outro_kind(mood=None):
-    """Which ending this clip gets: "stinger", "melancholy" or "none".
+    """Which ending this clip gets: "stinger", "melancholy", "jamet" or "none".
 
     CLIPPER_OUTRO forces one; the default "auto" reads the mood. A clip about
     people being killed closes quietly whatever the platform convention says —
     the stinger belongs to outrage and hype, not to grief.
+
+    "jamet" is the TikTok edit: freeze the frame, then shake it on the beat.
+    It is never chosen by "auto", because it is a strong stylistic claim about
+    the subject — funny on a politician's slip, grotesque on a funeral. The
+    operator asks for it per clip.
     """
     choice = (OUTRO or "").strip().lower()
     if choice in ("0", "false", "no", "none", "off"):
@@ -907,6 +954,8 @@ def _outro_kind(mood=None):
         return "stinger"
     if choice in ("melancholy", "sad", "fade"):
         return "melancholy"
+    if choice in ("jamet", "tiktok", "shake", "freeze"):
+        return "jamet"
     # auto
     words = _mood_words(mood)
     if any(w in OUTRO_SAD_MOODS for w in words):
@@ -952,6 +1001,35 @@ def _outro_filters(dur, mood=None, seconds=None):
                     f"*pow(1-(t-{t:.3f})/{b - t:.4f},2)")
         return "+".join(terms), []
 
+    if kind == "jamet":
+        # Freeze, then shake on the beat. `loop` clones one frame N times
+        # rather than re-timestamping it: setpts-based freezing produced
+        # duplicate DTS ("non monotonically increasing dts to muxer") and the
+        # encoder dropped frames, which is not a thing to discover on a render.
+        #
+        # The shake is a crop window moved by two out-of-phase sines, then
+        # scaled back to canvas. Scaling the picture instead (a zoom pulse)
+        # changes the output dimensions per frame, and 1080x1920 is not
+        # negotiable here — the operator's rule is that resolution never moves
+        # to buy a look.
+        frames = max(1, int(round(OUTRO_FREEZE * FPS)))
+        pad = OUTRO_SHAKE_PX
+        cw = f"iw-{2 * pad:.0f}"
+        ch = f"ih-{2 * pad:.0f}"
+        shake_from = start + OUTRO_FREEZE
+        win = f"between(t,{shake_from:.3f},{dur + OUTRO_FREEZE:.3f})"
+        osc = f"sin(2*PI*{OUTRO_SHAKE_HZ:.3f}*(t-{shake_from:.3f}))"
+        osc2 = f"sin(2*PI*{OUTRO_SHAKE_HZ:.3f}*(t-{shake_from:.3f})+1)"
+        return "", [
+            f"loop=loop={frames}:size=1:start={int(round(start * FPS))}",
+            (f"crop=w={cw}:h={ch}"
+             f":x='(iw-ow)/2+{pad:.0f}*{osc}*{win}'"
+             f":y='(ih-oh)/2+{pad * 0.7:.0f}*{osc2}*{win}':exact=1"),
+            f"scale={CANVAS_W}:{CANVAS_H}",
+            "setsar=1",
+            f"fps={FPS}",
+        ]
+
     # melancholy: colour drains and the image dims, both ramping across the
     # window. `hue` evaluates its expressions per frame already — it is marked
     # timeline-capable, and unlike `eq` it has no `eval` option at all. Passing
@@ -963,6 +1041,19 @@ def _outro_filters(dur, mood=None, seconds=None):
     desat = []
     if OUTRO_DESAT > 0:
         desat.append(f"hue=s='1-{OUTRO_DESAT:.3f}*{ramp}'")
+    if OUTRO_VIGNETTE > 0:
+        # `vignette` needs eval=frame to re-read the expression per frame;
+        # without it the angle is evaluated once at init and the ramp is a
+        # constant. Unlike `hue`, this filter DOES accept eval — the two are
+        # not interchangeable, and assuming they were cost a whole render.
+        desat.append(
+            f"vignette=a='{OUTRO_VIGNETTE:.4f}*{ramp}':eval=frame")
+    if OUTRO_GRAIN > 0:
+        # No ramp: `noise` takes no time expression. Applied flat over the
+        # whole clip it would be visible from frame one, so it is gated by
+        # enable=, which every filter supports regardless of eval.
+        desat.append(
+            f"noise=alls={OUTRO_GRAIN:.0f}:allf=t:enable='gte(t,{start:.3f})'")
     if 0 < OUTRO_SLOWMO < 1:
         # Stretch presentation timestamps from `start` onward. Frames before the
         # window keep their own timestamps, so only the ending slows down.
@@ -976,6 +1067,27 @@ def _outro_filters(dur, mood=None, seconds=None):
         desat.append(
             f"setpts='if(lt(T,{start:.3f}),PTS,"
             f"({start:.3f}/TB)+(PTS-{start:.3f}/TB)*{factor:.4f})'")
+    if OUTRO_FADE > 0:
+        # Placed last, after setpts, because fade works on the timeline it
+        # receives: the slow-motion above stretches the tail, so the clip's
+        # real end is later than `dur`. Computing st= from `dur` would start
+        # the fade early and finish it before the final frame.
+        #
+        # Note which timeline that is. These filters attach to [0:v], the
+        # speech segment BEFORE the intro is concatenated in front (see the
+        # call site), so every number here is segment-relative. An 82s segment
+        # with a 7s intro delivers a 92.4s file whose dip lands at 91.2-92.4 —
+        # still the end of the clip, because the intro only shifts it. Do not
+        # "fix" this by adding intro_dur: that would push the fade past the
+        # end of the stream it is applied to.
+        end = start + (span / OUTRO_SLOWMO) if 0 < OUTRO_SLOWMO < 1 else dur
+        # Finish the fade slightly BEFORE the last frame, not on it. Ending it
+        # exactly at `end` left the final frame at Y=21 (dark grey) rather than
+        # black: fade reaches zero only at st+d, so the last rendered frame is
+        # always a hair above it, and the reviewer measured that. Landing the
+        # fade early gives a few frames of held black to close on.
+        st = max(start, end - OUTRO_FADE - OUTRO_FADE_LEAD)
+        desat.append(f"fade=t=out:st={st:.3f}:d={OUTRO_FADE:.3f}:c=black")
     return bright, desat
 
 
