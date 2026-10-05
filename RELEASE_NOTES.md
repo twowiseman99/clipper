@@ -1,5 +1,63 @@
 # Clipper — Release Notes
 
+**v0.6.1 "a watcher that can say what it could not read"** · branch `claude/code-clipper-review-v9e3im`
+new: `campaign_watch.py`, `~/.hermes/scripts/campaign_watch.sh`
+
+_Dalmislave_
+
+---
+
+Standing request, from a while back: watch the clipping marketplaces for
+campaigns worth taking — "filter campaign2 yang CPM nya di atas Rp.2500 dan
+budget tersisanya 50%" — and report into the channel the operator made for it.
+
+Last time this was blocked on three things. Two are gone:
+
+| then | now |
+| --- | --- |
+| both marketplaces behind login | konten.com `/api/campaigns` serves 109 campaigns with no auth |
+| no channel to report to | operator created one and gave the id |
+| Clippo needs a session | **still true** |
+
+So the watcher ships covering konten.com, and **says in every report that
+Clippo was not read**, with the HTTP code. A watcher that quietly covers one of
+two sources is worse than one that covers neither, because "nothing new" reads
+as "I checked everything".
+
+### The budget field had to be measured
+
+The list endpoint has no budget figure — only `budget_bar_percent_override`, a
+name that sounds like a display tweak. The real `budget`/`spent` pair lives on
+the per-campaign detail endpoint:
+
+```
+budget 300.000.000 · spent 246.000.000 → 18,0% left · override says 18
+```
+
+8 of 8 campaigns matched within 1.5pp, so the override IS remaining budget and
+one cheap list call is enough. `verify_budget_field()` re-runs that check on a
+sample every tick and flags the report if it ever stops holding — this is an
+undocumented third-party field, and an assumption that silently breaks would
+corrupt every number in the report.
+
+### Measured, not assumed
+
+- `urllib` got a blanket **403** from konten.com where `curl` with a browser UA
+  got 200. The UA is load-bearing.
+- CPM is the **max** across platforms, not the first field present: campaigns
+  quote different rates per platform and the operator picks where to post.
+- Dedupe verified by running it: first tick reported 32, second tick printed
+  **nothing**, and after dropping 3 ids from state the third tick reported
+  exactly those 3.
+- `--selftest` pins the boundaries that matter — CPM of exactly 2500 does not
+  pass "above 2500", 49% does not pass a 50% floor, and `paused` /
+  `emergency_stopped` / missing-budget campaigns never qualify.
+
+Runs as `no_agent=true` every 6h, so stdout is the message and silence is the
+default. No tokens, and no "still watching" noise.
+
+---
+
 **v0.6.0 "show the brief, not just the verdict"** · branch `claude/code-clipper-review-v9e3im`
 6 files · new: `audit.py`, `tests/_v29`–`_v32`
 
