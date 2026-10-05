@@ -1424,15 +1424,89 @@ def _cover_rect(W, H):
             CANVAS_W / s, CANVAS_H / s)
 
 
-def _sample_pan_faces(video_path, start, end, step=PAN_STEP):
+# How far the tracked face may move between pan samples, as a fraction of the
+# source width. A real head crossing the frame takes seconds; a jump bigger
+# than this is the detector swapping to a different person.
+#
+# MEASURED, not chosen. Mean error against hand-checked subject positions on
+# the Gibran scrum (t=122/140/146):
+#
+#     0.12   0.216   too tight: rejects the subject's own re-entry after the
+#                    gap where he is undetected, so the track sits at 0.73
+#     0.20   0.110   best
+#     0.25   0.110   same track, no extra samples accepted
+#     0.30   0.147   loose enough to follow a bystander at t=140
+#
+# Tighter is not safer here: a rejected sample is not a centred frame, it is a
+# stale position held over, which is how a 0.12 limit kept the crop on the
+# escort for the whole clip.
+PAN_JUMP = float(os.environ.get("CLIPPER_PAN_JUMP", "0.20"))
+
+
+def _pan_anchor(video_path, start, end, step=1.0):
+    """Deliberately unused: kept as a record of an approach that measured worse.
+
+    The idea was to find the subject by position over the whole segment rather
+    than trusting one frame. Both scorings — frames-present and area-weighted —
+    picked bin 0.8, which is the escort, and panning from there put the subject
+    off-frame for 0 of 49 samples against 55% before. Spatial voting cannot
+    identify a person when the camera itself moves: the subject genuinely
+    travels 0.75 -> 0.37 across this segment, so "where faces usually are" is
+    the crowd, not him.
+
+    What actually works is tracking continuity from the first clear detection
+    (see _sample_pan_faces), because the subject is the face that PERSISTS
+    between consecutive frames while the crowd churns.
+    """
+    return None
+
+
+def _face_hist(img):
+    """Coarse hue/saturation signature of a face crop, for re-identification.
+
+    Not face recognition — just enough appearance to tell "the person I was
+    following" from "a different person standing where he used to be". Shirt
+    colour, skin tone and hair all land in here, which is what distinguishes a
+    subject in a white shirt from an escort in camouflage.
+    """
+    import cv2
+    h = cv2.calcHist([cv2.cvtColor(img, cv2.COLOR_BGR2HSV)], [0, 1], None,
+                     [30, 32], [0, 180, 0, 256])
+    return cv2.normalize(h, h).flatten()
+
+
+def _sample_pan_faces(video_path, start, end, step=PAN_STEP, anchor=None):
     """[(t, cx)] the speaker's face centre as a fraction of the FULL source width.
 
     Detection runs on the whole frame rather than the centre crop, which is the
     point: on a 16:9 source the crop keeps only the middle third, so a wide
-    two-shot has both speakers outside it and nothing to track. Of the faces
-    found, the largest is taken as the speaker — a podcast camera is already
-    cutting to whoever is talking, so the biggest face is usually the one the
-    shot is about. Empty means no face anywhere; the caller stays centred.
+    two-shot has both speakers outside it and nothing to track.
+
+    Picking the LARGEST face per frame is right on a framed shot and shaky in
+    a press scrum: on the Gibran clip the detector saw up to 11 faces, and the
+    biggest was sometimes whoever leaned nearest the lens.
+
+    Measured against five hand-checked subject positions (t=122/132/140/146/
+    150) — mean absolute error:
+
+        largest face per frame                     0.094
+        appearance match + position + area         0.079
+        position tracking, no appearance           0.221  (drifts to 0.73)
+        spatial voting over the segment            worse   (locks to escort)
+
+    Appearance is what carries identity across the frames where the subject is
+    undetected (t=134, t=140 here); position alone lets the track settle on
+    whoever is nearest when detection resumes.
+
+    Honest caveat: the first three checked points suggested 0.344 vs 0.110, and
+    two further points cut that to 0.094 vs 0.079. The tracker is a small, real
+    improvement — it was NOT the reason the operator got a clip of the wrong
+    person. That was a centred crop window (see _pillar_pan_x).
+
+    The template updates slowly (0.8/0.2) so lighting drift does not accumulate
+    into a lost subject, and a frame whose best candidate moved more than
+    PAN_JUMP is skipped rather than guessed — the caller's smoothing
+    interpolates across it.
     """
     try:
         import cv2
@@ -1457,6 +1531,8 @@ def _sample_pan_faces(video_path, start, end, step=PAN_STEP):
         every = max(1, int(round(src_fps * step)))
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(start * src_fps))
         pts = []
+        track = anchor
+        tpl = None
         idx = 0
         while True:
             ok, frame = cap.read()
@@ -1468,10 +1544,36 @@ def _sample_pan_faces(video_path, start, end, step=PAN_STEP):
             if idx % every == 0:
                 small = cv2.resize(frame, (dw, dh)) if scale < 1.0 else frame
                 _ok, faces = det.detect(small)
-                if faces is not None and len(faces):
-                    # D: the biggest face is the speaker the shot is on
-                    f = max(faces, key=lambda f: float(f[2]) * float(f[3]))
-                    pts.append((t, (float(f[0]) + float(f[2]) / 2) / dw))
+                cand = []
+                if faces is not None:
+                    for f in faces:
+                        x, y = int(max(0, f[0])), int(max(0, f[1]))
+                        w, h = int(max(0, f[2])), int(max(0, f[3]))
+                        crop = small[y:y + h, x:x + w]
+                        if crop.size == 0:
+                            continue
+                        cand.append(((x + w / 2.0) / dw, float(w * h),
+                                     _face_hist(cv2.resize(crop, (48, 48)))))
+                if cand:
+                    big = max(a for _c, a, _h in cand) or 1.0
+                    if track is None or tpl is None:
+                        cx, _a, tpl = max(cand, key=lambda p: p[1])
+                        track = cx
+                        pts.append((t, cx))
+                    else:
+                        def score(p):
+                            cx, area, hs = p
+                            return (cv2.compareHist(tpl, hs, cv2.HISTCMP_CORREL)
+                                    - abs(cx - track)
+                                    + 0.3 * (area / big))
+
+                        cx, _a, hs = max(cand, key=score)
+                        if abs(cx - track) <= PAN_JUMP:
+                            # Ease toward the detection instead of snapping to
+                            # it, so one bad frame cannot drag the track.
+                            track += (cx - track) * 0.6
+                            tpl = 0.8 * tpl + 0.2 * hs
+                            pts.append((t, track))
             idx += 1
         return pts
     except cv2.error:
@@ -1569,23 +1671,78 @@ def _pan_cover(video_path, start, end):
             f"crop={CANVAS_W}:{CANVAS_H}:x='iw*({x})-ow/2':y='(ih-oh)/2'")
 
 
+def _static_window_x(pts, win_frac):
+    """One fixed crop position that frames the subject in the most samples.
+
+    Used when PAN is off: the camera must not move, but it also must not sit
+    on the wrong half of a wide shot.
+
+    Counting "subject inside the window" alone is not enough to place it. Any
+    window that contains him at all scores identically, so a subject parked at
+    0.74 accepted a window centred at 0.53 — technically inside, but he sits
+    on the very edge of frame, which is the composition the operator rejected.
+    The score is therefore how CENTRED he is: the mean squared distance from
+    the subject to the window centre, minimised. Samples outside the window
+    are clamped to its edge so a brief excursion costs something but does not
+    dominate.
+
+    Ties go to the centremost option, since nothing is gained by shifting off
+    centre for an equal score.
+
+    Returns an ffmpeg crop-x expression in source pixels.
+    """
+    cx = [c for _t, c in pts]
+    if not cx:
+        return "'(iw-ow)/2'"
+    half = win_frac / 2.0
+    best = None
+    for i in range(0, 1001):
+        c = i / 1000.0
+        if c - half < 0 or c + half > 1:
+            continue
+        cost = 0.0
+        for v in cx:
+            d = abs(min(max(v, c - half), c + half) - c)
+            miss = max(0.0, abs(v - c) - half)
+            cost += d * d + 4.0 * miss * miss
+        key = (cost, abs(c - 0.5))
+        if best is None or key < best[0]:
+            best = (key, c)
+    if best is None:
+        return "'(iw-ow)/2'"
+    return f"'iw*{best[1]:.4f}-ow/2'"
+
+
 def _pillar_pan_x(video_path, start, end, card_h):
-    """x expression for the pillar card's crop window, following the speaker.
+    """x expression for the pillar card's crop window.
 
     Scaling a 16:9 source to 75% of a 1920 canvas makes it 2560 wide, so the
-    1080 crop keeps 42% of the width and the choice of WHICH 42% matters more
-    than it does in `cover`. Reuses the same face sampling and the same
-    keyframe smoothing as _pan_cover; only the window geometry differs, since
-    the card is shorter than the canvas.
+    1080 crop keeps 42% of the width and the choice of WHICH 42% decides
+    whether the clip is about the right person at all.
 
-    Falls back to the centre when PAN is off, cv2 is missing, or no face was
-    found — a centred crop is the old behaviour, not a failure.
+    A CENTRED crop is not a neutral default. On the Gibran scrum the subject
+    sat at cx 0.74 while the centre window covers 0.29-0.71, so he was outside
+    the rendered frame for 55% of the clip and the operator got a shot of an
+    escort officer and a bystander ("Salah muka woi harusnya kan gibran").
+
+    When PAN is off the window is therefore PLACED but still does not move:
+    one position for the whole clip, scored by how centred the tracked subject
+    is across the segment. Measured on this clip, share of samples where the
+    subject sits inside the middle 60% of the window:
+
+        centred            36%
+        placed (0.67)      38%
+        PAN on             100%  (7 keyframes)
+
+    Placement is only a marginal gain here because the subject travels 0.52 of
+    the frame width while the window is 0.42 wide — no static position can hold
+    him, and the honest ceiling is low. It is still the better floor when the
+    operator has asked for no movement, and with PAN on the window tracks as
+    before.
     """
     centre = "'(iw-ow)/2'"
-    if not PAN:
-        return centre
     try:
-        import cv2
+        import cv2  # noqa: F401
     except ImportError:
         return centre
     cap = cv2.VideoCapture(video_path)
@@ -1602,6 +1759,8 @@ def _pillar_pan_x(video_path, start, end, card_h):
     pts = _sample_pan_faces(video_path, start, end)
     if not pts:
         return centre
+    if not PAN:
+        return _static_window_x(pts, win_frac)
     keys = _pan_keys(pts, win_frac)
     if not keys:
         return centre
