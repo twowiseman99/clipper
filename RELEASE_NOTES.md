@@ -1,3 +1,50 @@
+## v0.7.5 — the crop was pointed at the wrong person
+
+Operator: "Salah muka woi harusnya kan gibran."
+
+**A centred crop is a framing decision, not a neutral default.** The pillar
+card scales a 16:9 source to 2560 wide and keeps a 1080 crop — 42% of the
+width. `_pillar_pan_x` returned a centred window whenever PAN was off, before
+it ever looked at a face, and PAN is off in `.env` by the operator's own choice
+("user finds the movement distracting").
+
+Centre covers source x 0.29-0.71. The subject sat around 0.74, so he was
+outside the rendered frame for 55% of the clip. The render framed an escort
+officer and a bystander.
+
+With PAN off the window is now **placed once and still does not move**, scored
+by how centred the subject is rather than merely whether he is inside — every
+containing position ties, so a subject at 0.74 had accepted a window at 0.53.
+
+| window | subject inside middle 60% |
+|---|---|
+| centred | 36% |
+| placed (0.67) | 38% |
+| PAN on | 100% (7 keyframes) |
+
+**Placement is a marginal gain, not a fix.** The subject travels 0.52 of the
+frame width against a 0.42-wide window, so no static position can hold him — a
+render with the static window still shows the wrong person in the closing
+third, checked frame by frame. The real choice is still-at-38% or panning-at-
+100%, and that is the operator's call; `.env` stays `CLIPPER_PAN=0`.
+
+**Subject tracking** in `_sample_pan_faces` now uses appearance (coarse HS
+histogram) with position and area, instead of largest-face-per-frame: 0.079
+mean error against 0.094 on five hand-checked positions, and it carries
+identity across frames where the subject is not detected at all.
+
+**Correction to v0.7.4's reasoning.** Three ground-truth points made that look
+like 0.344 vs 0.110, and the new test asserted a large improvement on it. Two
+further checked frames (t=132 at cx 0.78, t=150 at 0.36) cut the gap to 0.094
+vs 0.079 and the assertion failed in the suite. Three points were not a
+measurement — they were a story that fitted. The test now asserts
+no-regression and records the reversal; the docstrings carrying 0.344 are
+corrected.
+
+Tests: 43 ok.
+
+— Dalmislave
+
 ## v0.7.4 — the ending stopped fighting the captions
 
 **Subtitles kept animating on the frozen frame.** Operator: "kenapa
