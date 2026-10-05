@@ -250,19 +250,47 @@ def hook_terms(transcript, context="", speaker=""):
     return [n for n in names if n] + subject[:1]
 
 
-def insert_terms(phrase, context="", limit=3):
+def insert_terms(phrase, context="", limit=3, topic=""):
     """Search terms for an INSERT at one phrase — what is being said right now.
 
     The phrase drives the query; context contributes only its proper nouns, not
     its wording. Letting context words compete on frequency pulled in "banyak"
     and "depan" from the operator's framing line, which searched the framing
     instead of the moment.
+
+    `topic` is the clip's event, and it is needed because a cutaway is usually
+    triggered by a bare proper noun. On a clip about a school-meal poisoning
+    the trigger was "Gibran", so the query was literally ["Gibran"] and YouTube
+    returned seven videos about his diploma case at the Constitutional Court —
+    all correctly rejected as off topic, 37 frames, zero cutaways. Measured on
+    the same search backend:
+
+        ["Gibran"]                -> Sidang Sengketa Ijazah Gibran ...
+        ["Gibran", "keracunan"]   -> Wapres Gibran Minta Maaf ke Orang Tua
+                                     Murid Keracunan MBG
+
+    The footage existed the whole time; the query never asked for it. A name
+    alone identifies a person, not an event, and news channels cover one person
+    across unrelated stories.
     """
     names = proper_nouns(context, phrase)[:1]
     taken = {n.lower() for n in names}
     words = [w for w in query_terms(phrase, limit=limit + 2)
              if w not in taken]
-    return names + words[:limit]
+    # Event words go in front of whatever the phrase contributed: they are what
+    # distinguishes this story from every other story about the same person.
+    event = [w for w in query_terms(topic, limit=limit)
+             if w not in taken and w not in words] if topic else []
+    out = names + event + words
+    # Dedupe while keeping order; query_terms can repeat a word that also
+    # appears in the topic.
+    seen, uniq = set(), []
+    for w in out:
+        k = w.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(w)
+    return uniq[:limit + 1]
 
 
 def query_terms(transcript, context="", limit=4):

@@ -52,7 +52,15 @@ assert calm == "", f"a non-violent clip must not demand war footage: {calm!r}"
 
 # Single word is enough, and punctuation must not hide it.
 assert job._clip_act(words(["Mereka", "dibantai."])), "punctuation broke it"
-assert job._clip_act(words(["korban", "berjatuhan"])), "'korban' should count"
+# "korban berjatuhan" used to count on the strength of "korban" alone. It no
+# longer does, and that was a real bug, not a loosening: Indonesian "korban" is
+# the victim of anything — korban keracunan, korban banjir, korban PHK — so it
+# put a school-meal poisoning clip under a war-footage veto and shipped zero
+# cutaways. The violence has to be named. See _v33.
+assert job._clip_act(words(["korban", "berjatuhan"])) == "", \
+    "'korban' alone must not make a clip a war clip"
+assert job._clip_act(words(["korban", "serangan"])), \
+    "'korban' next to real violence must still count"
 # A word that merely contains a violence stem is not a violence word. This is
 # the censor.py trap in another costume: "bom" inside "bombardir".
 assert job._clip_act(words(["serangga", "bombardir"])) == "", \
@@ -82,8 +90,12 @@ assert "footage    0 pass · 2 reject" in text, text
 assert "DID NOT RUN" not in text.split("footage")[1].split("\n")[0], text
 # Reasons survive to the report, since "why" is what makes a log worth reading.
 assert "not the action — mass funeral, aftermath" in text, text
-# Divisions come from the real roster in ~/skill-sources/agency-agents/.
-assert "RESEARCH" in text and "MARKETING" in text, text
+# Divisions come from the real roster in ~/skill-sources/agency-agents/ — this
+# comment used to say that while asserting on "RESEARCH", a label no division in
+# that repo defines. The labels below are from its divisions.json, and the
+# report must also name the reviewing agent. _v37 holds the full contract.
+assert "TESTING" in text and "MARKETING" in text, text
+assert "agent: Evidence Collector" in text, text
 
 # Counts are computed, not narrated.
 ok, no, warn = led.counts("footage")

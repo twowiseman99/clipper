@@ -28,6 +28,7 @@ import os
 import re
 import sys
 
+import agents
 import ai
 import glossary
 
@@ -113,7 +114,14 @@ def review(words, context="", learn=True, status=None, **kwargs):
     try:
         # Low temperature: this is a correction task with one right answer, not
         # a writing task. Positional (system, user) to match ai.chat_json.
-        out = ai.chat_json(SYSTEM, prompt, temperature=0.1, **kwargs) or {}
+        # The language gate's reviewer is
+        # specialized/indonesian-transcript-linguist.md — written for this
+        # job because the repo's language-translator is Spanish/English.
+        # Its identity and rules lead; SYSTEM stays last and binding so
+        # the word-for-word JSON contract and the no-retiming rule cannot
+        # be talked out of by a persona.
+        out = ai.chat_json(agents.system_for("language", SYSTEM), prompt,
+                           temperature=0.1, **kwargs) or {}
     except Exception as exc:
         print("language: review unavailable (%s: %s)"
               % (type(exc).__name__, exc), file=sys.stderr)

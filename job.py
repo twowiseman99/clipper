@@ -322,6 +322,37 @@ def _venue_names(context, names):
     return venues
 
 
+# The two kinds of clip this tool cuts. The operator asked for the second one
+# as a named type, not as a pile of flags: "Ini jadiin jenis klip kedua,
+# pertama kan sedih ya kmrn kita develop".
+#
+# Each type sets mood, outro and b-roll TOGETHER, because that is where the
+# register mismatches came from. A hype shake over a melancholy BGM, or news
+# b-roll of a hospital ward under a jedag-jedug beat, are both wrong in the
+# same way: the layers disagree about what the clip is. One flag now settles
+# all three.
+#
+# `broll` is False for jamet on purpose — the operator was explicit: "Duh,
+# jangan beritanya dong, tapi pas bagian si gibran ngomong suruh bawa bekal aja
+# cukup". The viral cut is the speaker's own sentence, not a news package.
+CLIP_TYPES = {
+    "sedih": {
+        "mood": "emotional",
+        "outro": "melancholy",
+        "broll": True,
+        "flash": False,
+        "why": "sombre cut: news b-roll, desaturating outro, dip to black",
+    },
+    "jamet": {
+        "mood": "hype",
+        "outro": "jamet",
+        "broll": False,
+        "flash": True,
+        "why": "viral cut: speaker's own sentence, freeze-frame shake outro",
+    },
+}
+
+
 def _clip_act(seg_words):
     """What the cutaways in this clip must actually SHOW, or "" when nothing.
 
@@ -337,25 +368,40 @@ def _clip_act(seg_words):
     cutaway show it. A clip with no violence words gets "" and keeps the
     location-only question.
     """
-    hits = []
     for w in seg_words or ():
         key = re.sub(r"[^\w-]", "", str(w.get("word", ""))).lower()
-        if not key or key in hits:
-            continue
-        if key in _ACT_WORDS:
-            hits.append(key)
-    if not hits:
-        return ""
-    return _ACT_LOOK
+        if key and key in _ACT_WORDS:
+            # A casualty word on its own is not violence: "korban keracunan
+            # MBG" is a food-poisoning story, so _ACT_SOFT words are not
+            # consulted here at all. It takes a hard word to make a war clip.
+            return _ACT_LOOK
+    return ""
 
 
 # Violence words that make a clip a war clip. Taken from the transcript, not
 # from --context: the speaker's own words are what the captions will show.
+#
+# Every word here must mean violence BY ITSELF. "korban", "meninggal" and
+# "tewas" do not: Indonesian uses "korban" for the victim of anything at all —
+# "korban keracunan MBG", "korban banjir", "korban PHK" — and people die of
+# things other than attacks. "korban" alone put a food-poisoning clip under a
+# war-footage veto, which rejected 37 frames and shipped zero cutaways while the
+# ledger said "no footage passed the gates". Nothing in the gate was broken; the
+# word list was.
+#
+# The replacement is a two-word test: a generic casualty word only counts when
+# the clip ALSO names violence (see _ACT_SOFT below). A clip can then say
+# "korban" a dozen times without becoming a war clip.
 _ACT_WORDS = frozenset((
     "dibantai", "bantai", "dibom", "bom", "pemboman", "diserang", "serang",
-    "serangan", "dibunuh", "hancur", "reruntuhan", "korban", "gugur",
-    "tewas", "meninggal", "kelaparan",
+    "serangan", "dibunuh", "hancur", "reruntuhan", "gugur",
 ))
+
+# Casualty words that are NOT evidence of violence on their own. Kept as a
+# named set so the next person to widen _ACT_WORDS sees why these are excluded
+# rather than re-adding them. "kelaparan" sits here too: famine is a
+# catastrophe, but footage of it is not a strike or rubble.
+_ACT_SOFT = frozenset(("korban", "tewas", "meninggal", "kelaparan"))
 
 # What the footage has to depict. Phrased as the news material itself —
 # strikes, shelling, rubble, casualties being carried — so that a calm
@@ -630,7 +676,7 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
                 # belongs to this story rather than a similar one elsewhere.
                 terms = [subject.title(), actions[0]]
             else:
-                terms = broll.insert_terms(term, context)
+                terms = broll.insert_terms(term, context, topic=topic)
             # relevant() filters the title; vetted() then probes each survivor
             # for views, upload date and channel standing — the operator's
             # rule that footage be recent, actually watched, and not a hoax or
@@ -887,6 +933,33 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
         if not any(w.startswith("b-roll:") for w in warnings):
             warnings.append("b-roll: no cutaways were placed")
 
+    # The ending is this division's other output, and it was invisible. The
+    # jamet render printed "edit DID NOT RUN" while the graph really did carry
+    # loop=loop=15:size=1:start=570 and the delivered file really did freeze
+    # (0.007) and shake (11.4) — the ledger was wrong, not the render. A gate
+    # that reports nothing is indistinguishable from a gate that was skipped,
+    # which is the whole reason DID NOT RUN exists; so say which ending was
+    # applied, and say it even when the answer is "none".
+    import edit as _edit
+    _kind = _edit._outro_kind(mood or meta.get("mood"))
+    _span = (_edit.OUTRO_JAMET_SECONDS if _kind == "jamet"
+             else _edit.OUTRO_SECONDS)
+    audit.briefed("edit", f"outro = {_kind!r}",
+                  f"clip {seg_end - seg_start:.1f}s",
+                  f"needs {_span * 3:.0f}s for a {_span:.0f}s ending")
+    if _kind == "none":
+        audit.passed("edit", "outro", "none", "no closing treatment asked for")
+    elif (seg_end - seg_start) < _span * 3:
+        # Not a failure, but it must never be silent again: this is exactly how
+        # the 22s viral cut shipped with no freeze and no shake at all.
+        audit.warned("edit", "outro", _kind,
+                     f"clip too short — {_span * 3:.0f}s needed")
+        warnings.append(
+            f"outro {_kind}: clip is {seg_end - seg_start:.1f}s, needs "
+            f"{_span * 3:.0f}s — no closing treatment applied")
+    else:
+        audit.passed("edit", "outro", _kind, f"last {_span:.0f}s")
+
     out = out or os.path.join(
         OUT_DIR, f"clip_{int(time.time())}_{int(seg_start)}.mp4")
     _log(f"rendering {seg_end - seg_start:.0f}s...")
@@ -928,8 +1001,30 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     # prints DID NOT RUN instead of vanishing.
     led = audit.current()
     if led is not None:
-        led.emit(checkers=("sourcing", "footage", "copy",
-                           "language", "sound", "edit"))
+        checkers = ("sourcing", "footage", "copy",
+                    "language", "sound", "edit")
+        led.emit(checkers=checkers)
+        # Also write it down. Printing was the only output, so the review
+        # existed solely in whoever's terminal ran the render — the operator
+        # pointed a Discord channel at these logs and saw nothing, because
+        # nothing had ever been saved for anything to deliver.
+        try:
+            out = result.get("file") or ""
+            if out:
+                path = os.path.splitext(out)[0] + ".audit.json"
+                led.save(path, checkers=checkers, meta={
+                    "file": out,
+                    "title": result.get("title", ""),
+                    "mood": result.get("mood", ""),
+                    "music": result.get("music", ""),
+                    "duration_sec": result.get("duration_sec", 0),
+                    "warnings": result.get("warnings", []),
+                })
+                result["audit_file"] = path
+        except Exception as exc:
+            # A ledger that cannot be written must not lose the clip that was
+            # already rendered and paid for.
+            warnings.append(f"audit: ledger not saved — {exc}")
     audit.stop()
     return result
 
@@ -995,7 +1090,7 @@ def main(argv=None):
                    help="tone for the hook, title and description. Omit for "
                         "the neutral viral tone")
     p.add_argument("--frame-mode", dest="frame_mode",
-                   choices=("cover", "fill", "fit"))
+                   choices=("cover", "fill", "fit", "pillar"))
     p.add_argument("--caption-style", dest="caption_style",
                    choices=("phrase", "karaoke", "editorial"))
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
@@ -1004,6 +1099,14 @@ def main(argv=None):
                         "name a person or place. Adds a download per insert")
     p.add_argument("--flash", dest="flash", action="store_true", default=None,
                    help="brief white pop on the strongest beats")
+    p.add_argument("--clip-type", dest="clip_type",
+                   choices=tuple(CLIP_TYPES),
+                   help="the kind of clip to cut. 'sedih' is the sombre cut "
+                        "developed first: news b-roll, melancholy outro that "
+                        "desaturates and dips to black. 'jamet' is the viral "
+                        "cut: the speaker's own sentence only, no news b-roll, "
+                        "freeze on his face and shake it to the beat. Each one "
+                        "sets mood, outro and b-roll together — see CLIP_TYPES")
     p.add_argument("--wait", type=float, default=None,
                    help="seconds to wait if another job holds the host")
     p.add_argument("--max-mb", dest="max_mb", type=float, default=0,
@@ -1025,6 +1128,25 @@ def main(argv=None):
     style = {k: v for k, v in
              (("frame_mode", a.frame_mode), ("caption_style", a.caption_style),
               ("hook_style", a.hook_style)) if v}
+    # --clip-type picks mood, outro and b-roll as a set. An explicit flag still
+    # wins over the preset, so --clip-type jamet --mood emotional is possible;
+    # the preset is a default, not a cage.
+    preset = CLIP_TYPES.get(a.clip_type or "", {})
+    if preset:
+        # edit.OUTRO is read at import time, so setting the environment here is
+        # only reliable while edit is still unimported. Set the module constant
+        # directly instead — it works either way, and an env var the operator
+        # set by hand still wins because that is what edit read first.
+        import edit as _edit
+        if os.environ.get("CLIPPER_OUTRO") in (None, "", "auto"):
+            _edit.OUTRO = preset["outro"]
+        if a.mood is None:
+            a.mood = preset["mood"]
+        if a.broll is None:
+            a.broll = preset["broll"]
+        if a.flash is None:
+            a.flash = preset["flash"]
+
     # Both are read at import time by the modules that own them, so a CLI flag
     # has to set the environment before those reads matter. Set here rather than
     # threaded through run(): edit.py reads its own module constants.

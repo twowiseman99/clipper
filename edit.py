@@ -138,6 +138,26 @@ CAPTION_STYLE = os.environ.get("CLIPPER_CAPTION_STYLE", "phrase")
 # "cover" is the default. It is a no-op crop on vertical footage and a hard
 # zoom on landscape footage, so a landscape source is the case for "fit".
 FRAME_MODE = os.environ.get("CLIPPER_FRAME_MODE", "cover")
+# "pillar" framing: how much of the canvas width the full source frame fills.
+# 1.0 is edge to edge. On a 16:9 source that makes the card 608px tall in a
+# 1920 canvas — about a third of the height — so the inset must be as wide as
+# the canvas allows or the caption inside it stops being readable on a phone.
+# Verified by eye on a real frame at 0.94: the headline was "close to the lower
+# limit for comfortable mobile viewing".
+PILLAR_FILL = float(os.environ.get("CLIPPER_PILLAR_FILL", "1.0"))
+# Background blur strength. Strong enough that the duplicated frame reads as
+# texture rather than a second picture competing with the subject.
+PILLAR_BLUR = float(os.environ.get("CLIPPER_PILLAR_BLUR", "28"))
+# How far the background copy is pushed in, as a multiple of canvas width.
+# 1.7 puts the source's own lower-third banner (measured at 88% of frame
+# height on Tribunnews footage) outside the visible crop, so the
+# backdrop cannot echo the headline back at the viewer.
+PILLAR_BG_ZOOM = float(os.environ.get("CLIPPER_PILLAR_BG_ZOOM", "1.7"))
+# Backdrop brightness drop and desaturation. The background has to lose the
+# argument with the foreground; blur alone still leaves a bright, colourful
+# field that pulls the eye off the subject.
+PILLAR_BG_DIM = float(os.environ.get("CLIPPER_PILLAR_BG_DIM", "0.28"))
+PILLAR_BG_SAT = float(os.environ.get("CLIPPER_PILLAR_BG_SAT", "0.55"))
 FILL_HEIGHT_FRAC = 0.62
 # Camera movement: a slow centred push-in (Ken Burns) on the full-frame path.
 # 1.0 is off; 1.12 pushes in 12% by the last frame. Captions are overlaid after
@@ -191,6 +211,13 @@ OUTRO = os.environ.get("CLIPPER_OUTRO", "auto").strip().lower()
 # so 8s. The guard in _outro_filters keeps this from eating a short clip: the
 # treatment is skipped unless the clip is at least 3x the span, i.e. 24s here.
 OUTRO_SECONDS = float(os.environ.get("CLIPPER_OUTRO_SECONDS", "8.0"))
+# The jamet ending needs its own, shorter span. The melancholy outro is a slow
+# ramp — desaturate, vignette, grain, slowmo, dip — and 8s is what gives that
+# room to land. A freeze-frame shake is instant: the face stops, the beat hits,
+# three seconds is plenty and more just stalls the clip. Separate constants
+# also mean the guard below (dur < span*3) scales per ending, so a 22s viral
+# cut can still have an outro while a 22s sombre cut correctly cannot.
+OUTRO_JAMET_SECONDS = float(os.environ.get("CLIPPER_OUTRO_JAMET_SECONDS", "3.0"))
 # Stinger shape. Pulses per second: 4 reads as rhythm, past about 6 it is a
 # strobe, which is unpleasant and an accessibility problem.
 OUTRO_RATE = float(os.environ.get("CLIPPER_OUTRO_RATE", "4"))
@@ -255,6 +282,22 @@ OUTRO_SHAKE_HZ = float(os.environ.get("CLIPPER_OUTRO_SHAKE_HZ", "1.923"))
 # Shake amplitude in pixels on a 1080-wide canvas. 28 is visible without
 # tearing the subject off-frame; past ~60 the face leaves the safe area.
 OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "28"))
+# Hits per beat. The reference short spends 40% of its frames above 6.0 motion;
+# one hit per beat (1.923 Hz) only reached 13% — the punches were the right
+# size (peak 27.9 against the reference's 28.4) but too far apart, so the
+# stretch between them read as dead air. Two hits per beat doubles the density
+# without touching amplitude.
+OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "3"))
+# How fast each hit decays inside its slot. 8 puts nearly all of the travel in
+# the first ~15%: the frame snaps, then settles, then snaps again. A sine (the
+# previous shape) spends most of its time mid-travel, so the frame-to-frame
+# change stays small and even — it reads as a slow slide, which is what the
+# operator rejected. Lower this for a looser, rubberier shake.
+OUTRO_PUNCH_DECAY = float(os.environ.get("CLIPPER_OUTRO_PUNCH_DECAY", "2"))
+# Zoom punch depth as a scale factor on top of the positional kick. The
+# reference short pairs every hit with a scale pop; position alone looked like
+# a camera bump rather than an edit. 0.08 = an 8% snap in on each beat.
+OUTRO_PUNCH_ZOOM = float(os.environ.get("CLIPPER_OUTRO_PUNCH_ZOOM", "0.08"))
 # Every mood the pipeline is known to produce (bgm.py's buckets plus the sad
 # list). A mood outside this set means the caller and this module disagree, so
 # the stinger default is a guess rather than a decision — worth a warning.
@@ -984,6 +1027,13 @@ def _outro_filters(dur, mood=None, seconds=None):
     """
     kind = _outro_kind(mood)
     span = float(seconds if seconds is not None else OUTRO_SECONDS)
+    # The jamet ending is a freeze plus a shake, not a ramp, so it reads in a
+    # fraction of the time the melancholy fade needs. Holding it to the same
+    # 8s span silently dropped the whole outro from a 22s clip — the operator
+    # asked for "muka gibrannya di stop jadi image terus goyang" and got a
+    # plain cut, with nothing in the ledger but "edit DID NOT RUN".
+    if kind == "jamet" and seconds is None:
+        span = OUTRO_JAMET_SECONDS
     if kind == "none" or span <= 0 or dur < span * 3:
         return "", []
     start = max(0.0, dur - span)
@@ -1014,18 +1064,63 @@ def _outro_filters(dur, mood=None, seconds=None):
         # to buy a look.
         frames = max(1, int(round(OUTRO_FREEZE * FPS)))
         pad = OUTRO_SHAKE_PX
+        shake_from = start + OUTRO_FREEZE
+        end = dur + OUTRO_FREEZE
+        win = f"between(t,{shake_from:.3f},{end:.3f})"
+        # One beat period. The shake is keyed to the track, not to taste:
+        # 1.923 Hz is the measured onset rate of the supplied jedag-jedug song
+        # (115.4 BPM), so one hit lands on every beat.
+        period = 1.0 / max(0.1, OUTRO_SHAKE_HZ * OUTRO_PUNCH_PER_BEAT)
+        # Phase inside the current beat, 0 at the hit, 1 just before the next.
+        ph = f"mod(t-{shake_from:.3f},{period:.5f})/{period:.5f}"
+        # Beat index, used to flip direction so consecutive hits do not drift
+        # the picture in one direction.
+        idx = f"floor((t-{shake_from:.3f})/{period:.5f})"
+        flip = f"(1-2*mod({idx},2))"
+        # Sharp attack, fast decay. This is the whole difference between
+        # "jedag-jedug" and "slow drift": a sine spends most of its time near
+        # the middle of its travel, so the frame-to-frame change is small and
+        # even. Measured against the reference short the operator sent
+        # (youtube.com/shorts/twn4fIJ0PUk, 12.3s, 307 frames): the reference
+        # hits 122 frames above 6.0 motion with a median of 4.29 and peaks at
+        # 28.4, while the sine version of this outro managed 7.7 at its best
+        # and read as a gentle slide. exp(-k*phase) puts the whole excursion in
+        # the first fifth of each beat, which is what a punch looks like.
+        env = f"exp(-{OUTRO_PUNCH_DECAY:.2f}*({ph}))"
+        # The zoom punch, done by shrinking the crop WINDOW and scaling back to
+        # canvas. Scaling the picture itself would change the output dimensions
+        # per frame, and 1080x1920 never moves to buy a look.
+        # crop's w and h are evaluated ONCE when the filter is configured, so
+        # they cannot contain `t` — ffmpeg fails the pad with "Error when
+        # evaluating the expression" and the render dies after the download and
+        # transcribe are already paid for. Verified directly:
+        #     crop=w='iw-56-(70*exp(-8*mod(t,0.52)))'  -> rejected
+        #     crop=w=iw-56:x='...exp(-8*mod(t,0.52))'  -> accepted
+        # Only x and y are per-frame. The zoom punch therefore goes through
+        # zoompan, which has its own per-frame `time` variable, and the crop
+        # window stays a fixed size and only MOVES.
         cw = f"iw-{2 * pad:.0f}"
         ch = f"ih-{2 * pad:.0f}"
-        shake_from = start + OUTRO_FREEZE
-        win = f"between(t,{shake_from:.3f},{dur + OUTRO_FREEZE:.3f})"
-        osc = f"sin(2*PI*{OUTRO_SHAKE_HZ:.3f}*(t-{shake_from:.3f}))"
-        osc2 = f"sin(2*PI*{OUTRO_SHAKE_HZ:.3f}*(t-{shake_from:.3f})+1)"
+        # The zoom punch goes through scale with eval=frame, NOT zoompan.
+        # zoompan is accepted by the parser but is pathologically slow here: it
+        # re-initialises its scaler every frame at 1080x1920, and a 22s clip
+        # that renders in ~100s did not finish in 400s with zoompan in the
+        # chain. Measured on this box, 3s of synthetic video: both filters cost
+        # ~0.3s, so the blowup only shows at real resolution and length —
+        # benchmark the real thing, not a toy.
+        #
+        # scale=w=...:eval=frame re-evaluates per frame and is cheap; cropping
+        # back to canvas afterwards keeps 1080x1920 exactly, which is the rule
+        # that never bends.
+        zoom = (f"1+{OUTRO_PUNCH_ZOOM:.3f}*{env}*{win}")
         return "", [
             f"loop=loop={frames}:size=1:start={int(round(start * FPS))}",
             (f"crop=w={cw}:h={ch}"
-             f":x='(iw-ow)/2+{pad:.0f}*{osc}*{win}'"
-             f":y='(ih-oh)/2+{pad * 0.7:.0f}*{osc2}*{win}':exact=1"),
-            f"scale={CANVAS_W}:{CANVAS_H}",
+             f":x='(iw-ow)/2+{pad:.0f}*{flip}*{env}*{win}'"
+             f":y='(ih-oh)/2+{pad * 0.6:.0f}*{flip}*{env}*{win}':exact=1"),
+            (f"scale=w='{CANVAS_W}*({zoom})':h='{CANVAS_H}*({zoom})'"
+             f":eval=frame"),
+            f"crop={CANVAS_W}:{CANVAS_H}",
             "setsar=1",
             f"fps={FPS}",
         ]
@@ -1597,6 +1692,41 @@ def render_clip(video_path, start, end, words, out_path, *,
 
         cover = (f"scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
                  f"crop={CANVAS_W}:{CANVAS_H}")
+        if frame_mode == "pillar":
+            # A 16:9 source covered to 9:16 keeps only 32% of the frame width
+            # (measured: 1920x1080 -> scale 1.778, so 1080 of 3413 px), and
+            # CLIPPER_ZOOM=1.2 on top of that leaves 26%. On a press-conference
+            # wide shot that crop is the operator's "anglenya ampas": the
+            # subject is off to one side and the crop keeps the middle.
+            #
+            # pillar zooms OUT instead — the whole frame at PILLAR_FILL of the
+            # canvas width, with the remainder filled by a blurred, scaled copy
+            # of the same frame so there are no hard black bars. Output stays
+            # exactly 1080x1920; nothing about the delivered resolution moves.
+            fg_w = int(CANVAS_W * PILLAR_FILL) // 2 * 2
+            # The background copy is pushed in hard and darkened. At plain
+            # cover scale the duplicated news banner reappears in the lower
+            # band as a half-readable ghost of the same headline — the caption
+            # visibly twice, fighting the real one. Zooming the backdrop past
+            # the banner and dropping its brightness leaves texture instead of
+            # letterforms.
+            # The background is cover-scaled FIRST (so it always fills the
+            # canvas whatever the source aspect) and then pushed in further.
+            # Scaling to a flat multiple of canvas WIDTH was wrong: a 16:9
+            # source at 2.2x1080 is only 1336 tall, short of 1920, and crop
+            # fails the pad with "Invalid too big or non positive size".
+            # Measured on this source: the news banner sits at 88% of frame
+            # height, and it only leaves the visible crop past ~1.6x cover.
+            cover = (
+                f"split=2[pbg][pfg];"
+                f"[pbg]scale={CANVAS_W}:{CANVAS_H}:force_original_aspect_ratio=increase,"
+                f"scale=iw*{PILLAR_BG_ZOOM:.2f}:-2,"
+                f"crop={CANVAS_W}:{CANVAS_H},"
+                f"gblur=sigma={PILLAR_BLUR:.0f},"
+                f"eq=brightness=-{PILLAR_BG_DIM:.2f}:saturation={PILLAR_BG_SAT:.2f}[pbgb];"
+                f"[pfg]scale={fg_w}:-2[pfgs];"
+                f"[pbgb][pfgs]overlay=(W-w)/2:(H-h)/2"
+            )
         chains = []
         base_label = "vmain" if intro else "v0"
         if frame_mode == "cover" and not split_screen:
@@ -1811,7 +1941,7 @@ def _preview_cli(argv):
     p.add_argument("--out", default="preview.mp4")
     p.add_argument("--words", default=None, help="transcript JSON, skips whisper")
     p.add_argument("--bgm", default=None, help="path to a music track")
-    p.add_argument("--frame-mode", default=FRAME_MODE, choices=("cover", "fill", "fit"))
+    p.add_argument("--frame-mode", default=FRAME_MODE, choices=("cover", "fill", "fit", "pillar"))
     p.add_argument("--caption-style", default=CAPTION_STYLE,
                    choices=("phrase", "karaoke"))
     p.add_argument("--hook-style", default=HOOK_STYLE, choices=("boxes", "card"))

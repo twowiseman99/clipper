@@ -16,18 +16,97 @@ Divisions are named after the roster in ~/skill-sources/agency-agents/ so the
 report reads like the company reviewing the clip rather than a debug dump.
 """
 
+import json
 import os
 import sys
 
-# Division labels. Keyed by the checker name a module registers under.
+# Which agent actually reviews each gate. Keyed by the checker name a module
+# registers under.
+#
+# These are not invented labels. The division names and the agent files come
+# from the agency-agents repo at ~/skill-sources/agency-agents, which carries
+# divisions.json as its declared source of truth (18 divisions) plus a CI check
+# that fails the build when the list disagrees with the directories on disk.
+# An earlier version of this table used made-up division names — "RESEARCH" for
+# footage, "SPECIALIZED" for language — that happened to resemble the repo's
+# while matching no actual agent, so the ledger named a reviewer that did not
+# exist. Each row below points at a real file; AGENTS_ROOT is checked at
+# startup and a missing file is reported rather than silently printed.
+#
+# `agent` is the file stem under AGENTS_ROOT/<division>/.
 DIVISIONS = {
-    "sourcing": "RESEARCH",     # which videos may be used at all
-    "footage": "RESEARCH",      # which frames inside a video may be used
-    "copy": "MARKETING",        # hook, title, description
-    "language": "SPECIALIZED",  # transcript review, Indonesian
-    "sound": "DESIGN",          # music mood
-    "edit": "ENGINEERING",      # render-level facts
+    # Which videos may be used at all. Evidence Collector is the repo's
+    # "screenshot-obsessed, fantasy-allergic" QA agent that "marks untested
+    # scope honestly" — which is this gate's whole job: reject footage that
+    # cannot be shown to be the event, and say so instead of substituting
+    # something that merely looks similar.
+    "sourcing": ("testing", "testing-evidence-collector"),
+    # Which frames inside a video may be used. Same agent, same discipline,
+    # one level down: per-frame evidence rather than per-source.
+    "footage": ("testing", "testing-evidence-collector"),
+    # Hook, title, description for a vertical short.
+    "copy": ("marketing", "marketing-tiktok-strategist"),
+    # Transcript review, Indonesian. The repo's specialized/language-translator
+    # is Spanish <-> English and does not cover orthographic repair of
+    # Indonesian ASR output, so this agent was written for Clipper and lives in
+    # the repo's own specialized/ division, in its frontmatter format.
+    "language": ("specialized", "indonesian-transcript-linguist"),
+    # Music mood. Focus Music Architect is the repo's audio-selection agent.
+    "sound": ("specialized", "specialized-focus-music-architect"),
+    # Render-level facts: cutaway placement, outro, pacing.
+    "edit": ("marketing", "marketing-short-video-editing-coach"),
 }
+
+# Where the agent files live. Overridable so a checkout elsewhere still
+# verifies.
+AGENTS_ROOT = os.environ.get(
+    "CLIPPER_AGENTS_ROOT",
+    os.path.expanduser("~/skill-sources/agency-agents"))
+
+
+def agent_path(checker):
+    """Absolute path to the agent file that reviews `checker`, or ""."""
+    row = DIVISIONS.get(checker)
+    if not row:
+        return ""
+    division, stem = row
+    return os.path.join(AGENTS_ROOT, division, stem + ".md")
+
+
+def division(checker):
+    """Display label for the checker's division, e.g. "TESTING"."""
+    row = DIVISIONS.get(checker)
+    return row[0].upper() if row else "—"
+
+
+def agent_name(checker):
+    """The agent's declared `name:` from its frontmatter, else the file stem.
+
+    Read from the file rather than duplicated here: a name kept in two places
+    drifts, and the point of pointing at the repo is that the repo is the
+    source of truth.
+    """
+    path = agent_path(checker)
+    if not path or not os.path.exists(path):
+        row = DIVISIONS.get(checker)
+        return row[1] if row else checker
+    try:
+        with open(path, encoding="utf-8") as fh:
+            if fh.readline().strip() != "---":
+                return DIVISIONS[checker][1]
+            for line in fh:
+                if line.strip() == "---":
+                    break
+                if line.startswith("name:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return DIVISIONS[checker][1]
+
+
+def missing_agents():
+    """Checkers whose agent file is absent — a claim the ledger cannot back."""
+    return [c for c in DIVISIONS if not os.path.exists(agent_path(c))]
 
 PASS = "pass"
 REJECT = "reject"
@@ -110,11 +189,19 @@ class Ledger:
 
         lines = ["", "b-roll & copy review — who checked what"]
         lines.append("-" * 58)
+        gone = missing_agents()
+        if gone:
+            # Naming a reviewer whose file is not there is the same class of
+            # error as the invented division labels this table replaced.
+            lines.append(f"!! agent file hilang: {', '.join(sorted(gone))}")
+            lines.append(f"   root: {AGENTS_ROOT}")
         for checker in order:
-            div = DIVISIONS.get(checker, "—")
+            div = division(checker)
+            who = agent_name(checker)
             rows = [e for e in self.entries if e["checker"] == checker]
             if not rows:
                 lines.append(f"{div:<12} {checker:<10} DID NOT RUN")
+                lines.append(f"             agent: {who}")
                 continue
             ok, no, warn = self.counts(checker)
             head = f"{div:<12} {checker:<10} {ok} pass · {no} reject"
@@ -126,6 +213,10 @@ class Ledger:
                 # the old report showed as an empty but present section.
                 head += "  ← BRIEFED, NO VERDICT"
             lines.append(head)
+            # Who reviewed it, by the name declared in the agent's own
+            # frontmatter — so the ledger cannot claim a reviewer the repo
+            # does not define.
+            lines.append(f"             agent: {who}")
             # The brief first: what this gate was asked. Reading a run of
             # rejects without it cannot distinguish "no footage matched" from
             # "the question was impossible".
@@ -147,6 +238,39 @@ class Ledger:
 
     def emit(self, checkers=()):
         print(self.report(checkers), file=self._stream, flush=True)
+
+    def save(self, path, checkers=(), meta=None):
+        """Write the ledger beside the clip so it outlives the terminal.
+
+        The ledger was print-only, which meant the only person who ever saw
+        which division checked what was whoever happened to be watching the
+        render's stdout. The operator asked for these logs in a channel and got
+        an empty one, because nothing had ever written them down.
+
+        Both forms are kept: .json for anything that wants the records, and
+        .txt holding the exact rendered report so the delivered text cannot
+        drift from what the render actually printed.
+        """
+        ok, no, warn = self.counts()
+        payload = {
+            "clip": (meta or {}).get("file", ""),
+            "totals": {"pass": ok, "reject": no, "warn": warn},
+            "entries": self.entries,
+            # Briefs are entries with verdict BRIEF, not a separate list. They
+            # are split out here because the brief is the half that answers
+            # "what did we GIVE the agent" — the half that found the last two
+            # bugs — and a consumer should not have to know the schema to find
+            # it.
+            "briefs": [e for e in self.entries if e["verdict"] == BRIEF],
+            "report": self.report(checkers),
+        }
+        payload.update({k: v for k, v in (meta or {}).items() if k != "file"})
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        txt = os.path.splitext(path)[0] + ".txt"
+        with open(txt, "w", encoding="utf-8") as fh:
+            fh.write(payload["report"] + "\n")
+        return path
 
 
 # A render builds one ledger and passes it down. Module-level so the deep
@@ -203,7 +327,19 @@ if __name__ == "__main__":
     led.warned("edit", "cutaways", "0 placed", "no footage of the act")
 
     text = led.report(checkers=("sourcing", "footage", "copy", "sound"))
-    assert "RESEARCH" in text
+    # Division labels come from the agency-agents repo, not from this file's
+    # imagination. The earlier table said "RESEARCH" for footage, which matched
+    # no agent in any division.
+    assert "TESTING" in text, text
+    # Every division named must point at an agent file that exists, and the
+    # report must name the reviewer. A ledger that invents a reviewer is the
+    # bug this replaced.
+    assert not missing_agents(), missing_agents()
+    assert "agent: Evidence Collector" in text, text
+    assert "agent: TikTok Strategist" in text, text
+    for checker in DIVISIONS:
+        assert os.path.exists(agent_path(checker)), checker
+        assert agent_name(checker) != checker, checker
     # A gate that never ran must be visible, not absent.
     assert "copy       DID NOT RUN" in text, text
     assert "sound      DID NOT RUN" in text, text

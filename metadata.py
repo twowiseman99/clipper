@@ -7,6 +7,7 @@ hashtag placement (YouTube: tags field + #Shorts in description).
 import re
 import sys
 
+import agents
 import ai
 import audit
 import bgm
@@ -55,7 +56,7 @@ BATAS YANG TIDAK BOLEH DILANGGAR, di atas semua instruksi framing:
 """,
 }
 
-SYSTEM = """You are a viral short-form video strategist for Indonesian audiences.
+SYSTEM = """This clip's copy is your assignment.
 Output strictly a JSON object, no markdown. All text fields in casual Indonesian
 (santai, gaul). Use relevant emoji inline in hook and title where they add punch.
 
@@ -298,6 +299,14 @@ def generate(transcript, requirements, platform="youtube", context=None,
               file=sys.stderr)
     if preset:
         system = SYSTEM + "\n" + preset
+    # The copy gate's reviewer is marketing/marketing-tiktok-strategist.md. Up
+    # to here the ledger named that agent while this hand-written SYSTEM did the
+    # work, so the review credited someone who had never been consulted. The
+    # agent's own identity and rules now go in front; SYSTEM stays last and is
+    # declared binding, because it holds the constraints that were actually
+    # verified against renders — character caps, JSON shape, Indonesian, the
+    # banned-filler list.
+    system = agents.system_for("copy", system)
     try:
         out = ai.chat_json(
             system,
