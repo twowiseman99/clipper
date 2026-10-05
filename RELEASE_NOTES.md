@@ -1,3 +1,56 @@
+## v0.7.3 — captions stopped losing words
+
+**The clip did not contain the line it was built around.** Operator: "Mana
+gibran ngomong kasih bekal?"
+
+`_editorial_layer` laid caption tiles with `if cx + t.width > block_w: break` —
+anything past the line budget was discarded. `emphasis.py` uppercases stressed
+words, and "kotak" scored 1.43 against a 1.15 threshold, so the line grew to
+`-anaknya MEMBAWA KOTAK` = 1003px against a 943px limit. "kotak" never reached
+a frame.
+
+The widening came from the emphasis pass, the drop from the layout pass.
+Neither logged anything, because dropping a tile was not an error in that
+function: `warnings: []`, every gate green, word gone. Overflow now wraps to a
+second row.
+
+Reproducing it required the full input. Rendering the layer without
+`accent_words` produced a different, *correct* 800px tile — the bug was
+invisible without the emphasis scores. Only with them did the png match the
+shipped one byte for byte (md5 `0ef9c42bf0`).
+
+**`--end-at-sentence`.** The clip ran 22s on a 6.5s sentence, then rolled
+through an unrelated aside and crowd noise. `--start` plus `--seconds` makes
+the operator guess how long a thought lasts; the transcript already knows.
+22.0s -> 10.8s, ending where speech stops.
+
+It takes the first silence that still leaves a usable clip, not simply the
+first silence: `--start` is set by eye, so a segment often opens on the tail of
+the previous sentence. It refuses rather than hand back a segment too short for
+the ending, since `_outro_filters` silently returns nothing below 3x its span.
+
+**Shake density, measured not guessed.** Operator: "Getarannya terlalu gitu
+itu." His reference (youtube `AGv6G13TPUc`, 30-34s) runs 8 hits in 4.0s =
+2.00/s. Ours ran 5.77/s, because `OUTRO_PUNCH_PER_BEAT=3` was tuned against a
+*different* reference short. Now 1 hit/beat = 1.92/s, measured at 2.27/s in the
+delivered file.
+
+`OUTRO_PUNCH_DECAY` had to move with it (2 -> 6). The envelope is
+`exp(-DECAY*phase)` with phase spanning one beat, so keeping DECAY=2 at the
+slower rate stretches each hit from 0.087s to 0.260s — a drift, not a punch.
+Two coupled constants, one of them invisible in isolation.
+
+**The transcript was already right.** `glossary.json` had all four fixes
+(`titik->titip`, `kota->kotak`, `ikut->ibu`, `rekomisasi->rekomendasi`) and all
+four applied; the shipped caption read "TITIP" correctly. The missing word was
+a layout bug, not a transcription one.
+
+Tests: 40 ok. `_v41` covers the snap and the shake density, `_v42` renders the
+real caption layer and asserts the wrap. `_v9`/`_v10` still fail on a fixture
+that was never committed.
+
+— Dalmislave
+
 # Clipper — Release Notes
 
 ## v0.7.3 — the jamet freeze shook the wrong thing
