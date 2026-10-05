@@ -1,5 +1,88 @@
 # Clipper — Release Notes
 
+## v0.7.1 — pillar was cropping twice, and the agents got their skills
+
+### pillar framing never actually applied
+
+Three bugs stacked, all invisible from the code:
+
+1. `_zoompan` read the module-level `FRAME_MODE` — the `.env` default
+   (`cover`). `--frame-mode` travels as a function argument, so the standing
+   `CLIPPER_ZOOM=1.2` breath stayed on top of the finished pillar card.
+2. pillar fell through to the `fill` else-branch, which crops the composed
+   frame to canvas width. A second crop of an already-correct frame.
+3. The shared `[bg][mn]` overlay ran for pillar, which never makes those
+   labels.
+
+What proved it: two consecutive "fixed" renders came out **byte-for-byte
+identical** (`md5 e1ab71f8`). The `graph.txt` still carried
+`z='1+0.1000-0.1000*cos(...)'`.
+
+| | banner | face |
+|---|---|---|
+| before | `...RAL GIBRAN ... DARI RUM...` | clipped |
+| after | `VIRAL GIBRAN ... DARI RUMAH` | whole |
+
+1080x1920 unchanged. Jamet punch still measures 20.8 peak motion in the
+closing seconds; the near-zero readings at 18.8-19.0s are `OUTRO_FREEZE=0.5`,
+the deliberate hold before the hit.
+
+`_v39` covers all three and deliberately leaves `edit.FRAME_MODE` at `cover`
+while passing `pillar` as an argument — the first version of the test set the
+constant and passed while the renderer stayed broken.
+
+### Agents carry skills now
+
+`agent_skills.py` maps each reviewing agent to skills matching its job
+description, from the two repos supplied: `obra/superpowers` and
+`garrytan/gstack` (78 skills total).
+
+| gate | agent | skills |
+|---|---|---|
+| sourcing | Evidence Collector | verification-before-completion, qa-only |
+| footage | Evidence Collector | verification-before-completion, systematic-debugging |
+| copy | TikTok Strategist | brainstorming |
+| language | Indonesian Transcript Linguist | systematic-debugging, verification-before-completion |
+| sound | Focus Music Architect | *(none)* |
+| edit | Short-Video Editing Coach | design-review, verification-before-completion |
+
+Name, one-line description and on-disk path reach the prompt — not the body.
+`gstack/qa-only/SKILL.md` is 45KB and would bury the technical contract that
+took this long to get right. Descriptions are read from each `SKILL.md` at run
+time, like the agent names.
+
+The `sound` gate has **no skills on purpose**. Neither repo has anything on
+audio or music selection, and padding it with a near-miss would repeat the
+invented-mapping mistake that produced the fabricated division labels.
+
+### RTK
+
+`rtk-ai/rtk` 0.51.0 installed with its official Hermes hook (SHA256 verified
+against `checksums.txt`). The awareness block is appended verbatim to
+`clipper/CLAUDE.md` and `athena-clip/AGENTS.md` under the same
+`<!-- rtk-instructions v2 -->` markers `rtk init` uses, so it upserts instead
+of duplicating.
+
+Measured on this repo:
+
+```
+git log -5   10125 B -> 1614 B   84% saved
+git status     769 B ->  393 B   49% saved
+ls             733 B ->  927 B   26% WORSE
+cat job.py (57KB)              unchanged
+```
+
+The plugin is fail-open: no `rtk` on PATH, or a non-zero exit, and Hermes runs
+the original command.
+
+### Tests
+
+37 ok. `_v9`/`_v10` still fail on the missing
+`media/uf9833efdc72b/PPOKdwOCMLA.words.json` fixture — confirmed failing on
+clean HEAD via `git stash`, unrelated to this work.
+
+— Dalmislave
+
 **v0.7.0 "the reviewer named in the log is the reviewer that ran"** · branch `claude/code-clipper-review-v9e3im`
 new: `agents.py`, `audit_watch.py`, `tests/_v33`–`_v38`
 
