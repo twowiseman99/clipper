@@ -1,3 +1,55 @@
+## v0.7.9 — the flicker was measuring the wrong thing entirely
+
+Operator: "efeknya kurang rusuh, guide jedag jedug nya gimana sih? di bedain
+exposurenya di goyang goyangin ikutin beat lagu walau agak extream."
+
+Every measurement in this project so far looked at **motion**
+(frame-difference). Motion cannot see an exposure change. Measuring raw
+brightness on the reference showed what was actually missing:
+
+```
+                brightness sd   largest jump   flickers/s   bright/dark
+reference            30.6           38.2          0.50        11 / 10
+ours                 13.9           16.2          0.17         6 /  5
+```
+
+And 16 of the reference's 21 flickers sit within 0.3s of a musical onset. Ours
+fired on stressed **words**, so the picture and the track marked different time.
+
+Four fixes, each from a number:
+
+- `FLASH` defaulted to **0**. The mechanism was already correct — it was off,
+  and capped at 3, which cannot express 21 flickers in 13.5s.
+- **Bright-only -> alternating.** The dark half is what reads as exposure being
+  pushed around rather than a camera flash going off.
+- **Words -> the track.** `_music_beats()` reads RMS onsets from the BGM: rises
+  over 6 dB, 0.35s apart, median 0.528s = 113.6 BPM on the hype track. A 3 dB
+  gate catches half-beats and reports 237. It returns real measurements or
+  nothing; a synthetic BPM grid drifts against the music within a few bars.
+- **Amount 0.35 -> 0.18.** Probed on flat grey through real ffmpeg: 0.12 -> 27,
+  0.18 -> 40, 0.25 -> 58, 0.35 -> 81. And `FLASH_BEAT_FRACTION=0.35` keeps the
+  loudest third: all beats measured 1.01 events/s on a delivered render, half
+  gave 0.88, a third gives **0.50** — the reference's rate.
+
+**The expensive bug.** The flicker was only wired into the `cover` branch, so a
+pillar render carried none of it. Turning it on produced a byte-identical file
+(md5 `f9ef2d296484` twice) — which is the only reason it was caught. A value
+with two independent call sites is read twice; checking the one you edited is
+not evidence.
+
+Delivered render (md5 `bc2fd50bfdf1`): 15 flicker terms, 7 dark, largest
+brightness jump **39.68** against the reference's 38.17. 31.81s, 1080x1920,
+freeze still holding to the last frame.
+
+Tests: 47 ok. `_v49` pins the rate, both directions, and the peak on a **flat
+grey** source — `testsrc2` reads a 124-point jump on its own and measures
+nothing, which an earlier version of this probe fell for and reported the
+control as the strongest flash in the sweep. It carries a negative control and
+a check that an unreadable track yields no beats rather than a grid.
+`_v9`/`_v10` still fail on a missing fixture, unrelated.
+
+— Dalmislave
+
 ## v0.7.8 — the freeze stopped early, and the gate that watched it was blind
 
 Operator: "harusnya videonya pause sampe akhir."
@@ -1998,50 +2050,3 @@ publishing, and the prompt tells the agent to say which is which so nobody
 posts the compressed copy to a platform. Default is 0, meaning off, so the
 pipeline is unaffected. Verified on the 13.9 MB test render: a 9 MB cap
 produced 8.0 MB, a 45 MB cap correctly produced nothing.
-
-What it cannot do is make the arithmetic kinder. Fitting 90 seconds of
-1080x1920 into 9 MB means 0.7 Mbps, and no encoder setting rescues that. On a
-free Discord account a 90 second clip cannot arrive looking good; Nitro Basic
-at 50 MB is the only option that keeps the plan intact, and `hermes-prompt.md`
-gives the numbers rather than leaving it to be discovered during a demo.
-
-**`hermes-prompt.md`** holds the system prompt itself: the catalogue-first
-flow, the two-link contract, what exit 3 means, which file to upload, and how
-to read a failure without pasting a traceback into a chat. Every flag it names
-was checked against `job.py`, and every number in it recomputed.
-
-_Dalmislave_
-
----
-
-## v0.3.4 - no hook unless one was asked for
-
-Every clip used to get a hook, because `metadata.generate()` always writes one
-and `job.py` always passed it to the renderer. Sending only a content link
-still produced a headline over the first seconds, written by the model because
-nothing stopped it.
-
-A hook is now drawn only when something asks for one:
-
-| Given | Hook |
-|---|---|
-| `--hook "text"` | the text, over the opening clip or the content |
-| an opening link | written for it, from the topical pick or the model |
-| neither | none |
-
-The rule lives in `_hook_for()` rather than inline, because it is a contract an
-agent offers a user rather than an implementation detail, and `job.py
---selftest` pins all seven cases along with the catalogue and the delivery cap.
-That flag is new: it checks the parts that are a promise, without touching the
-network.
-
-This costs nothing and returns something. The seconds under a hook carry no
-subtitle, since nothing is allowed to share the screen with it, so a hook
-nobody asked for was eating the opening line of speech. Rendered both ways from
-the same source and the same window: at two seconds in, the hooked version
-shows the hook and no caption, the plain one is already captioning "jadi gue
-dulu mikir bikin konten".
-
-`README.md`, `AGENTS.md` and `hermes-prompt.md` all say it now, and the
-catalogue's "direct" entry no longer describes the old behaviour.
-
