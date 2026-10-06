@@ -266,6 +266,45 @@ FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "24"))
 # 0.88. 0.35 puts 16 flickers in a 31.8s clip, i.e. 0.50/s — the reference's
 # rate. Beats are chosen by loudness, so the ones kept are the ones you hear.
 FLASH_BEAT_FRACTION = float(os.environ.get("CLIPPER_FLASH_BEAT_FRACTION", "0.35"))
+# Body slams: the frame is thrown a long way on a beat, then holds still.
+#
+# "goyangnya jgn kayak geter\" tapi goyang aga jauh gitu, kayak bantingan
+# bantingan agak jauh sesuai beatnya" — the distinction is not amplitude, it is
+# what fraction of the time the picture is moving. MEASURED with vidstabdetect
+# (median local-motion vector per frame, at 1080 wide):
+#
+#     reference        moving >8px 10.6% of frames, peak 81.1px
+#     our outro shake  moving >8px 36.7% of frames, peak 144.5px
+#
+# So the outro shake travels FURTHER than the reference and still reads as a
+# vibration, because it never stops: OUTRO_SHAKE_HZ is a continuous sine. A
+# slam is rare, far, and then still. The reference's slams over 40px sit a
+# median 0.83s apart, close to this track's 0.53s beat.
+SLAM = os.environ.get("CLIPPER_SLAM", "1") not in ("0", "", "false")
+# Pixels of travel at the peak, and how long one throw lasts. Probed through
+# real ffmpeg + vidstabdetect on a moving source:
+#
+#     30px/0.18s -> moving 15.3%, peak  77.5px   <- matches the reference
+#     50px/0.18s -> moving 18.7%, peak 130.2px
+#     70px/0.18s -> moving 20.0%, peak 185.4px
+#
+# 30px is already "agak jauh": it is a 2.8% shift of a 1080-wide frame in under
+# a fifth of a second, and it reads as a throw because the frame is static
+# either side of it.
+SLAM_PX = float(os.environ.get("CLIPPER_SLAM_PX", "30"))
+SLAM_HOLD = float(os.environ.get("CLIPPER_SLAM_HOLD", "0.18"))
+# Fraction of detected beats that get a slam. Probed through real ffmpeg +
+# vidstabdetect against the reference's 10.6% moving / 2.3% far / 81.1px peak:
+#
+#     0.22 -> 0.25 slams/s, moving 2.5%, far 0.6%, peak 69.0px
+#     0.40 -> 0.42 slams/s, moving 3.9%, far 0.8%, peak 69.0px
+#     0.60 -> 0.58 slams/s, moving 6.4%, far 1.4%, peak 72.8px
+#
+# 0.60 is the closest to the reference while staying well under it on time
+# spent moving, which is the number that separates a slam from a vibration.
+# Still lower than the flicker's share: a throw interrupts the frame far more
+# than a brightness change does.
+SLAM_BEAT_FRACTION = float(os.environ.get("CLIPPER_SLAM_BEAT_FRACTION", "0.60"))
 # Outro: how the clip closes. Two shapes, because the ending has to match what
 # the clip is about — a flash stinger under a man apologising for people being
 # killed is the wrong register, and reads as a template applied without
@@ -1405,7 +1444,49 @@ def _flash_expr(times, dur):
     return "".join(terms).lstrip("+")
 
 
-def _music_beats(bgm_path, dur, offset=0.0):
+def _slam_offsets(times, dur):
+    """x/y pixel-offset expressions that throw the frame on each beat.
+
+    "goyangnya jgn kayak geter" tapi goyang aga jauh gitu, kayak bantingan
+    bantingan agak jauh sesuai beatnya."
+
+    The outro shake is a continuous sine at OUTRO_SHAKE_HZ, which is why it
+    reads as a vibration however far it travels: measured with vidstabdetect it
+    moves on 36.7% of its frames against the reference's 10.6%, while peaking
+    HIGHER (144.5px vs 81.1px). Distance was never the problem. Stillness was.
+
+    So each beat gets one throw with a sharp attack and a fast decay, and the
+    frame is static in between. Direction rotates through a fixed cycle rather
+    than alternating on one axis — a left/right-only pattern at beat spacing is
+    exactly what a vibration looks like.
+
+    Returns ("", "") when there is nothing to do, so the caller can skip the
+    pad/crop entirely instead of emitting a no-op filter.
+    """
+    if not SLAM or not times or SLAM_PX <= 0:
+        return "", ""
+    # Eight directions: four axis-aligned, four diagonal. A throw and its
+    # opposite never land on consecutive beats.
+    dirs = [(1, 0), (0, 1), (-1, 0), (0, -1),
+            (1, 1), (-1, 1), (-1, -1), (1, -1)]
+    xs, ys = [], []
+    for i, t in enumerate(times):
+        a = max(0.0, t)
+        b = min(dur, a + SLAM_HOLD)
+        if b <= a:
+            continue
+        dx, dy = dirs[i % len(dirs)]
+        # pow(...,2) decay: full travel on the beat, home before the next one.
+        env = (f"between(t,{a:.3f},{b:.3f})"
+               f"*pow(1-(t-{a:.3f})/{b - a:.4f},2)")
+        if dx:
+            xs.append(f"{dx * SLAM_PX:+.1f}*{env}")
+        if dy:
+            ys.append(f"{dy * SLAM_PX:+.1f}*{env}")
+    return "".join(xs).lstrip("+"), "".join(ys).lstrip("+")
+
+
+def _music_beats(bgm_path, dur, offset=0.0, fraction=None):
     """Onset times in `bgm_path`, clip-relative, or [] if it can't be read.
 
     The operator's instruction was "ikutin beat lagu" — follow the TRACK. The
@@ -1463,7 +1544,8 @@ def _music_beats(bgm_path, dur, offset=0.0):
     # reference flickers on about half the beats, so take the loudest half and
     # keep them in time order.
     if len(beats) > 2:
-        keep = max(1, int(round(len(beats) * FLASH_BEAT_FRACTION)))
+        keep = max(1, int(round(len(beats) * (
+            FLASH_BEAT_FRACTION if fraction is None else fraction))))
         strongest = sorted(beats, key=lambda b: -b[1])[:keep]
         beats = sorted(strongest, key=lambda b: b[0])
     return [t - offset for t, _ in beats if offset <= t <= offset + dur]
@@ -2319,8 +2401,36 @@ def render_clip(video_path, start, end, words, out_path, *,
             p_flash = _flash_expr(p_beats or p_punches, dur)
             p_outro, p_filters = _outro_filters(dur, mood=mood)
             p_bright = "+".join(x for x in (p_flash, p_outro) if x)
+            # Slams go on the strongest beats only, a smaller share than the
+            # flicker: a throw interrupts the frame much more than a brightness
+            # change. Built from the same onsets so the picture and the track
+            # mark the same time.
+            p_slam_beats = _music_beats(bgm, dur, intro_dur,
+                                        fraction=SLAM_BEAT_FRACTION) \
+                if isinstance(bgm, str) else []
+            # Keep slams out of the frozen ending. The freeze exists so the
+            # last seconds hold still; throwing the frame there would animate
+            # the still and re-break what the previous fix just established.
+            _freeze_at = _outro_start(dur) if OUTRO_FREEZE > 0 else dur
+            p_slam_beats = [t for t in p_slam_beats if t + SLAM_HOLD < _freeze_at]
+            sx, sy = _slam_offsets(p_slam_beats, dur)
+            slam = ""
+            if sx or sy:
+                # pad then crop back: the frame needs somewhere to travel INTO,
+                # or a throw just exposes the canvas edge. Padding by the full
+                # travel on each side keeps 1080x1920 intact, which is
+                # non-negotiable here.
+                m = int(SLAM_PX) + 2
+                slam = (f"pad=iw+{m * 2}:ih+{m * 2}:{m}:{m}:color=black,"
+                        f"crop=w=iw-{m * 2}:h=ih-{m * 2}"
+                        f":x='{m}+({sx or '0'})':y='{m}+({sy or '0'})'")
             chains.append(f"[0:v]{cover},setsar=1"
                           + (f",{p_zoom}" if p_zoom else "")
+                          # Slam goes BEFORE the outro filters. Those end with
+                          # the freeze loop + its own crop, and a pad/crop
+                          # placed after them would travel the frozen frame,
+                          # undoing the point of freezing it.
+                          + (f",{slam}" if slam else "")
                           + (f",eq=brightness='{p_bright}':eval=frame"
                              if p_bright else "")
                           + "".join(f",{f}" for f in p_filters)
