@@ -1,3 +1,43 @@
+## v0.7.6 — panning on, shake stays on the frozen ending
+
+Operator: "A, jedag jedugnya baru goyang goyang, di freeze frame gibran dan
+video, terus jedag jedug kayak tutorial yg gw kasih."
+
+The crop now follows the subject, and the only other movement is the
+jedag-jedug on the frozen last frame. `CLIPPER_PAN=0 -> 1`, with the reason
+written next to it in `.env`.
+
+| crop | subject framed |
+|---|---|
+| centred | 36% |
+| best static | 38% |
+| panning | 100% (6 keyframes, 0.6s ramps) |
+
+Static could never win here: the subject walks 0.52 of the frame width against
+a 0.42-wide window. The previous static render still showed a bystander in the
+closing third.
+
+Verified on the delivered file rather than a rebuilt graph — pan has 6
+keyframes with 0.6s ramps, freeze is `loop=60` from frame 864 (28.80s), shake
+runs from 28.810 at period 0.520s = **1.92 hits/s** against the 2.00 measured
+from the operator's reference. Frames at t=2/14/26/29.5 all show the subject.
+
+`_v46` pins both halves: the shake must not begin before the freeze, and the
+pan must stay enabled and actually move.
+
+**Two bugs found, both in the new test, not the renderer.** `mood="hype"`
+selects the STINGER ending — `_outro_kind` never returns "jamet" from "auto",
+because freezing and shaking a frame is a stylistic claim the operator makes
+per clip. The first version asserted on the stinger's 4.00 hits/s and reported
+it as the jamet shake being twice the reference; the renders were correct all
+along. The jamet chain also comes back in the SECOND element of
+`_outro_filters`' tuple, so checking only the first found no freeze in an
+ending that has one.
+
+Tests: 44 ok.
+
+— Dalmislave
+
 ## v0.7.5 — the crop was pointed at the wrong person
 
 Operator: "Salah muka woi harusnya kan gibran."
