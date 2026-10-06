@@ -298,6 +298,15 @@ FLASH_BURST = int(os.environ.get("CLIPPER_FLASH_BURST", "3"))
 # cannot be built out of neighbouring beats, it has to sub-divide one. Kept
 # above 2 frames at 30fps so each flicker is actually visible.
 FLASH_SUBBEAT = float(os.environ.get("CLIPPER_FLASH_SUBBEAT", "0.10"))
+# Share of onsets kept when the effects are confined to the closing window.
+# FLASH_BEAT_FRACTION is tuned for a whole clip, where 12% of 63 onsets is 8
+# hits; the 3s freeze contains 6 onsets in total, and 12% of those is ONE, which
+# put a single burst at 28.45s and left 2.4s of the ending still. Measured on
+# this track's window: 0.30 -> 2 bursts, 0.50 -> 3 bursts evenly spread, longest
+# gap 1.11s. The window is short enough that a larger share is still a burst
+# pattern, not a drip.
+FLASH_WINDOW_FRACTION = float(
+    os.environ.get("CLIPPER_FLASH_WINDOW_FRACTION", "0.50"))
 # Body slams: the frame is thrown a long way on a beat, then holds still.
 #
 # "goyangnya jgn kayak geter\" tapi goyang aga jauh gitu, kayak bantingan
@@ -1646,6 +1655,55 @@ def _slam_offsets(times, dur):
     return "".join(xs).lstrip("+"), "".join(ys).lstrip("+")
 
 
+def _after(times, floor, dur):
+    """Keep only the times inside the closing window [floor, dur).
+
+    "harusnya cukup pas di freeze frame aja setelah kotak makan dari rumah,
+    masih kelebihan terus" — the flicker and the slams belong to the ENDING,
+    not to the clip. Frame-by-frame on the delivered file: 51 brightness jumps
+    between 0.47s and 26.07s and ZERO in the freeze, which is the exact inverse
+    of what was asked for.
+
+    `floor` is where the freeze starts, so the body runs clean and every effect
+    lands on the held frame.
+    """
+    if floor is None:
+        return []
+    return [t for t in times if floor <= t < dur]
+
+
+def _window_beats(bgm_path, floor, end, offset=0.0, fraction=None):
+    """Beats inside [floor, end), selected within that window.
+
+    _music_beats picks a FRACTION OF THE WHOLE track, so asking it for a 31.2s
+    clip and then filtering to the last 3 seconds left 3 flickers stacked at
+    30.5s with the freeze's opening 2.3s empty — the selection had already spent
+    its budget on the part of the clip that now carries nothing.
+
+    Re-basing the body's rhythm onto the window was the other option and is
+    worse: it would put hits at even spacing that no longer line up with the
+    music, and the whole point is that the picture hits when the track does.
+    Selecting inside the window keeps both — real onsets, and enough of them.
+    """
+    if not isinstance(bgm_path, str) or floor is None or end <= floor:
+        return []
+    allb = _music_beats(bgm_path, end, offset, fraction=1.0)
+    inside = [t for t in allb if floor <= t < end]
+    if len(inside) <= 2:
+        return inside
+    keep = max(1, int(round(len(inside) * (
+        FLASH_WINDOW_FRACTION if fraction is None else fraction))))
+    lo, hi = inside[0], inside[-1]
+    width = (hi - lo) / keep if keep else (hi - lo)
+    out = []
+    for k in range(keep):
+        a, b = lo + k * width, lo + (k + 1) * width
+        sl = [t for t in inside if a <= t < b] or [t for t in inside if a <= t <= b]
+        if sl:
+            out.append(sl[0])
+    return sorted(set(out))
+
+
 def _burst_times(beats, per=None, sub=None):
     """Expand chosen beats into tight runs of flickers.
 
@@ -2578,8 +2636,10 @@ def render_clip(video_path, start, end, words, out_path, *,
             # a clip without BGM still gets exposure movement rather than none.
             _beats = _music_beats(bgm, dur, intro_dur) \
                 if isinstance(bgm, str) else []
-            flash = _flash_expr(_burst_times(_beats) if _beats else punches,
-                                dur)
+            _end_at = _outro_start(dur, mood=mood, words=words, clip_start=start)
+            flash = _flash_expr(
+                _after(_burst_times(_beats) if _beats else punches,
+                       _end_at, dur), dur)
             # The closing treatment joins the same brightness expression, and
             # may add filters of its own (the melancholy ending desaturates).
             #
@@ -2594,11 +2654,16 @@ def render_clip(video_path, start, end, words, out_path, *,
             outro, outro_filters = _outro_filters(dur, mood=mood,
                                                   words=words,
                                                   clip_start=start)
-            bright = "+".join(x for x in (flash, outro) if x)
+            # Same split as the pillar branch: the outro's ramp stays upstream of
+            # the freeze loop, the flicker goes below it or the loop freezes the
+            # flicker along with the picture (probed: 0 events above, 10 below).
             chains.append(f"[0:v]{cover_v or cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
-                          + (f",eq=brightness='{bright}':eval=frame" if bright else "")
+                          + (f",eq=brightness='{outro}':eval=frame"
+                             if outro else "")
                           + "".join(f",{f}" for f in outro_filters)
+                          + (f",eq=brightness='{flash}':eval=frame"
+                             if flash else "")
                           + f"[{base_label}]")
         elif split_screen and bg_video:
             chains.append(f"[1:v]{cover},eq=brightness=-0.25[bg]")
@@ -2628,21 +2693,36 @@ def render_clip(video_path, start, end, words, out_path, *,
             p_punches = _punch_times(words, start, dur)
             p_beats = _music_beats(bgm, dur, intro_dur) \
                 if isinstance(bgm, str) else []
-            # Each chosen beat becomes a tight run, which is what makes the
-            # edit read as "jedag-jedug" rather than as an effect running under
-            # the whole song. Punch times are speech-driven and already come in
-            # clusters, so they are not sub-divided.
-            p_flash = _flash_expr(_burst_times(p_beats) if p_beats
-                                  else p_punches, dur)
+            # The effects belong to the ENDING, not to the whole clip. Measured
+            # frame-by-frame on the previous delivery: 51 brightness jumps
+            # spread from 0.47s to 26.07s and none at all in the freeze —
+            # "harusnya cukup pas di freeze frame aja setelah kotak makan dari
+            # rumah". So the burst times are clamped to the closing window, and
+            # the body of the clip carries no flicker.
+            # The window is [freeze .. output end], not [freeze .. dur]. `dur` is
+            # the BODY length; the freeze clones frames and extends the file past
+            # it, so measuring against dur left a 0.35s window with zero beats in
+            # it — the effects would have vanished entirely rather than moved.
+            _out_len = _outro_output_len(dur, mood=mood, words=words,
+                                         clip_start=start)
+            _end_at = _outro_start(dur, mood=mood, words=words, clip_start=start)
+            p_flash = _flash_expr(
+                _burst_times(_window_beats(bgm, _end_at, _out_len, intro_dur))
+                or _after(p_punches, _end_at, _out_len), _out_len)
             p_outro, p_filters = _outro_filters(dur, mood=mood,
                                                 words=words,
                                                 clip_start=start)
-            p_bright = "+".join(x for x in (p_flash, p_outro) if x)
+            # Keep the two brightness terms SEPARATE. The outro's own ramp
+            # describes what the ending does to the footage and belongs upstream
+            # of the freeze; the flicker is a hit on the held frame and has to
+            # sit downstream of it, or the loop freezes the flicker too.
+            p_bright = p_flash
+            p_outro_bright = p_outro
             # Slams go on the strongest beats only, a smaller share than the
             # flicker: a throw interrupts the frame much more than a brightness
             # change. Built from the same onsets so the picture and the track
             # mark the same time.
-            p_slam_beats = _music_beats(bgm, dur, intro_dur,
+            p_slam_beats = _music_beats(bgm, _out_len, intro_dur,
                                         fraction=SLAM_BEAT_FRACTION) \
                 if isinstance(bgm, str) else []
             # Keep slams out of the frozen ending. The freeze exists so the
@@ -2656,8 +2736,17 @@ def render_clip(video_path, start, end, words, out_path, *,
             # have taken down the whole render on a short clip.
             if _freeze_at is None:
                 _freeze_at = dur
-            p_slam_beats = [t for t in p_slam_beats if t + SLAM_HOLD < _freeze_at]
-            sx, sy = _slam_offsets(p_slam_beats, dur)
+            # Slams land ON the freeze, not before it. This is the inversion the
+            # operator caught: the rule used to be "keep slams out of the frozen
+            # ending", which left the body shaking for 26s and the ending
+            # perfectly still — "frame freeze ga ada suara videonya lagi jedag
+            # jedug", "harusnya cukup pas di freeze frame aja".
+            #
+            # Throwing a held frame is what makes the still read as jedag-jedug:
+            # the PICTURE stops, the framing keeps hitting the beat.
+            p_slam_beats = _window_beats(bgm, _freeze_at, _out_len, intro_dur,
+                                         fraction=SLAM_BEAT_FRACTION)
+            sx, sy = _slam_offsets(p_slam_beats, _out_len)
             slam = ""
             if sx or sy:
                 # pad then crop back: the frame needs somewhere to travel INTO,
@@ -2670,14 +2759,22 @@ def render_clip(video_path, start, end, words, out_path, *,
                         f":x='{m}+({sx or '0'})':y='{m}+({sy or '0'})'")
             chains.append(f"[0:v]{cover},setsar=1"
                           + (f",{p_zoom}" if p_zoom else "")
-                          # Slam goes BEFORE the outro filters. Those end with
-                          # the freeze loop + its own crop, and a pad/crop
-                          # placed after them would travel the frozen frame,
-                          # undoing the point of freezing it.
-                          + (f",{slam}" if slam else "")
+                          + (f",eq=brightness='{p_outro_bright}':eval=frame"
+                             if p_outro_bright else "")
+                          + "".join(f",{f}" for f in p_filters)
+                          # Brightness and slam both go AFTER the outro filters.
+                          # Those end with the freeze loop, and anything placed
+                          # upstream of it gets frozen along with the picture:
+                          # probed in real ffmpeg, a flicker written above the
+                          # loop produced 0 events inside the freeze and the
+                          # same expression below it produced 10.
+                          #
+                          # The outro's own brightness term is kept upstream —
+                          # it describes the ramp the ending applies to the
+                          # footage, not a hit on the held frame.
                           + (f",eq=brightness='{p_bright}':eval=frame"
                              if p_bright else "")
-                          + "".join(f",{f}" for f in p_filters)
+                          + (f",{slam}" if slam else "")
                           + f"[{base_label}]")
         else:
             # reference style: the footage itself, blurred, fills the frame
