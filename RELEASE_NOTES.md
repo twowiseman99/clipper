@@ -1,3 +1,53 @@
+## v0.7.7 — the effects were on a timer, the reference is in bursts
+
+Operator: "Sumpah aneh, efeknya kurang sebelum jedag jedug, coba research dulu
+deh, cek lagi tutorial dia gimana buatnya."
+
+So the reference (`AGv6G13TPUc`) got measured instead of remembered.
+Frame-difference motion per second, body of clip only:
+
+| | mean | peak | peaks/s |
+|---|---|---|---|
+| reference | 18.4 | 70.6 | 0.81 |
+| ours, before | 10.7 | 34.6 | 0.21 |
+
+**The shape was the finding, not the mean.** The reference's hits come in
+bursts of 1-3 inside ~0.6s, then a 2-4s gap — five bursts across 13.5s, sizes
+[3,2,1,3,2]. A flat 9s `PUNCH_MIN_GAP` cannot express that: on the 31.8s clip
+there were 27 qualifying beats and it kept **3**, with nothing before t=4.7s,
+which is the stretch the operator was pointing at.
+
+`_punch_times` now carries two gaps — a beat within `PUNCH_BURST_GAP` (0.75s)
+joins an existing burst up to `PUNCH_BURST` (3), and a new burst needs
+`PUNCH_MIN_GAP` (2.7s, was 9) of clear air. The quiet is deliberate.
+
+Depth and hold measured on real ffmpeg renders (testsrc2, 2.34 control):
+
+| amount | motion | | hold | motion |
+|---|---|---|---|---|
+| 0.06 | 4.34 | | 0.90s | 5.87 |
+| 0.10 | 5.87 | | 0.45s | 7.84 |
+| 0.18 | 7.37 | | 0.30s | 8.45 |
+
+Depth saturates past 0.10 and the hold is the bigger lever, so amount
+0.06 -> 0.10, hold 0.9 -> 0.45s (0.30s reads as a glitch). `PUNCH_MAX` 8 -> 16,
+since a cap of 8 spends itself on isolated hits before any burst can form.
+
+Delivered file (md5 `daded051b085`): body mean 10.74 -> 11.71, peak
+34.57 -> 38.24, peaks/s 0.21 -> 0.38, **12 of 14** punches visible above local
+baseline, first at t=1.2s. Overlapping punches peak at 12.5% zoom, under the
+22% that would crop the frame.
+
+**Not chased:** the reference's 18.4 mean. It is a CapCut tutorial shaking a
+static graphic; this is a press scrum where the footage already moves, and the
+pillar card skips the base zoom on purpose so the news banner is not sliced
+(verified in code, not assumed). Matching that number would mean inventing
+movement.
+
+Tests: 45 ok.
+
+— Dalmislave
+
 ## v0.7.6 — panning on, shake stays on the frozen ending
 
 Operator: "A, jedag jedugnya baru goyang goyang, di freeze frame gibran dan
@@ -1998,24 +2048,3 @@ Read this before relying on the pipeline unattended.
   own rule that makes new UI a draft, not a deliverable, until someone writes
   the direction down.
 - **The renderer was not audited against antislop.** `edit.py` draws on video
-  frames, and the rules are written for web UI: the contrast checker assumes a
-  flat background, and a caption sits over moving footage. The reference clips
-  remain the standard there.
-- **The network itself is untested.** The download logic is driven against
-  stubbed yt-dlp and gdown, but nothing here reaches YouTube or Drive; cookies,
-  PO tokens and IP reputation are only testable on the host, with
-  `python fetch.py URL` — which now reports the resolution it got, so one run
-  answers both whether cookies work and whether the 1440p cap took effect.
-
----
-
-## Notes for whoever clones this
-
-`edit.py` is where almost all of this release lives, and its constants at the
-top are the knobs — canvas, colours, caption and hook geometry, safe-area
-fractions. They were measured off the reference clips rather than guessed, and
-the numbers are in the comments next to them.
-
-Secrets stay out of the repo: `.env`, `cookies.txt`, `clippo_session.json` and
-`tokens/` are gitignored and have to be placed by hand. `preflight.py` tells you
-which are missing.
