@@ -1,3 +1,50 @@
+## v0.7.8 — the freeze stopped early, and the gate that watched it was blind
+
+Operator: "harusnya videonya pause sampe akhir."
+
+Two bugs. The second is why the first shipped.
+
+**The freeze ran out before the clip did.** `OUTRO_FREEZE` was a fixed 2.0s
+while the jamet ending runs 3.0s. And `loop` **inserts** its clones, so the real
+tail follows them instead of being replaced — cloning more frames made the clip
+*longer* (31.81s -> 34.83s) and the footage still resumed. Measured on that
+render: motion 4-17 after 31.8s with no per-beat decay, against 0.39-0.87 inside
+the frozen stretch.
+
+Fix: `freeze_secs = max(OUTRO_FREEZE, dur - start)` covers the whole ending, and
+`trim=end=dur` drops the displaced tail. The shake window follows `freeze_secs`
+too, or the last second of the still sits motionless.
+
+**The edit gate said PASS on that file.** Its check was "outro = 'jamet', last
+3s" — it confirmed the setting it had just chosen and never looked at the
+render. The operator found the moving tail; the gate could not.
+
+`job._freeze_floor()` now probes the delivered file. The discriminating number
+is the motion **floor**, not the mean: a shaking still returns to ~0 between
+beats, moving video never does, and their means are too close to separate.
+Verified on the broken render itself — frozen 0.39, resumed tail 2.09, threshold
+1.5.
+
+A trap worth recording: `metadata=print` writes to ffmpeg's **log**, which
+`-v error` suppresses. The first probe parsed an empty stderr and returned
+"could not measure" on a perfectly good file. It writes to `file=` now.
+
+Delivered render (md5 `f9ef2d296484`): 31.81s again, and the still holds to the
+last frame — each beat spikes to 21.4 and decays to 0.85 through 31.7s. Gate:
+"floor 0.39 | frozen through the last 3s". 1080x1920 unchanged.
+
+`_v36` and `_v40` pinned the old behaviour and were corrected, not deleted:
+`_v36` asserted the clip **grew** by `OUTRO_FREEZE` (that growth was the bug),
+`_v40` pinned the freeze to the constant rather than to the ending's length.
+
+Tests: 46 ok. `_v48` is new, renders through real ffmpeg, and carries a negative
+control — the same probe must read above threshold on moving video or it guards
+nothing. It fails on clean HEAD with the original symptom ("freeze is 2.00s but
+the ending is 3.00s"), verified with git stash. `_v9`/`_v10` still fail on a
+missing fixture, unrelated.
+
+— Dalmislave
+
 ## v0.7.7 — the effects were on a timer, the reference is in bursts
 
 Operator: "Sumpah aneh, efeknya kurang sebelum jedag jedug, coba research dulu
@@ -1998,53 +2045,3 @@ dulu mikir bikin konten".
 `README.md`, `AGENTS.md` and `hermes-prompt.md` all say it now, and the
 catalogue's "direct" entry no longer describes the old behaviour.
 
-_Dalmislave_
-
----
-
-## v0.3.5 - a prompt that fits in a Discord message
-
-The prompt written in v0.3.3 was 5023 characters. A free Discord account caps a
-message at 2000, so it could not be sent as one, which is how it was meant to
-be delivered.
-
-`hermes-prompt.md` now carries both. The short one is 1969 characters with 31
-to spare for editing `--max-mb`. It drops the setup commands, which are a
-one-time job better sent separately, and compresses the failure taxonomy to the
-three cases that actually recur.
-
-What survives untouched is the hook rule, stated at the same length as before.
-It is the part that changes what lands on the video, and the part an agent is
-most likely to be helpful about in exactly the wrong way.
-
-The long version stays for a config field or a Nitro account, where the cap is
-4000. Every flag named in both was checked against `job.py`'s parser again
-after the cut.
-
-_Dalmislave_
-
----
-
-## Known gaps
-
-Read this before relying on the pipeline unattended.
-
-- **No view checker.** `submit_eligible()` filters on `views_last_checked`,
-  which nothing writes, so Clippo submission never fires.
-- **`recent_avg_views` is never written**, so the dashboard's shadowban
-  detection cannot trigger.
-- **The b-roll intro is not wired into the pipeline.** `render_clip` accepts it;
-  `pipeline.py` never passes one, because where b-roll comes from is undecided.
-- **TikTok and Instagram uploaders do not exist**, so those windows are
-  unreachable in practice.
-- **No BGM ducking.** Music sits at a fixed 0.1 under speech rather than
-  stepping back for it.
-- **`job.py` has no Discord side.** It renders and returns JSON; delivering the
-  file and holding the conversation are the agent's.
-- **No queue.** A busy host refuses rather than holding the request; whether
-  that is right depends on how the agent handles a retry.
-- **No `DESIGN.md`.** The dashboard borrows the clip palette, which is a real
-  source, but there is no written direction for anything new. Under antislop's
-  own rule that makes new UI a draft, not a deliverable, until someone writes
-  the direction down.
-- **The renderer was not audited against antislop.** `edit.py` draws on video
