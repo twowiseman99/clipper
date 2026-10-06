@@ -263,7 +263,7 @@ FLASH = os.environ.get("CLIPPER_FLASH", "1") not in ("0", "", "false")
 # 0.18 lands on the reference's largest jump (38.2). 0.35 was over twice it,
 # which is why the old flash had to be capped at 3 and left off.
 FLASH_AMOUNT = float(os.environ.get("CLIPPER_FLASH_AMOUNT", "0.18"))
-FLASH_HOLD = float(os.environ.get("CLIPPER_FLASH_HOLD", "0.22"))
+FLASH_HOLD = float(os.environ.get("CLIPPER_FLASH_HOLD", "0.08"))
 # Every other flicker goes dark instead of bright, matching the reference's
 # near-even split. Set 0 for bright-only.
 FLASH_DARK_RATIO = float(os.environ.get("CLIPPER_FLASH_DARK_RATIO", "0.5"))
@@ -275,7 +275,29 @@ FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "24"))
 # the reference's 0.50, measured on a delivered render; half of them still gave
 # 0.88. 0.35 puts 16 flickers in a 31.8s clip, i.e. 0.50/s — the reference's
 # rate. Beats are chosen by loudness, so the ones kept are the ones you hear.
-FLASH_BEAT_FRACTION = float(os.environ.get("CLIPPER_FLASH_BEAT_FRACTION", "0.35"))
+# 0.25, not 0.35. Once the flickers are grouped into bursts the rate has to come
+# down: at 0.35 the delivered file measured 1.86 pixel flicker events per second
+# against the reference's 1.05. Measured sweep at FLASH_BURST=5 on this track:
+#
+#     0.20 -> 10 flickers, 0.35/s, 67% tight, 3 bursts
+#     0.25 -> 15 flickers, 0.53/s, 71% tight, 4 bursts   <- chosen
+#     0.35 -> 20 flickers, 0.70/s, 68% tight, 5 bursts
+#
+# The reference's own rate is 1.05 pixel events/s, which comes out of 0.53
+# flicker terms/s because each flicker reads as a rise AND a fall.
+FLASH_BEAT_FRACTION = float(os.environ.get("CLIPPER_FLASH_BEAT_FRACTION", "0.12"))
+# Flickers per burst. The reference tutorial does not flicker on a steady
+# interval — measured over its 19.9s: median spacing 0.10s, 16 of 20 intervals
+# under 0.8s, longest quiet gap 4.45s. That is a run of hits inside one beat or
+# two, then nothing for seconds. Picking the N loudest onsets instead produced
+# an even drip every ~1.8s across 84% of the clip, which is what the operator
+# heard as "editannya sepanjang ada lagu".
+FLASH_BURST = int(os.environ.get("CLIPPER_FLASH_BURST", "3"))
+# Spacing INSIDE a burst. The reference's flickers sit a median of 0.10s apart,
+# which is tighter than the song's closest two onsets (0.252s) — so a burst
+# cannot be built out of neighbouring beats, it has to sub-divide one. Kept
+# above 2 frames at 30fps so each flicker is actually visible.
+FLASH_SUBBEAT = float(os.environ.get("CLIPPER_FLASH_SUBBEAT", "0.10"))
 # Body slams: the frame is thrown a long way on a beat, then holds still.
 #
 # "goyangnya jgn kayak geter\" tapi goyang aga jauh gitu, kayak bantingan
@@ -314,7 +336,12 @@ SLAM_HOLD = float(os.environ.get("CLIPPER_SLAM_HOLD", "0.18"))
 # spent moving, which is the number that separates a slam from a vibration.
 # Still lower than the flicker's share: a throw interrupts the frame far more
 # than a brightness change does.
-SLAM_BEAT_FRACTION = float(os.environ.get("CLIPPER_SLAM_BEAT_FRACTION", "0.60"))
+# 0.40, not 0.60. The onset gate was loosened from 0.35s to 0.18s to make
+# flicker bursts expressible, which raised the detected onsets from 43 to 63 —
+# and every fraction downstream inherited that. At 0.60 the slams went from the
+# approved 0.76/s to 1.02/s, 29 throws against 21 flickers, i.e. the heavy
+# effect outnumbering the light one. 0.40 restores 0.74/s on the same track.
+SLAM_BEAT_FRACTION = float(os.environ.get("CLIPPER_SLAM_BEAT_FRACTION", "0.40"))
 # Outro: how the clip closes. Two shapes, because the ending has to match what
 # the clip is about — a flash stinger under a man apologising for people being
 # killed is the wrong register, and reads as a template applied without
@@ -1282,6 +1309,29 @@ def _outro_snap(dur, words, clip_start, span):
     return last
 
 
+def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
+    """How long the clip actually is after the ending is applied.
+
+    The jamet freeze EXTENDS the clip: `loop` clones the frame at the cut and
+    the trim keeps the clones, so the file runs to start + freeze_secs rather
+    than to `dur`. Every other stage that needs the output length — the audio
+    fade, the music bed — has to agree with that or the extra seconds come out
+    silent.
+
+    Read out of the filter list the renderer actually uses, not recomputed, so
+    the two cannot drift apart.
+    """
+    _b, filters = _outro_filters(dur, mood=mood, seconds=seconds, words=words,
+                                 clip_start=clip_start)
+    for f in filters:
+        if f.startswith("trim=end="):
+            try:
+                return max(dur, float(f.split("=")[-1]))
+            except ValueError:
+                break
+    return dur
+
+
 def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     """(brightness_term, extra_filters) for the closing treatment.
 
@@ -1596,6 +1646,28 @@ def _slam_offsets(times, dur):
     return "".join(xs).lstrip("+"), "".join(ys).lstrip("+")
 
 
+def _burst_times(beats, per=None, sub=None):
+    """Expand chosen beats into tight runs of flickers.
+
+    The reference tutorial's flickers sit a MEDIAN OF 0.10s apart. The song's
+    closest two onsets are 0.252s apart and the median onset spacing is 0.528s,
+    so one flicker per onset cannot reach that density no matter which onsets are
+    picked — measured attempts landed at 0.53-1.63s median spacing. The
+    reference is flickering several times INSIDE one beat.
+
+    So each chosen beat becomes a run of `per` flickers spaced `sub` seconds
+    apart, which is what makes a hit read as a burst instead of a tick. The beat
+    itself still comes from the music; only the sub-division is ours.
+    """
+    per = max(1, FLASH_BURST if per is None else per)
+    sub = FLASH_SUBBEAT if sub is None else sub
+    out = []
+    for t in beats:
+        for k in range(per):
+            out.append(t + k * sub)
+    return sorted(set(out))
+
+
 def _music_beats(bgm_path, dur, offset=0.0, fraction=None):
     """Onset times in `bgm_path`, clip-relative, or [] if it can't be read.
 
@@ -1646,18 +1718,51 @@ def _music_beats(bgm_path, dur, offset=0.0, fraction=None):
         # A beat is a sharp rise in loudness, not a loud moment: sustained
         # volume has no attack and is not something to cut on.
         rise = rms[i][1] - rms[i - 1][1]
-        if rise > 6.0 and (not beats or rms[i][0] - beats[-1][0] > 0.35):
+        # 0.18s, not 0.35s. The gate is here to merge one drum hit smeared
+        # across a few RMS windows, not to thin the track out — and at 0.35s it
+        # did the second thing: the song has 63 onsets with a median spacing of
+        # 0.26s, and the gate kept only 43 of them with a median of 0.53s. That
+        # floor is what made a burst impossible to express, because
+        # consecutive beats were already 0.5s apart before any selection ran.
+        if rise > 6.0 and (not beats or rms[i][0] - beats[-1][0] > 0.18):
             beats.append((rms[i][0], rise))
-    # Only the strongest beats get a flicker. Every onset over 6 dB is too
-    # many: flickering on all 43 of them produced 1.01 flicker events per
-    # second against the reference's 0.50, measured on the delivered file. The
-    # reference flickers on about half the beats, so take the loudest half and
-    # keep them in time order.
+    # Only some beats get a flicker, and WHICH ones decides whether the edit
+    # reads as "jedag-jedug" or as noise running under the whole song.
+    #
+    # Taking the N loudest onsets spreads them out by construction: the loudest
+    # hits of a track are spaced across it, so the result was one flicker every
+    # ~1.8s from 0.4s to 26.5s — 84% of the clip. The operator: "kenapa
+    # editannya sepanjang ada lagu? sampah".
+    #
+    # The reference tutorial is the opposite shape. Measured on it (21 flickers
+    # over 19.9s): median spacing 0.10s, 16 of 20 intervals under 0.8s, longest
+    # gap 4.45s, and per quarter 5 / 6 / 2 / 8. So the flickers arrive in tight
+    # BURSTS with real quiet between them, not on a steady drip. Our render
+    # measured median 1.83s with only 4 of 12 intervals under 0.8s.
+    #
+    # So: pick a few burst anchors spread over the clip, and inside each one
+    # flicker on CONSECUTIVE beats. The quiet between bursts is the point.
+    # Which onsets get a flicker. Keep this selection SIMPLE and spread: the
+    # burst shape is produced by _burst_times() sub-dividing each hit, not by
+    # grabbing neighbouring onsets. Earlier attempts did the latter and could
+    # not get below 0.53s median spacing, because that is the song's own onset
+    # spacing — the reference sits at 0.10s.
     if len(beats) > 2:
         keep = max(1, int(round(len(beats) * (
             FLASH_BEAT_FRACTION if fraction is None else fraction))))
-        strongest = sorted(beats, key=lambda b: -b[1])[:keep]
-        beats = sorted(strongest, key=lambda b: b[0])
+        # One anchor per slice of the clip, each the loudest onset in its slice.
+        # Taking the globally loudest instead left the second quarter empty for
+        # 15.7s while the song had 8 onsets sitting in it.
+        lo, hi = beats[0][0], beats[-1][0]
+        width = (hi - lo) / keep if keep else (hi - lo)
+        picked = []
+        for k in range(keep):
+            a, b_ = lo + k * width, lo + (k + 1) * width
+            slice_beats = [x for x in beats if a <= x[0] < b_] or \
+                [x for x in beats if a <= x[0] <= b_]
+            if slice_beats:
+                picked.append(max(slice_beats, key=lambda x: x[1]))
+        beats = sorted(set(picked), key=lambda b: b[0])
     return [t - offset for t, _ in beats if offset <= t <= offset + dur]
 
 
@@ -2369,7 +2474,19 @@ def render_clip(video_path, start, end, words, out_path, *,
         bgm_idx = None
         if bgm_path:
             bgm_idx = base + (1 if bg_video else 0)
-            inputs += ["-stream_loop", "-1", "-t", f"{dur + intro_dur}",
+            # The music has to cover the OUTPUT, not the source segment. `-t`
+            # here is a hard cut on the input, so no amount of apad/amix
+            # downstream can bring back seconds that were never decoded:
+            # `dur + intro_dur` is 28.55s on a clip the freeze extends to
+            # 31.20s, and the last 2.66s came out as digital silence (-99 dB)
+            # even though the stream reported the right length.
+            #
+            # Fixing only the graph is the trap here. The first attempt did
+            # exactly that (amix duration=longest, apad, atrim) and the file
+            # still went silent at 29.0s, because the input was already short.
+            _bgm_len = _outro_output_len(dur, mood=mood, words=words,
+                                         clip_start=start) + intro_dur
+            inputs += ["-stream_loop", "-1", "-t", f"{max(dur + intro_dur, _bgm_len):.3f}",
                        "-i", os.path.abspath(bgm_path)]
         first_overlay_idx = base + (1 if bg_video else 0) + (1 if bgm_path else 0)
         # B-roll cutaways are inputs too, placed before the caption PNGs so the
@@ -2461,7 +2578,8 @@ def render_clip(video_path, start, end, words, out_path, *,
             # a clip without BGM still gets exposure movement rather than none.
             _beats = _music_beats(bgm, dur, intro_dur) \
                 if isinstance(bgm, str) else []
-            flash = _flash_expr(_beats or punches, dur)
+            flash = _flash_expr(_burst_times(_beats) if _beats else punches,
+                                dur)
             # The closing treatment joins the same brightness expression, and
             # may add filters of its own (the melancholy ending desaturates).
             #
@@ -2510,7 +2628,12 @@ def render_clip(video_path, start, end, words, out_path, *,
             p_punches = _punch_times(words, start, dur)
             p_beats = _music_beats(bgm, dur, intro_dur) \
                 if isinstance(bgm, str) else []
-            p_flash = _flash_expr(p_beats or p_punches, dur)
+            # Each chosen beat becomes a tight run, which is what makes the
+            # edit read as "jedag-jedug" rather than as an effect running under
+            # the whole song. Punch times are speech-driven and already come in
+            # clusters, so they are not sub-divided.
+            p_flash = _flash_expr(_burst_times(p_beats) if p_beats
+                                  else p_punches, dur)
             p_outro, p_filters = _outro_filters(dur, mood=mood,
                                                 words=words,
                                                 clip_start=start)
@@ -2626,7 +2749,24 @@ def render_clip(video_path, start, end, words, out_path, *,
         # the output label has to come from it or the cutaways are discarded.
         vlabel = f"[v{len(overlays)}]" if overlays else ins_label
 
+        # The output is longer than dur + intro when the jamet freeze extends
+        # it: `loop` clones the frame at the cut and the trim keeps those
+        # clones, so the file runs to start + freeze_secs.
+        #
+        # Getting this wrong makes the ending SILENT. Measured on a delivered
+        # render: video ran 31.20s, audio stopped at 28.54s, so the last 2.66s
+        # — the entire freeze, the moment that exists to carry the jedag-jedug
+        # — had no music at all. The operator: "frame freeze ga ada suara
+        # videonya lagi jedag jedug ... kenapa editannya sepanjang ada lagu?"
+        #
+        # Asking _outro_filters for the real length rather than recomputing it
+        # here: two readers of the same constant is how the flash spent a whole
+        # release wired to the wrong branch.
         total = dur + intro_dur
+        _out_len = _outro_output_len(dur, mood=mood, words=words,
+                                     clip_start=start)
+        if _out_len > dur:
+            total = _out_len + intro_dur
         if intro:
             # The b-roll's own sound is dropped under the hook: the music bed
             # carries that moment, and the two together are mush. The gap is
@@ -2680,11 +2820,26 @@ def render_clip(video_path, start, end, words, out_path, *,
             # silently halves the speech: the clip with BGM measured 5.7 dB
             # QUIETER overall than the same clip without it. The per-track
             # levels above already set the balance; amix must not re-scale it.
-            chains.append(f"{speech}[bgm]amix=inputs=2:duration=first:"
+            # duration=longest, not first. `first` ends the mix when the SPEECH
+            # track ends, so on a clip whose freeze extends past the dialogue
+            # the music was cut off with it: measured on a delivered render,
+            # video 31.20s, audio dead at 28.54s, the whole 2.66s freeze silent.
+            # The music is what carries that moment — "frame freeze ga ada
+            # suara videonya lagi jedag jedug".
+            #
+            # apad on the speech side keeps the mix from running on forever
+            # when the BGM file is shorter than the clip: the pad is bounded by
+            # `total`, so the output length is still ours to set.
+            chains.append(f"{speech}apad=whole_dur={total:.3f}[spad]")
+            chains.append(f"[spad][bgm]amix=inputs=2:duration=longest:"
                           f"normalize=0:dropout_transition=0,{restamp},"
+                          f"atrim=end={total:.3f},"
                           f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
         else:
-            chains.append(f"{speech}{restamp},"
+            # Same length problem without music: the speech track is shorter
+            # than the output once the freeze extends it, so pad to `total`.
+            chains.append(f"{speech}apad=whole_dur={total:.3f},{restamp},"
+                          f"atrim=end={total:.3f},"
                           f"afade=t=out:st={max(0, total - 1):.2f}:d=1[a]")
 
         # The graph can carry hundreds of overlay chains — pass it as a file so

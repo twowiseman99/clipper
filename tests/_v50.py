@@ -65,13 +65,25 @@ beats = edit._music_beats(TRACK, DUR, 0.0,
                           fraction=edit.SLAM_BEAT_FRACTION)
 assert beats, "no beats for slams"
 
-# Slams are a SUBSET of the flickers: a throw interrupts the frame much more
-# than a brightness change, so it cannot be on every beat the flicker uses.
-flicker_beats = edit._music_beats(TRACK, DUR, 0.0,
-                                  fraction=edit.FLASH_BEAT_FRACTION)
-assert len(beats) <= len(flicker_beats) * 2, (
-    "%d slams against %d flickers: slams should not outnumber flickers by "
-    "much" % (len(beats), len(flicker_beats)))
+# A throw interrupts the frame much more than a brightness change, so slams
+# must stay rarer than the flickers that reach the screen.
+#
+# Compare against what the renderer SHOWS, not against the flicker's chosen
+# beats: each of those beats is expanded by _burst_times() into a run, so the
+# beat count is a third of the flickers and the comparison inverted the moment
+# bursts were introduced (8 slams "against 2 flickers", while the file actually
+# had 24).
+# Compare the two effects over a REAL clip length, not the short probe window
+# used for the pixel measurements below. Bursts need seconds to express
+# themselves: over 2s the flicker has barely started and the ratio is noise.
+_CMP = 28.55
+_slam_cmp = edit._music_beats(TRACK, _CMP, 0.0,
+                              fraction=edit.SLAM_BEAT_FRACTION)
+flicker_times = edit._burst_times(
+    edit._music_beats(TRACK, _CMP, 0.0, fraction=edit.FLASH_BEAT_FRACTION))
+assert len(_slam_cmp) <= len(flicker_times), (
+    "%d slams against %d flickers over %.1fs: a slam is the heavier effect and "
+    "must be the rarer one" % (len(_slam_cmp), len(flicker_times), _CMP))
 
 sx, sy = edit._slam_offsets(beats, DUR)
 assert sx or sy, "slam produced no offsets"

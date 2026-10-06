@@ -40,29 +40,69 @@ if not os.path.exists(TRACK):
 DUR = 31.81
 
 # --- beats come from the track, and are real measurements -------------------
-beats = edit._music_beats(TRACK, DUR)
-assert beats, "no beats detected in the hype track"
-gaps = [b - a for a, b in zip(beats, beats[1:]) if b - a < 2.0]
-assert gaps, "beats are not spaced like a beat"
-bpm = 60 / statistics.median(gaps)
-# The track is ~113.6 BPM at a 6 dB onset gate. A 3 dB gate also catches the
-# half-beats and reports 237, which would double the flicker rate.
+# Measure the BPM on ALL onsets, not on the selected flickers. Selection groups
+# the flickers into bursts on purpose, so consecutive picks sit a sixteenth
+# apart and "60 / median gap" reports 218 — the reference tutorial would read
+# 600 by the same arithmetic. The onset stream is where tempo lives.
+all_beats = edit._music_beats(TRACK, DUR, fraction=1.0)
+assert all_beats, "no beats detected in the hype track"
+all_gaps = [b - a for a, b in zip(all_beats, all_beats[1:]) if b - a < 2.0]
+assert all_gaps, "beats are not spaced like a beat"
+bpm = 60 / statistics.median(all_gaps)
+# The track is ~116 BPM. A 3 dB onset gate also catches the half-beats and
+# reports 237, which would double the flicker rate.
 assert 70 < bpm < 160, (
     "detected %.1f BPM: the onset gate is picking up half-beats or noise" % bpm)
+
+# The onsets must be locked to the music, which is the property the BPM check
+# was really standing in for: every gap should be a multiple of one base period.
+# Noise would scatter off that grid.
+base = statistics.median([g for g in all_gaps if g < 0.45])
+off_grid = [abs(g / base - round(g / base)) for g in all_gaps]
+on_grid = len([e for e in off_grid if e < 0.2]) / len(off_grid)
+assert on_grid > 0.85, (
+    "only %.0f%% of onsets land on the %.3fs grid: these are not the track's "
+    "beats" % (100 * on_grid, base))
+
+beats = edit._music_beats(TRACK, DUR)
+assert beats, "no flicker beats selected"
 
 # An unreadable or missing track must yield nothing, never a synthetic grid —
 # invented beats drift against the music within a few bars.
 assert edit._music_beats("/nonexistent.mp3", DUR) == []
 
 # --- the flicker rate matches the reference ---------------------------------
-expr = edit._flash_expr(beats, DUR)
+# Measure what the RENDERER builds. _music_beats now returns the chosen beats
+# only; the burst runs that actually reach the screen come from _burst_times,
+# and testing the stage before it reports a rate the viewer never sees.
+flicker_times = edit._burst_times(beats)
+expr = edit._flash_expr(flicker_times, DUR)
 assert expr, "flash is off or produced no terms"
 terms = expr.count("between(")
 rate = terms / DUR
-assert 0.35 <= rate <= 0.70, (
-    "%.2f flicker terms/s against the reference's 0.50: %d terms in %.1fs. "
+# The reference measures 1.05 pixel flicker events per second. Each flicker
+# shows up as a rise AND a fall, so the term rate it corresponds to is ~0.53.
+assert 0.45 <= rate <= 1.00, (
+    "%.2f flicker terms/s against the reference's ~0.53: %d terms in %.1fs. "
     "Flickering on every detected beat measured 1.01/s on a delivered render, "
     "and keeping half of them still gave 0.88." % (rate, terms, DUR))
+
+# The flickers must arrive in tight runs, not on a steady interval: that is the
+# difference the operator heard as "editannya sepanjang ada lagu? sampah".
+# Reference median spacing 0.10s, 80% of intervals under 0.8s.
+fgaps = [b - a for a, b in zip(flicker_times, flicker_times[1:])]
+assert statistics.median(fgaps) < 0.5, (
+    "median flicker spacing %.2fs: this is a drip, not a burst (reference "
+    "0.10s)" % statistics.median(fgaps))
+assert max(fgaps) >= 2.0, (
+    "longest quiet stretch %.2fs: without real gaps the effect reads as "
+    "running under the whole song" % max(fgaps))
+# And no quarter of the clip may be empty — an earlier selection left 15.7s
+# with nothing in it while the song had 8 onsets sitting there.
+quarters = [len([t for t in flicker_times if DUR * i / 4 <= t < DUR * (i + 1) / 4])
+            for i in range(4)]
+assert all(q > 0 for q in quarters), (
+    "quarters %s: a whole region of the clip has no effects at all" % quarters)
 
 # --- it goes both ways ------------------------------------------------------
 dark = len(re.findall(r"-\d\.\d{3}\*between", expr))
