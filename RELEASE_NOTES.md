@@ -1,3 +1,57 @@
+## v0.8.0 — the shake travelled further than the reference and still felt like a tremor
+
+Operator: "goyangnya jgn kayak geter" tapi goyang aga jauh gitu, kayak bantingan
+bantingan agak jauh sesuai beatnya."
+
+Measured with vidstabdetect, median local-motion vector per frame at 1080 wide:
+
+```
+                  moving >8px     peak
+reference            10.6%       81.1 px
+our outro shake      36.7%      144.5 px
+```
+
+The old shake travels **further** than the reference and still reads as a
+vibration. Amplitude was never the problem. `OUTRO_SHAKE_HZ` is a continuous
+sine, so the picture is never at rest — and "always moving a bit" is the
+definition of a tremor. A slam is rare, far, then still.
+
+`_slam_offsets()` throws the frame once per beat, sharp attack, fast decay,
+static in between. Direction rotates through eight vectors rather than
+alternating on one axis: left/right-only at beat spacing is exactly what a shake
+looks like.
+
+Probed through real ffmpeg + vidstabdetect:
+
+```
+30px/0.18s -> moving 15.3%, peak  77.5 px      frac 0.22 -> 0.25 slams/s, 2.5%
+50px/0.18s -> moving 18.7%, peak 130.2 px      frac 0.40 -> 0.42 slams/s, 3.9%
+70px/0.18s -> moving 20.0%, peak 185.4 px      frac 0.60 -> 0.58 slams/s, 6.4%
+```
+
+Four things that would have broken it silently:
+
+- **pad then crop back** by the same margin. The frame needs somewhere to travel
+  into, or a throw just exposes the canvas edge. Output stays 1080x1920 and
+  `_v50` asserts it.
+- **Slams are kept out of the frozen ending.** The freeze exists so the last
+  seconds hold still; animating it would undo last release's fix.
+- **Same onsets as the flicker**, so picture and track mark the same time.
+- **Wired into the `pillar` branch** — the one we actually render. Last release
+  the flicker went into `cover` only and shipped a byte-identical file.
+
+Delivered render (md5 `2e63de4bf10e`): 18 slams in a 23.8s body, 0.76/s.
+Measured at the slam timestamps against the frames between them: **16.3px mean
+inside vs 8.2px outside** — a throw travels 2.0x the clip's own motion. 31.81s,
+1080x1920, freeze still holding to the last frame.
+
+Tests: 48 ok. `_v50` pins travel (peak > 50px) **and** stillness (moving < 20%),
+the second being where the old shake failed at 36.7%. `CLIPPER_SLAM_PX=8` makes
+it fail with "20.6px, not a tremor", so it rejects a vibration rather than
+merely measuring one. `_v9`/`_v10` still fail on a missing fixture, unrelated.
+
+— Dalmislave
+
 ## v0.7.9 — the flicker was measuring the wrong thing entirely
 
 Operator: "efeknya kurang rusuh, guide jedag jedug nya gimana sih? di bedain
@@ -1998,55 +2052,3 @@ does not contain `job.py`, `bgm.py` or `report.py`.
 **`AGENTS.md`.** The three commands an agent needs, the `job.py` contract, and
 what exit 3 means, so a busy host reads as "retry later" rather than a failure.
 
-**`.env.example`.** Every variable the code reads is either set here with a
-note, or named in the closing list with the module that owns its default. A
-check confirms none is missing. Nothing in the file is required to render a
-clip, which the file says up front.
-
-**`requirements-clip.txt`.** Four packages: yt-dlp, faster-whisper, Pillow,
-requests. `requirements.txt` pulls this file in with `-r` rather than repeating
-it, so a version is defined once. Both were resolved with `pip install
---dry-run`, not just eyeballed.
-
-What the clip path does not need, confirmed by importing `job.py` in a
-container that has none of them: fastapi, uvicorn, python-multipart, playwright,
-gdown, and the three google packages. Every heavy import in the chain sits
-inside a function rather than at the top of a module, which is what makes that
-work.
-
-### The self-check now renders
-
-`python edit.py` used to print `smoke skipped: fetch media/3 first` on any box
-that had not already downloaded one specific video, which meant a fresh clone
-verified the layout maths and nothing else.
-
-It now builds its own source with ffmpeg when no footage is around: 1920x1080
-with an audio track, so the 9:16 crop and the amix path both do real work, then
-renders both modes. No network, no keys, no footage. On a fresh box this is the
-first command worth running, and its output says whether the machine can render
-at all.
-
-_Dalmislave_
-
----
-
-## v0.3.3 - the clip is too big to send
-
-Writing the Hermes prompt turned up a hole in the plan it describes. The render
-targets 6 Mbps, because that file is the one uploaded to TikTok or YouTube. A
-90 second clip is therefore about 66 MB, and Discord takes 10 MB on a free
-account. The chat step of the plan could not have worked.
-
-`job.py --max-mb N` now writes a second, smaller copy when the render is over
-the limit, and returns both paths:
-
-```json
-{"file": "/path/clip.mp4",       "size_bytes": 46000000,
- "delivery_file": "/path/clip_small.mp4", "delivery_size_bytes": 9100000}
-```
-
-The original is untouched: the small one is for looking at, the full one is for
-publishing, and the prompt tells the agent to say which is which so nobody
-posts the compressed copy to a platform. Default is 0, meaning off, so the
-pipeline is unaffected. Verified on the 13.9 MB test render: a 9 MB cap
-produced 8.0 MB, a 45 MB cap correctly produced nothing.
