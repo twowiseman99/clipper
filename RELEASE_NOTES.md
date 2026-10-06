@@ -1,3 +1,85 @@
+## fab7671 — the freeze keeps the music, and the effects burst instead of drip
+
+Two operator reports on one delivered render: "frame freeze ga ada suara
+videonya lagi jedag jedug" and "kenapa editannya sepanjang ada lagu? sampah".
+
+### The ending had no sound
+
+Three walls stacked, each hiding the next:
+
+1. `total = dur + intro_dur` did not know the jamet freeze EXTENDS the clip, so
+   the audio fade was computed for 28.55s of a 31.20s file.
+2. amix ran `duration=first`, ending the mix when the speech track ended.
+3. the BGM input itself was cut with `-t dur + intro_dur`.
+
+Fixing only the filter graph left the file silent anyway — measured -99 dB from
+29.0s while the stream still reported 31.21s. `-t` on an input is a hard cut and
+no downstream `apad` brings back seconds that were never decoded.
+`_outro_output_len()` now reads the true output length out of the filter list
+the renderer actually uses, and the BGM input, pad, trim and fade all take it
+from there.
+
+### The effects ran under the whole song
+
+Picking the N loudest onsets spreads them by construction, because a track's
+loudest hits are spaced across it: 13 flickers every ~1.8s covering 84% of the
+clip.
+
+Measured on the reference tutorial (21 flickers over 19.9s):
+
+```
+median spacing    0.10s
+intervals <0.8s   16/20  (80%)
+longest quiet     4.45s
+```
+
+0.10s is tighter than the song's closest two onsets (0.252s). The reference is
+not flickering once per beat — it flickers several times inside one.
+`_burst_times()` does that now: the beats still come from the music, only the
+sub-division is ours.
+
+Three attempts that could not reach it, each measured rather than reasoned
+about: grabbing neighbouring onsets (0.53s median — the song's own spacing),
+widening the burst (second quarter empty for 15.7s while the song had 8 onsets
+in it), slicing the picked list (`[:keep+per]` cuts from the front of a
+time-ordered list and deleted the last burst outright).
+
+Delivered file, measured in pixels:
+
+```
+                  ours     reference
+events/s          1.28     1.05
+median spacing    0.05s    0.10s
+intervals <0.8s   79%      80%
+longest quiet     3.95s    4.45s
+bursts            8
+quarters          all populated
+```
+
+### Two knock-on effects
+
+The onset gate had to drop from 0.35s to 0.18s: at 0.35s the song's 63 onsets
+became 43 with a 0.53s median, so a burst was unexpressible before any selection
+ran. That raised every downstream fraction — slams went from the approved
+0.76/s to 1.02/s, 29 throws against 21 flickers, the heavy effect outnumbering
+the light one. `SLAM_BEAT_FRACTION` 0.60 -> 0.40 restores 0.74/s.
+
+`_v49` measured BPM on the SELECTED flickers. Bursts sit a sixteenth apart by
+design, so it reported 218 BPM — the reference tutorial would read 600 by the
+same arithmetic. It now measures the onset stream (116 BPM) and checks those
+onsets land on the track's own grid, which is the property it was standing in
+for.
+
+### Verification
+
+`_v52` is new; `_v49`, `_v50` and `_v43` were corrected. 50 ok, with `_v9`/`_v10`
+still failing on a deleted transcript file.
+
+Negative control: cutting the BGM input back to the segment length leaves 5 of 6
+half-second chunks of the freeze digitally silent; with the fix, 0 of 6.
+
+Signed: Dalmislave
+
 ## Captions that hold, an ending that waits for the sentence
 
 Two operator reports on the same render: "kenapa masi ada subtitlenya
@@ -1998,98 +2080,3 @@ download is still reported, since not knowing the resolution is not a reason to
 call a successful download a failure.
 
 **What is not proven.** The banner parser is checked against fixture output
-(h264 with SAR/DAR trailing the resolution, VP9, AV1, audio-only, empty), not
-against a live ffmpeg — this environment has neither ffmpeg nor network. The
-SAR/DAR case is the one worth knowing about: `2560x1440 [SAR 1:1 DAR 16:9]`
-puts two more ratio-shaped tokens right after the resolution, and a parser that
-grabs the wrong one reports a 1x1 video, which would read as a broken download.
-That case is pinned by the self-check.
-
-_Dalmislave_
-
----
-
-## v0.3 - antislop, and what it found
-
-[antislop](https://github.com/miqdadbadjuber/anti-slop) is a filter that stops
-an agent producing the generic output a model defaults to. Six skills are
-checked into `.claude/skills/` at a pinned upstream commit, and `CLAUDE.md`
-points at them, so they load in every session from the next one onward.
-
-Checked in rather than fetched: the version cannot change under a session
-mid-task, and nothing downloads its own next instructions at runtime.
-
-### Where the rules apply here
-
-The core forbids the em dash "in any text". In this repo that means the text
-the project **ships**: what is drawn on a clip, posted with it, or rendered by
-the dashboard. Python comments and these notes are internal prose, governed by
-the code-comment skill, which says nothing about dashes. Rewriting a thousand
-comments would have been churn, not craft. The line is written down in
-`CLAUDE.md` so the next session does not relitigate it.
-
-### The copy that ships on every clip
-
-`metadata.py` writes the hook, title and description with an LLM, and that copy
-goes on the frame and under our own accounts. The prompt now states the
-constraints, and, because a prompt constraint is a request a model can decline,
-the ones that matter are enforced after the reply lands:
-
-- **Connector dashes are replaced.** Em dash, en dash, and the spaced double
-  hyphen, in all three fields.
-- **A figure the speaker never said is dropped.** The clause carrying it is
-  removed before anything renders. A hook that loses its only sentence falls
-  back to transcript-derived copy rather than shipping a lone emoji.
-- **Filler is reported, not rewritten.** Cutting a phrase out of a sentence
-  usually leaves worse copy than the phrase did, so the run prints what it saw.
-
-The number rule only fires on figures carrying a scale or a unit (`%`, juta,
-ribu, kali lipat). A bare small count is a count, not a statistic: "cuma butuh
-2 menit" survives. A figure the transcript does contain is reporting, not
-invention, and survives too. Both cases are pinned by the self-check.
-
-Why it matters more than it sounds: an invented "90% orang gagal" on a clip is
-a fabricated statistic published under an account we are trying to keep alive.
-
-### The dashboard, measured rather than eyeballed
-
-The audit found real defects, not style opinions:
-
-| Finding | Rule | Measured |
-|---|---|---|
-| Muted text, table headers and links in light mode | R-25 | 2.53:1 to 3.08:1, under the 4.5:1 floor |
-| Platform checkbox labels in light mode | R-34 | 1.18:1, effectively invisible |
-| Five of six status pills | R-25 | white on the pill measured 2.52:1 to 3.85:1 |
-| Eight-column table on a phone | R-03 | the page scrolled sideways |
-| Buttons at 24px tall | R-03 | under the 44px tap target |
-| No focus style anywhere | R-32 | keyboard users could not see their position |
-| `/warmup` and `/delete` unguarded | R-27 | a DB error gave a raw 500 instead of the error banner |
-| Palette | R-30 | GitHub's dark theme, hex for hex |
-
-All fixed. The palette is not replaced with invented taste: it reuses
-`edit.py`'s `QUOTE_TEAL` and `PHRASE_COLOR`, both sampled off the reference
-clips, on warm neutrals. The console and the clips it ships now look related,
-and every choice has a one-line reason next to it in the CSS.
-
-Teal carries links and the primary action. Gold is the single accent and
-appears once, on `campaign_ready`, the only status that means an account can
-take work. Status pills went from white text to ink text, which is what fixed
-their contrast.
-
-### Verified in a browser, not asserted
-
-Chromium drove the page at 375px and 1280px, in both themes: zero horizontal
-overflow, every rendered text node measured against its real computed
-background, every control at least 44px on a phone, a focus ring on all 14 tab
-stops, no console errors, and all seven controls clicked one at a time.
-16 of 16. `antislop-human/contrast-check.py` confirmed every pairing
-independently.
-
-Sync fails in that run for an unrelated reason: this container's Playwright
-build does not match its bundled Chromium. It failed into the dashboard's own
-error banner, which is the error state doing its job.
-
-### Comments
-
-Eleven banner comments built from rules of dashes lost the decoration and kept
-their words. Nothing else changed: the density scan came back clean, with no
