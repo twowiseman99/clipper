@@ -196,13 +196,36 @@ ZOOM_CYCLE = float(os.environ.get("CLIPPER_ZOOM_CYCLE", "12"))
 PUNCH = os.environ.get("CLIPPER_PUNCH", "1") not in ("0", "", "false")
 # How much tighter the crop gets at the peak. 0.06 is ~6%: visible on a phone
 # without looking like a zoom transition.
-PUNCH_AMOUNT = float(os.environ.get("CLIPPER_PUNCH_AMOUNT", "0.06"))
+PUNCH_AMOUNT = float(os.environ.get("CLIPPER_PUNCH_AMOUNT", "0.10"))
 # Seconds from start to finish of one punch, ramped in and out.
-PUNCH_HOLD = float(os.environ.get("CLIPPER_PUNCH_HOLD", "0.9"))
+#
+# Both numbers MEASURED on real ffmpeg renders (testsrc2, frame-difference
+# peak inside the punch window, against a 2.34 no-punch control):
+#
+#   amount  0.06 -> 4.34    hold  0.90s -> 5.87
+#           0.10 -> 5.87          0.60s -> 6.53
+#           0.14 -> 6.74          0.45s -> 7.84
+#           0.18 -> 7.37          0.30s -> 8.45
+#
+# Depth saturates past 0.10 — the extra crop is barely more motion and starts
+# cutting into the frame. The HOLD is the bigger lever: the same zoom over
+# half the time reads as a hit rather than a drift. 0.30s was faster still and
+# reads as a glitch rather than a camera move, which the editing grammar warns
+# about, so 0.45s is the floor.
+PUNCH_HOLD = float(os.environ.get("CLIPPER_PUNCH_HOLD", "0.45"))
 # One effect per 8-12s is plenty for a 60-90s clip; closer together and the
 # clip reads as a template rather than an edit.
-PUNCH_MIN_GAP = float(os.environ.get("CLIPPER_PUNCH_MIN_GAP", "9"))
-PUNCH_MAX = int(os.environ.get("CLIPPER_PUNCH_MAX", "8"))
+PUNCH_MIN_GAP = float(os.environ.get("CLIPPER_PUNCH_MIN_GAP", "2.7"))
+# Hits inside a burst, and how close they have to be to count as one burst.
+#
+# MEASURED off the operator's reference (AGv6G13TPUc). Its motion peaks arrive
+# in groups of 1-3 within ~0.6s, then a 2-4s gap: five groups across 13.5s of
+# body. The old flat 9s spacing could not express that shape — it kept 3 of 27
+# qualifying beats on a 31.8s clip and left the first 4.7s with nothing, which
+# is what "efeknya kurang sebelum jedag jedug" was describing.
+PUNCH_BURST = int(os.environ.get("CLIPPER_PUNCH_BURST", "3"))
+PUNCH_BURST_GAP = float(os.environ.get("CLIPPER_PUNCH_BURST_GAP", "0.75"))
+PUNCH_MAX = int(os.environ.get("CLIPPER_PUNCH_MAX", "16"))
 # Flash: a brief white pop on the very strongest beats. Off by default —
 # "transitions serve the narrative, not the ego", and a punch-in already marks
 # the beat. Turn on with CLIPPER_FLASH=1 when a clip needs more lift.
@@ -1325,8 +1348,24 @@ def _punch_times(words, clip_start, dur, threshold=EMPH_THRESHOLD):
 
     The cut has to land on a real beat or it reads as a mistake, so the beat
     comes from the same stress scores the captions use — loudness and pace,
-    not a timer. Spaced by PUNCH_MIN_GAP because one effect every 8-12s is
-    plenty for a 60-90s clip; more and it reads as a template.
+    not a timer.
+
+    Spacing is CLUSTERED, not even. Measured off the operator's reference
+    tutorial (AGv6G13TPUc), frame-difference motion per second:
+
+        reference, body of clip      18.4 mean, peaks to 70.6
+        our render, body of clip     10.7 mean, peaks to 34.6
+
+    The reference's hits arrive in bursts of 1-3 inside about half a second,
+    then leave a 2-4s gap: five bursts in 13.5s. A flat PUNCH_MIN_GAP of 9s
+    cannot produce that shape at all — on a 31.8s clip with 27 qualifying
+    beats it kept 3, none in the first 4.7s, and the operator's reading was
+    "efeknya kurang sebelum jedag jedug".
+
+    So two gaps: beats within PUNCH_BURST_GAP of a kept beat may join its
+    burst (up to PUNCH_BURST), and a new burst needs PUNCH_MIN_GAP of clear
+    air. The quiet stretches are the point — they are what makes the next
+    burst land, and "not every beat needs a cut" still holds.
 
     Returns [] when nothing qualifies, which is a valid outcome: a clip with
     no vocal emphasis should not be given invented emphasis.
@@ -1340,14 +1379,35 @@ def _punch_times(words, clip_start, dur, threshold=EMPH_THRESHOLD):
         t = float(item.get("start") or 0.0) - clip_start
         if 0.5 <= t <= dur - 0.5:
             scored.append((t, float(item["stress"])))
-    # Strongest first, so when two beats are too close the louder one wins.
+    if not scored:
+        return []
+
+    # Strongest first, so when two beats are too close the louder one wins and
+    # becomes the burst's anchor.
     scored.sort(key=lambda p: -p[1])
+
+    bursts = []   # [[anchor_t, ...]] in selection order
     kept = []
     for t, _score in scored:
-        if all(abs(t - k) >= PUNCH_MIN_GAP for k in kept):
-            kept.append(t)
         if len(kept) >= PUNCH_MAX:
             break
+        joined = False
+        for burst in bursts:
+            if len(burst) >= PUNCH_BURST:
+                continue
+            if any(abs(t - b) <= PUNCH_BURST_GAP for b in burst):
+                # Close to this burst: it extends it rather than starting one.
+                burst.append(t)
+                kept.append(t)
+                joined = True
+                break
+        if joined:
+            continue
+        # A new burst has to clear every existing beat by the long gap,
+        # otherwise bursts smear into continuous shaking.
+        if all(abs(t - k) >= PUNCH_MIN_GAP for k in kept):
+            bursts.append([t])
+            kept.append(t)
     return sorted(kept)
 
 
