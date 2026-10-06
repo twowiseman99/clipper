@@ -226,17 +226,46 @@ PUNCH_MIN_GAP = float(os.environ.get("CLIPPER_PUNCH_MIN_GAP", "2.7"))
 PUNCH_BURST = int(os.environ.get("CLIPPER_PUNCH_BURST", "3"))
 PUNCH_BURST_GAP = float(os.environ.get("CLIPPER_PUNCH_BURST_GAP", "0.75"))
 PUNCH_MAX = int(os.environ.get("CLIPPER_PUNCH_MAX", "16"))
-# Flash: a brief white pop on the very strongest beats. Off by default —
-# "transitions serve the narrative, not the ego", and a punch-in already marks
-# the beat. Turn on with CLIPPER_FLASH=1 when a clip needs more lift.
-FLASH = os.environ.get("CLIPPER_FLASH", "0") not in ("0", "", "false")
-# Brightness added at the peak. 0.35 is clearly visible without blowing the
-# image out to white, which loses the speaker's face for those frames.
-FLASH_AMOUNT = float(os.environ.get("CLIPPER_FLASH_AMOUNT", "0.35"))
+# Exposure flicker on the beat. On for jamet, because this IS the jedag-jedug
+# look: "di bedain exposurenya di goyang goyangin ikutin beat lagu".
+#
+# MEASURED on the operator's reference (AGv6G13TPUc), raw YAVG at 20fps rather
+# than frame-difference:
+#
+#     reference    brightness sd 30.6, 21 jumps over 8 points, largest 38.2
+#     our clip     brightness sd 13.9, 11 jumps over 8 points, largest 16.2
+#
+# Two things the old flash got wrong, both visible in that measurement:
+#
+# 1. The reference flickers in BOTH directions — 11 jumps to brighter (mean
+#    +16.4) and 10 to darker (mean -12.9). A white-only pop is half the effect,
+#    and the dark half is what reads as "exposure being messed with" rather
+#    than "camera flash".
+# 2. 16 of its 21 flickers land within 0.3s of a beat in the music. Ours fired
+#    on stressed WORDS, so the picture and the track were marking different
+#    time.
+FLASH = os.environ.get("CLIPPER_FLASH", "1") not in ("0", "", "false")
+# Brightness offset at the peak. Probed on a flat grey source through real
+# ffmpeg (a `testsrc2` control reads 124 on its own and measures nothing):
+#
+#     0.12 -> 27    0.18 -> 40    0.25 -> 58    0.35 -> 81
+#
+# 0.18 lands on the reference's largest jump (38.2). 0.35 was over twice it,
+# which is why the old flash had to be capped at 3 and left off.
+FLASH_AMOUNT = float(os.environ.get("CLIPPER_FLASH_AMOUNT", "0.18"))
 FLASH_HOLD = float(os.environ.get("CLIPPER_FLASH_HOLD", "0.22"))
-# Harder cap than punches: a flash interrupts the image, so three in a 90s
-# clip is already a lot.
-FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "3"))
+# Every other flicker goes dark instead of bright, matching the reference's
+# near-even split. Set 0 for bright-only.
+FLASH_DARK_RATIO = float(os.environ.get("CLIPPER_FLASH_DARK_RATIO", "0.5"))
+# The reference had 21 flickers in 13.5s of body. A cap of 3 cannot express
+# that; the cap exists to stop runaway expressions, not to set the style.
+FLASH_MAX = int(os.environ.get("CLIPPER_FLASH_MAX", "24"))
+# Fraction of detected beats that get a flicker. The track has a beat roughly
+# every 0.53s. Flickering on all of them read as 1.01 flicker events/s against
+# the reference's 0.50, measured on a delivered render; half of them still gave
+# 0.88. 0.35 puts 16 flickers in a 31.8s clip, i.e. 0.50/s — the reference's
+# rate. Beats are chosen by loudness, so the ones kept are the ones you hear.
+FLASH_BEAT_FRACTION = float(os.environ.get("CLIPPER_FLASH_BEAT_FRACTION", "0.35"))
 # Outro: how the clip closes. Two shapes, because the ending has to match what
 # the clip is about — a flash stinger under a man apologising for people being
 # killed is the wrong register, and reads as a template applied without
@@ -1356,17 +1385,88 @@ def _flash_expr(times, dur):
     if not FLASH or not times:
         return ""
     terms = []
-    for t in times[:FLASH_MAX]:
+    for i, t in enumerate(times[:FLASH_MAX]):
         # between() gates it; the ramp runs 1 -> 0 across FLASH_HOLD seconds.
         a = max(0.0, t - FLASH_HOLD / 2)
         b = min(dur, a + FLASH_HOLD)
         if b <= a:
             continue
-        terms.append(f"{FLASH_AMOUNT:.3f}*between(t,{a:.3f},{b:.3f})"
+        # Alternate bright and dark. The reference flickers both ways (11 up,
+        # 10 down), and the dark half is what makes it read as the exposure
+        # being pushed around rather than a camera flash going off. Sign is
+        # chosen by position so the pattern is deterministic and testable.
+        dark = FLASH_DARK_RATIO > 0 and (i % 2) == 1
+        amount = -FLASH_AMOUNT if dark else FLASH_AMOUNT
+        terms.append(f"{amount:+.3f}*between(t,{a:.3f},{b:.3f})"
                      f"*pow(1-(t-{a:.3f})/{b - a:.4f},2)")
     if not terms:
         return ""
-    return "+".join(terms)
+    # Terms already carry their sign, so joining on "+" would emit "+-0.180".
+    return "".join(terms).lstrip("+")
+
+
+def _music_beats(bgm_path, dur, offset=0.0):
+    """Onset times in `bgm_path`, clip-relative, or [] if it can't be read.
+
+    The operator's instruction was "ikutin beat lagu" — follow the TRACK. The
+    flicker used to fire on stressed words, so the picture and the music were
+    marking different time, and the effect read as unrelated to the beat.
+
+    Measured on the hype track actually used (dj_nansuya_gang_jedag_jedug):
+    onsets over 6 dB sit a median 0.528s apart, i.e. 113.6 BPM. A 3 dB
+    threshold picks up the half-beats too and reports 237 BPM, which is why the
+    gate on loudness matters more than the spacing rule.
+
+    Returns real measurements or nothing. No synthetic grid: inventing beats at
+    a constant BPM would drift against the track within a few bars and the
+    flicker would land between hits.
+    """
+    if not bgm_path or not os.path.exists(bgm_path):
+        return []
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="beats_", suffix=".txt")
+    os.close(fd)
+    try:
+        # asetnsamples=1102 at 44.1kHz is one RMS reading per 25ms.
+        run = subprocess.run(
+            [FFMPEG, "-v", "error", "-i", bgm_path, "-t", f"{dur + offset:.3f}",
+             "-af", ("asetnsamples=1102,astats=metadata=1:reset=1,"
+                     "ametadata=print:key=lavfi.astats.Overall.RMS_level:"
+                     f"file={tmp}"),
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=180)
+        if run.returncode != 0:
+            return []
+        with open(tmp) as fh:
+            body = fh.read()
+    except Exception:
+        return []
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    pairs = re.findall(
+        r"pts_time:([0-9.]+)\s*\nlavfi\.astats\.Overall\.RMS_level=(-?[0-9.]+)",
+        body)
+    rms = [(float(t), float(v)) for t, v in pairs]
+    beats = []
+    for i in range(1, len(rms)):
+        # A beat is a sharp rise in loudness, not a loud moment: sustained
+        # volume has no attack and is not something to cut on.
+        rise = rms[i][1] - rms[i - 1][1]
+        if rise > 6.0 and (not beats or rms[i][0] - beats[-1][0] > 0.35):
+            beats.append((rms[i][0], rise))
+    # Only the strongest beats get a flicker. Every onset over 6 dB is too
+    # many: flickering on all 43 of them produced 1.01 flicker events per
+    # second against the reference's 0.50, measured on the delivered file. The
+    # reference flickers on about half the beats, so take the loudest half and
+    # keep them in time order.
+    if len(beats) > 2:
+        keep = max(1, int(round(len(beats) * FLASH_BEAT_FRACTION)))
+        strongest = sorted(beats, key=lambda b: -b[1])[:keep]
+        beats = sorted(strongest, key=lambda b: b[0])
+    return [t - offset for t, _ in beats if offset <= t <= offset + dur]
 
 
 def _punch_times(words, clip_start, dur, threshold=EMPH_THRESHOLD):
@@ -2157,9 +2257,19 @@ def render_clip(video_path, start, end, words, out_path, *,
                 # Punch-ins are independent of the slow drift: a clip with zoom
                 # off should still land a tighter crop on stressed words.
                 zoom = _zoompan(dur, fps, words, start)
-            # Flashes land on beats the punches already chose, so the clip never
-            # gains emphasis the audio did not have.
-            flash = _flash_expr(punches, dur)
+            # The flicker follows the TRACK, not the words: "di bedain
+            # exposurenya di goyang goyangin ikutin beat lagu". Firing on
+            # stressed words meant the picture and the music were marking
+            # different time — 16 of the reference's 21 flickers sit within
+            # 0.3s of a musical onset.
+            #
+            # The intro is concatenated in FRONT of this segment, so the music
+            # the viewer hears over it starts intro_dur earlier in the track.
+            # Falls back to the punch times when there is no music to read, so
+            # a clip without BGM still gets exposure movement rather than none.
+            _beats = _music_beats(bgm, dur, intro_dur) \
+                if isinstance(bgm, str) else []
+            flash = _flash_expr(_beats or punches, dur)
             # The closing treatment joins the same brightness expression, and
             # may add filters of its own (the melancholy ending desaturates).
             #
@@ -2197,7 +2307,18 @@ def render_clip(video_path, start, end, words, out_path, *,
             # its locals do not exist. _zoompan skips the standing CLIPPER_ZOOM
             # in pillar mode and keeps only the punch-ins.
             p_zoom = _zoompan(dur, fps, words, start, frame_mode=frame_mode)
-            p_bright, p_filters = _outro_filters(dur, mood=mood)
+            # The beat flicker has to be built HERE too. It was only wired into
+            # the cover branch, so a pillar render carried no exposure flicker
+            # at all and turning FLASH on changed nothing — the fix produced a
+            # byte-identical file (md5 f9ef2d296484 twice), which is how this
+            # was caught. A constant with two independent call sites is read
+            # twice; checking the one you edited is not evidence.
+            p_punches = _punch_times(words, start, dur)
+            p_beats = _music_beats(bgm, dur, intro_dur) \
+                if isinstance(bgm, str) else []
+            p_flash = _flash_expr(p_beats or p_punches, dur)
+            p_outro, p_filters = _outro_filters(dur, mood=mood)
+            p_bright = "+".join(x for x in (p_flash, p_outro) if x)
             chains.append(f"[0:v]{cover},setsar=1"
                           + (f",{p_zoom}" if p_zoom else "")
                           + (f",eq=brightness='{p_bright}':eval=frame"
