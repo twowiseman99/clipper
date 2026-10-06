@@ -1173,12 +1173,25 @@ def _outro_filters(dur, mood=None, seconds=None):
         # changes the output dimensions per frame, and 1080x1920 is not
         # negotiable here — the operator's rule is that resolution never moves
         # to buy a look.
-        frames = max(1, int(round(OUTRO_FREEZE * FPS)))
+        # The freeze runs to the END of the clip, not for a fixed 2s.
+        #
+        # `loop` INSERTS its clones into the stream: the tail of the real
+        # footage still follows them. With OUTRO_FREEZE=2.0 on a 31.8s clip the
+        # still occupied 28.80-30.80s and then the video started playing again
+        # for the last 3s — measured on the delivered file, frame-difference
+        # motion 8.2-24.8 after 30.80s where a still reads 0. The operator:
+        # "harusnya videonya pause sampe akhir".
+        #
+        # Cloning (dur - start) seconds instead means the clones alone fill the
+        # rest of the clip, and the real tail is pushed past the end where the
+        # encoder's -t drops it. OUTRO_FREEZE is kept as a FLOOR so a clip
+        # whose ending is shorter than one freeze still gets a readable still.
+        freeze_secs = max(OUTRO_FREEZE, dur - start)
+        frames = max(1, int(round(freeze_secs * FPS)))
         pad = OUTRO_SHAKE_PX
         # The shake runs ON the frozen frame, not after it. `loop` inserts
         # `frames` copies of one frame at `start`, so the still occupies
-        # start .. start+OUTRO_FREEZE on the output timeline and everything
-        # after it is pushed back by the same amount.
+        # start .. start+freeze_secs on the output timeline.
         #
         # This used to read `start + OUTRO_FREEZE`, which put the shake in the
         # moving video that follows the still — so the picture stopped, sat
@@ -1187,7 +1200,11 @@ def _outro_filters(dur, mood=None, seconds=None):
         # jedag-jedug convention: "videonya dah ga di play, jadi image gitu",
         # the beats land on the still.
         shake_from = start
-        end = dur + OUTRO_FREEZE
+        # The shake window has to cover the whole frozen stretch, which now
+        # runs to the end of the clip. Keyed to freeze_secs rather than the
+        # OUTRO_FREEZE constant: with the constant it stopped at 30.80s and the
+        # last 3s of the still sat motionless.
+        end = start + freeze_secs
         win = f"between(t,{shake_from:.3f},{end:.3f})"
         # One beat period. The shake is keyed to the track, not to taste:
         # 1.923 Hz is the measured onset rate of the supplied jedag-jedug song
@@ -1237,6 +1254,15 @@ def _outro_filters(dur, mood=None, seconds=None):
         zoom = (f"1+{OUTRO_PUNCH_ZOOM:.3f}*{env}*{win}")
         return "", [
             f"loop=loop={frames}:size=1:start={int(round(start * FPS))}",
+            # loop INSERTS its clones, so the clip grows by freeze_secs and the
+            # real tail is pushed after the still instead of being replaced by
+            # it. Measured on the first attempt at this fix: the clip ran
+            # 34.83s instead of 31.81s and the last 3s was moving video again
+            # (frame-difference 4-17 with no per-beat decay, against 0.4-0.9
+            # inside the frozen stretch). Cutting the stream back to `dur`
+            # drops exactly that tail and leaves the still holding to the end.
+            f"trim=end={dur:.3f}",
+            "setpts=PTS-STARTPTS",
             (f"crop=w={cw}:h={ch}"
              f":x='(iw-ow)/2+{pad:.0f}*{flip}*{env}*{win}'"
              f":y='(ih-oh)/2+{pad * 0.6:.0f}*{flip}*{env}*{win}':exact=1"),

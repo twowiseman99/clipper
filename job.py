@@ -229,6 +229,56 @@ def _hook_for(asked, opening, topical, from_model):
     return None
 
 
+def _freeze_floor(path, after, fps=10):
+    """Lowest frame-to-frame motion in `path` after `after` seconds, or None.
+
+    Separates a frozen frame from moving video. A still reads ~0; a still being
+    shaken on the beat spikes and then decays back to ~0 between beats; real
+    video never returns to zero because something is always changing. So the
+    FLOOR over the window is the discriminating statistic, not the mean — the
+    mean of a shaking still and the mean of moving video are similar, which is
+    why the old settings-only check could not tell them apart.
+
+    Measured on the renders that prompted this: inside a working frozen ending
+    the floor was 0.39-0.87, and in the tail where the video had resumed it was
+    2.70 with a mean of 6.5.
+    """
+    try:
+        import subprocess
+        import tempfile
+        import edit as _e
+        # metadata=print writes to ffmpeg's log, which `-v error` suppresses
+        # entirely — the first version of this probe parsed an empty stderr and
+        # returned None, i.e. "could not measure", on a perfectly good file.
+        # Its `file=` option is independent of the log level.
+        fd, tmp = tempfile.mkstemp(prefix="freeze_", suffix=".txt")
+        os.close(fd)
+        try:
+            run = subprocess.run(
+                [_e.FFMPEG, "-v", "error", "-ss", f"{after:.3f}", "-i", path,
+                 "-vf", (f"fps={fps},scale=120:-1,tblend=all_mode=difference,"
+                         "signalstats,metadata=print:"
+                         f"key=lavfi.signalstats.YAVG:file={tmp}"),
+                 "-f", "null", "-"],
+                capture_output=True, text=True, timeout=180)
+            if run.returncode != 0:
+                return None
+            with open(tmp) as fh:
+                vals = [float(v) for v in re.findall(r"YAVG=([0-9.]+)",
+                                                     fh.read())]
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    except Exception:
+        return None
+    # The first difference after a seek compares against a frame outside the
+    # window, so drop it.
+    vals = vals[1:]
+    return min(vals) if vals else None
+
+
 def _delivery_copy(path, max_mb):
     """Re-encode under max_mb when the render is too big to send. Returns the
     new path, or None when the original already fits or the squeeze fails.
@@ -993,6 +1043,37 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
                      **style)
 
     small = _delivery_copy(out, max_mb)
+
+    # The edit gate used to pass on the strength of its own settings: "outro =
+    # 'jamet', last 3s". It said PASS on a render whose last 3s was moving
+    # video, because `loop` INSERTS its frozen frames and the real tail ran on
+    # after them. The operator found it, not the gate: "harusnya videonya pause
+    # sampe akhir".
+    #
+    # So the gate now measures the DELIVERED FILE. A frozen frame has
+    # essentially no frame-to-frame difference; a shaking frozen frame has a
+    # sharp spike on each beat that decays to near zero before the next one.
+    # Moving video never returns to zero. Checking the floor inside the closing
+    # stretch separates the two without being fooled by the shake.
+    if _kind == "jamet" and (seg_end - seg_start) >= _span * 3:
+        _still = _freeze_floor(out, max(0.0, (seg_end - seg_start) - _span))
+        audit.briefed("edit", "freeze holds to the end",
+                      f"last {_span:.0f}s of {os.path.basename(out)}",
+                      "a still reads ~0 between beats; video never does")
+        if _still is None:
+            audit.warned("edit", "freeze", "not measured",
+                         "ffmpeg motion probe failed")
+            warnings.append("outro jamet: could not verify the freeze")
+        elif _still > 1.5:
+            audit.rejected("edit", "freeze", f"floor {_still:.2f}",
+                           "the picture is still moving inside the ending")
+            warnings.append(
+                f"outro jamet: motion floor {_still:.2f} in the last "
+                f"{_span:.0f}s — the freeze is not holding")
+        else:
+            audit.passed("edit", "freeze", f"floor {_still:.2f}",
+                         f"frozen through the last {_span:.0f}s")
+
     result = {
         "ok": True,
         "file": os.path.abspath(out),

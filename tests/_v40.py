@@ -82,7 +82,13 @@ freeze_start = freeze_start_frame / FPS
 # "loop=loop=60:size=1:start=570" — split on the inner "loop=loop=" so the
 # filter name itself does not swallow the match.
 loop_frames = int(loop.split("loop=loop=")[1].split(":")[0])
-assert abs(loop_frames / FPS - edit.OUTRO_FREEZE) < 0.05, loop_frames
+# The freeze covers the whole ending, which is OUTRO_JAMET_SECONDS, not the
+# OUTRO_FREEZE constant. This used to pin loop_frames to OUTRO_FREEZE (2.0s)
+# while the jamet ending runs 3.0s — so the still ran out a second early and
+# the footage resumed before the clip ended. OUTRO_FREEZE is now a floor.
+_ending = max(edit.OUTRO_FREEZE, 22.0 - freeze_start)
+assert abs(loop_frames / FPS - _ending) < 0.05, (
+    "freeze is %.2fs for a %.2fs ending" % (loop_frames / FPS, _ending))
 
 shake = next(f for f in filters if f.startswith("crop=w=iw-"))
 win_start = float(shake.split("between(t,")[1].split(",")[0])

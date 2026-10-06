@@ -122,9 +122,15 @@ with tempfile.TemporaryDirectory() as tmp:
          "-select_streams", "v", "-show_entries", "format=duration",
          "-of", "csv=p=0", out],
         capture_output=True, text=True).stdout.strip())
-    assert dur > 22.0 + edit.OUTRO_FREEZE - 0.4, (
-        "the frozen frames were not inserted: %.2fs for a 22s clip plus a "
-        "%.2fs hold" % (dur, edit.OUTRO_FREEZE))
+    # This used to assert the clip GREW by OUTRO_FREEZE, on the reasoning that
+    # `loop` inserts real frames. It does insert them — and that was the bug:
+    # the real tail then played after the still, so the picture started moving
+    # again before the clip ended ("harusnya videonya pause sampe akhir"). The
+    # chain now trims back to the requested length, so the correct assertion is
+    # that the duration does NOT move. Resolution and length are both fixed.
+    assert abs(dur - 22.0) < 0.3, (
+        "the clip is %.2fs for a 22s request: the inserted frozen frames must "
+        "replace the tail, not extend the clip" % dur)
 
 print(f"_v36 ok — jamet fits a 22s clip (shake {shaking:.1f}, "
-      f"clip grew to {dur:.1f}s), melancholy still needs 24s, 1080x1920 kept")
+      f"duration held at {dur:.1f}s), melancholy still needs 24s, 1080x1920 kept")
