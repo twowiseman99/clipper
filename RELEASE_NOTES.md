@@ -1,3 +1,72 @@
+## 81a02f4 — the effects live in the freeze, not across the clip
+
+Operator, asked to check the delivered render frame by frame: "itu kenapa efeknya
+dari awal sampe akhir? harusnya cukup pas di freeze frame aja setelah kotak makan
+dari rumah, masih kelebihan terus".
+
+Measured on that file, all 936 frames:
+
+```
+brightness jumps in the body     51    0.47s .. 26.07s
+brightness jumps in the freeze    0
+```
+
+The exact inverse of the request. Earlier rounds tuned the DENSITY of the
+flicker — rate, burst shape, spacing — and never questioned its RANGE, which is
+why every delivery came back "masih kelebihan".
+
+### Four things had to change together
+
+**The selection happens inside the window.** `_window_beats()` picks onsets from
+`[freeze .. end]`. Filtering a whole-clip selection down to the last 3 seconds
+does not work: the fraction has already been spent on the body, which left 3
+flickers stacked at 30.5s and the freeze's opening 2.3s dead.
+
+**The window is measured against the OUTPUT length, not `dur`.** `dur` is the
+body; the freeze clones frames past it. Clamping against `dur` produced a 0.35s
+window holding zero beats — the effects would have disappeared rather than moved,
+and that failure looks identical to success if the only check is "the body is
+clean".
+
+**`FLASH_WINDOW_FRACTION`, separate from `FLASH_BEAT_FRACTION`.** 12% of a whole
+clip's 63 onsets is 8 hits; the 3s freeze holds 6 onsets and 12% of those is ONE.
+Measured on this track's window: 0.30 gives 2 bursts, 0.50 gives 3 evenly spread
+with a 1.11s longest gap.
+
+**The flicker and the slam moved BELOW the outro filters.** The freeze is a
+`loop`, and it clones whatever frame it is handed — including a flickering one.
+Probed in real ffmpeg on a synthetic clip: the same expression produced 0 events
+inside the freeze above the loop and 10 below it. The outro's own brightness ramp
+stays above, because it describes what the ending does to the footage rather than
+a hit on the held frame, so the two terms are no longer concatenated.
+
+### The slam rule was backwards
+
+It read "keep slams out of the frozen ending" — which is precisely what left the
+body shaking for 26s and the ending perfectly still. Throwing a held frame is the
+point: the picture stops, the framing keeps hitting the beat.
+
+### Delivered file, frame by frame
+
+```
+body (0 .. 28.20s)        0 flickers
+                          4 luminance steps, all b-roll cuts: they move and
+                          STAY, while a flicker returns within 0.08s
+freeze (28.20 .. 31.20)   9 flickers in 3 bursts + 2 slams
+first hit                 0.25s into the freeze
+longest gap               1.11s
+                          1080x1920, 31.20s
+```
+
+### Verification
+
+`_v53` is new. 51 ok, with `_v9`/`_v10` still failing on a deleted transcript.
+
+Negative control: selecting over the whole clip puts 21 flickers in the body;
+with the window, 0.
+
+Signed: Dalmislave
+
 ## fab7671 — the freeze keeps the music, and the effects burst instead of drip
 
 Two operator reports on one delivered render: "frame freeze ga ada suara
@@ -1998,85 +2067,3 @@ actually covers:
 * no heatmap offered meaning no sidecar, which is not an error;
 * the 360p warning firing when a download comes back under 720p;
 * a Drive folder that rate-limits mid-way still returning what landed, with the
-  brief PDF filtered out of the footage;
-* a Drive file share that returns nothing coming back empty rather than
-  crashing.
-
-What this still does not cover, and cannot from here: the network itself.
-Cookies, PO tokens and a host's reputation with YouTube are only testable on
-the host. `python fetch.py URL` is that test.
-
-_Dalmislave_
-
----
-
-## v0.2.7 — stop capping the download at 1080p
-
-360p is an authentication question, not a limit: YouTube serves it to
-unauthenticated requests, and `cookies.txt` opens the full ladder. That was
-already documented and is unchanged.
-
-The real cap was in the format selector, which asked for
-`bestvideo[ext=mp4]`. YouTube only publishes H.264 up to 1080p — everything
-above that exists as VP9 or AV1 in webm — so pinning the container pinned the
-resolution, cookies or not.
-
-That matters because cover mode crops a landscape source to 9:16 and throws
-away most of the width before filling the canvas:
-
-| source | after the 9:16 crop | to 1080x1920 |
-|---|---|---|
-| 1080p | 607x1080 | upscaled 1.78x |
-| 1440p | 810x1440 | upscaled 1.33x |
-| 2160p | 1215x2160 | downscaled 1.12x |
-
-A 1080p source is being blown up nearly twice over. The selector now caps by
-height instead of container, defaulting to `CLIPPER_MAX_HEIGHT=1440` —
-visibly better through a crop without the file size 2160p brings against
-`CLIPPER_MAX_SOURCE_GB`. The `<=?` is a preference, so a video published only
-above the cap still downloads rather than failing to match.
-
-The stub test pins both halves: the selector must carry the height cap, and
-must not name a container. Re-pinning mp4 for tidiness would silently put the
-1080p ceiling back, so it fails the test instead.
-
-Merged output may now be mkv when the best pair cannot go in mp4. That is
-already handled — mkv is in the accepted extensions, and the renderer
-re-encodes everything anyway.
-
-_Dalmislave_
-
----
-
-## v0.2.8 — the download says what it actually got
-
-v0.2.7 raised the ceiling to 1440p but left no way to see whether the ceiling
-or the source decided the result. `python fetch.py URL` reported a path and a
-byte count; a 1080p download and a 1440p one look the same in bytes unless you
-already know the video.
-
-The CLI now reports resolution. Each file comes back with `width`, `height`
-and `codec`, and the envelope carries `max_height` — the ceiling that was
-asked for, next to the height that arrived. Those two numbers together are the
-whole diagnosis: equal means the cap decided it, lower means the source did,
-360p means cookies are not being read.
-
-```json
-{ "ok": true, "kind": "youtube", "cookies": true, "max_height": 1440,
-  "files": [ { "path": "...", "size_bytes": 214_000_000,
-               "codec": "vp9", "width": 2560, "height": 1440 } ] }
-```
-
-`preflight.py` reports the same thing: the configured ceiling as its own line,
-and the resolution of whatever sample it ends up using. A sample under 720p
-now fails a check rather than passing quietly — through a 9:16 crop that is an
-upscale past 2x, which is the soft-looking output this whole thread started
-from.
-
-Both read it out of the `ffmpeg -i` banner rather than calling ffprobe, for the
-same reason `probe_seconds` does: a static ffmpeg build often ships without
-ffprobe beside it. When ffmpeg is missing the fields are simply absent — the
-download is still reported, since not knowing the resolution is not a reason to
-call a successful download a failure.
-
-**What is not proven.** The banner parser is checked against fixture output
