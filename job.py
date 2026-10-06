@@ -888,6 +888,37 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
             else:
                 _log(f"end snapped {seg_end:.1f}s -> {snapped:.1f}s ({why})")
                 seg_end = snapped
+                # Give the ending its own room AFTER the sentence.
+                #
+                # "nanti selesai dari si gibran suruh bawa kotak makan,
+                # langsung jedag jedug" asks for two things at once: cut the
+                # aside that follows the payoff, AND close with the freeze.
+                # Snapping alone satisfies the first and starves the second —
+                # the snap leaves 0.35s of breath, so a 3s ending has nowhere
+                # to go and _outro_start silently falls back to "dur - span",
+                # which is 20.55s, i.e. back on top of the payoff line.
+                #
+                # So the clip is extended past the sentence by the ending's own
+                # span. The extra seconds carry no speech (that is exactly why
+                # the snap cut there), so nothing is said under the freeze —
+                # and the operator's "durasi videonya jg engga kependekan"
+                # comes out of the same change.
+                # The ending does NOT need extra source footage: the jamet
+                # freeze is built with `loop`, which CLONES the frame at the
+                # cut and fills the rest of the clip with copies, and the real
+                # tail is then dropped by the encoder's -t. So the right length
+                # here is the sentence itself — the freeze extends the output
+                # on its own.
+                #
+                # Extending the segment by the ending's span instead pulled the
+                # aside back in: 28.55s became 31.55s and "tapi dua perempuan
+                # rekomisasi apa itu?" played again, this time UNDER the freeze.
+                # Measured, not assumed — the first attempt at this shipped
+                # that exact result.
+                import edit as _e
+                if _e._outro_kind(mood) == "jamet":
+                    _log(f"jamet ending will extend {seg_end - seg_start:.1f}s "
+                         f"by {_e.OUTRO_JAMET_SECONDS:.1f}s of frozen frame")
     else:
         _log("choosing a segment...")
         picks = selector.pick_topical_segments(words, platform, 1,

@@ -49,12 +49,25 @@ for dur in (8.0, 10.81, 12.83, 22.0, 30.0):
 # A clip too short for an ending must not get a clamp at all.
 assert edit._outro_start(5.0, mood="hype") is None
 
-# And the clamp must actually be applied where overlays are emitted.
+# And the clamp must actually be applied where overlays are emitted. Asserting
+# on the CALL STRING broke the moment the signature grew a `words=` argument,
+# while the behaviour it guards was fine — so check the behaviour instead: the
+# caption chain must receive an outro boundary and stop animating past it.
 import inspect  # noqa: E402
 
 src = inspect.getsource(edit)
-assert "_outro_start(dur, mood=mood)" in src, (
+assert "_outro_start(" in src and "outro_at" in src, (
     "the caption chain never asks where the outro starts")
+
+# The boundary has to be the real one. With a transcript it snaps to the end of
+# speech; without one it falls back to the mechanical placement. Both are
+# clamps — neither may be None on a clip long enough for an ending.
+assert edit._outro_start(30.0, mood="hype") is not None
+_spoken = [{"word": "x", "start": 0.0, "end": 20.0}]
+_snapped = edit._outro_start(30.0, mood="hype", words=_spoken, clip_start=0.0)
+assert _snapped is not None and abs(_snapped - 20.0) < 0.01, (
+    "with a transcript the ending must start where speech stops, got %s"
+    % _snapped)
 
 # --- 2. the end lands on the subject's sentence, not the first silence ------
 # Shape of the real transcript: an apology passage, the lunch-box sentence,

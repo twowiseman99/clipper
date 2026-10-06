@@ -182,8 +182,13 @@ _FILLER = {
 }
 
 
+def _ends_sentence(word):
+    """True when this word closes a sentence in the transcript."""
+    return str(word.get("word", "")).rstrip().endswith((".", "?", "!"))
+
+
 def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2,
-                       after_words=()):
+                       after_words=(), sentence_gap=0.5):
     """Pull `seg_end` back to where the speech inside the segment stops.
 
     Returns (new_end, reason) or (None, reason) when nothing should change.
@@ -273,10 +278,32 @@ def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2,
         hole = float(b.get("start", 0)) - float(a.get("end", 0))
         if hole >= gap:
             holes.append((float(a.get("end", 0)), hole,
-                          str(a.get("word", ""))))
-    holes.append((float(inside[-1].get("end", seg_end)), 0.0, ""))
+                          str(a.get("word", "")), False))
+        elif hole >= sentence_gap and keys:
+            # A shorter pause still ends the clip when NOTHING AFTER IT belongs
+            # to the subject. Requiring `gap` everywhere kept 3.3s of unrelated
+            # aside on a delivered render: the payoff ended "...yang dimasak
+            # ikut" with a 0.62s breath, the next 1.2s silence was 3.3s later,
+            # and the clip rolled through "tapi dua perempuan rekomisasi apa
+            # itu?" — which pushed the ending's freeze on top of the payoff
+            # line. "nanti selesai dari si gibran suruh bawa kotak makan,
+            # langsung jedag jedug".
+            #
+            # Punctuation cannot be the guard here: this transcript marks no
+            # full stop at "ikut", and gap sizes do not separate the cases
+            # either (0.62s after the payoff, 0.52s mid-sentence elsewhere).
+            # The keyword floor does. Everything after this hole is checked for
+            # the clip's own keywords — if the remainder is about something
+            # else, the sentence that matters is already finished.
+            rest = [w for w in inside
+                    if float(w.get("start", 0)) >= float(b.get("start", 0))]
+            if not any(str(w.get("word", "")).lower().strip(".,!?-") in keys
+                       for w in rest):
+                holes.append((float(a.get("end", 0)), hole,
+                              str(a.get("word", "")), True))
+    holes.append((float(inside[-1].get("end", seg_end)), 0.0, "", False))
 
-    for cut, hole, word in holes:
+    for cut, hole, word, short in holes:
         if cut < floor:
             continue
         new_end = min(seg_end, cut + 0.35)   # a breath, not a hard chop
@@ -285,6 +312,8 @@ def snap_to_speech_end(words, seg_start, seg_end, min_dur=9.0, gap=1.2,
         if new_end - seg_start >= min_dur:
             reason = (f"{hole:.1f}s silence after {word!r}" if hole
                       else "no silence found; kept the last word")
+            if short:
+                reason += " (sentence end)"
             if hit:
                 reason += f" (first break after {hit!r})"
             return new_end, reason

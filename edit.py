@@ -98,6 +98,16 @@ PHRASE_MAX_WORDS = 3      # words per line
 # and a phrase that runs long is flushed and continued rather than truncated.
 PHRASE_MAX_LINES = 2      # lines per phrase before it is flushed
 PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
+# How long a phrase's last caption may hold while waiting for the next phrase.
+# Captions used to end on their own last word, so every pause between phrases
+# blanked the lane: measured on a delivered render, coverage was 64.2% with
+# gaps of 2.84s and 1.80s where words WERE being spoken ("subtitlenya
+# dikit-dikit"). Holding to the next phrase closes those. The cap keeps a
+# genuinely long silence from parking a stale caption on screen — 1.2s is long
+# enough to bridge the measured gaps (the 2.84s one is several short phrases
+# with small pauses between them, not one 2.84s silence) and short enough that
+# a real pause still clears.
+CAPTION_HOLD_MAX = float(os.environ.get("CLIPPER_CAPTION_HOLD_MAX", "1.2"))
 PHRASE_X_FRAC = 0.09      # left margin, fraction of canvas width
 PHRASE_Y_FRAC = 0.80      # block BOTTOM on a full frame (reference: 76-84%)
 # "editorial": the reference-clip look — thin serif, no stroke, mixed roman and
@@ -912,7 +922,23 @@ def _editorial_layer(words, clip_start, tmp_dir, accent_words=(),
                stroke_width=EDIT_STROKE, stroke_fill="black")
         return img
 
-    for ph in group_phrases(words, max_lines=1, max_words=4):
+    # Where each phrase's last word should hand over. A caption that ends on
+    # its own last word leaves the lane EMPTY for the whole pause before the
+    # next phrase starts, and Indonesian interview speech is full of them:
+    # measured on a delivered render, captions covered only 64.2% of the clip,
+    # with gaps of 2.84s and 1.80s in which 13 words were actually being
+    # spoken. The operator saw "subtitlenya dikit-dikit".
+    #
+    # So the last word of a phrase holds until the next phrase begins, capped
+    # by CAPTION_HOLD_MAX so a genuinely long silence still clears the lane
+    # instead of leaving a stale caption parked on screen.
+    _phrases = group_phrases(words, max_lines=1, max_words=4)
+    _next_start = {}
+    for _i, _ph in enumerate(_phrases):
+        _nxt = _phrases[_i + 1]["start"] if _i + 1 < len(_phrases) else None
+        _next_start[id(_ph)] = _nxt
+
+    for ph in _phrases:
         items = [w for line in ph["lines"] for w in line]
         toks = [censor.mask(re.sub(r"[.,!?]", "", w["word"])) for w in items]
         keep = [(t, w) for t, w in zip(toks, items) if t]
@@ -1018,8 +1044,16 @@ def _editorial_layer(words, clip_start, tmp_dir, accent_words=(),
             path = os.path.join(tmp_dir, _name("e"))
             block.save(path)
             t_start = max(0.0, items[active]["start"] - clip_start)
-            nxt = (items[active + 1]["start"] if active + 1 < len(items)
-                   else items[active]["end"])
+            if active + 1 < len(items):
+                nxt = items[active + 1]["start"]
+            else:
+                # Last word of the phrase: hold until the next phrase starts,
+                # so the pause between phrases is covered rather than blank.
+                _hand = _next_start.get(id(ph))
+                _own_end = items[active]["end"]
+                nxt = (min(_hand, _own_end + CAPTION_HOLD_MAX)
+                       if _hand is not None else _own_end)
+                nxt = max(nxt, _own_end)
             t_end = max(t_start + 0.1, nxt - clip_start)
             overlays.append(Overlay(path, int(x_frac * CANVAS_W),
                                     int(y_frac * CANVAS_H), t_start, t_end))
@@ -1180,7 +1214,7 @@ def _outro_kind(mood=None):
     return "stinger"
 
 
-def _outro_start(dur, mood=None, seconds=None):
+def _outro_start(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     """Where the closing treatment begins, or None when there is no ending.
 
     Mirrors the span logic in _outro_filters so callers do not duplicate it.
@@ -1193,10 +1227,62 @@ def _outro_start(dur, mood=None, seconds=None):
         span = OUTRO_JAMET_SECONDS
     if kind == "none" or span <= 0 or dur < span * 3:
         return None
+    if words:
+        snapped = _outro_snap(dur, words, clip_start, span)
+        if snapped is not None:
+            return snapped
     return max(0.0, dur - span)
 
 
-def _outro_filters(dur, mood=None, seconds=None):
+def _outro_snap(dur, words, clip_start, span):
+    """Move the ending to the first pause after the clip's OWN speech stops.
+
+    "nanti selesai dari si gibran suruh bawa kotak makan, langsung jedag jedug"
+    — the ending belongs AFTER the line, not `span` seconds before the clip
+    runs out. Those are different moments and the mechanical one cut into the
+    sentence: measured on a delivered render, the freeze began at 23.81s while
+    "anaknya membawa kotak dari rumah ... yang dimasak" ran to 27.94s, so the
+    payoff line played under a frozen frame with its captions suppressed.
+
+    `words` is the clip's own transcript. The caller extends the segment past
+    the sentence to make room for the ending, which means the extra seconds may
+    contain unrelated speech from the source — so this looks for the LAST PAUSE
+    big enough to be a sentence boundary and treats that as the handover, not
+    simply the last word in range.
+
+    Returns None when no such boundary leaves room for the ending, so the
+    caller keeps the mechanical placement instead of producing a freeze too
+    short to read.
+    """
+    if not words:
+        return None
+    rel = sorted(
+        ((w["start"] - clip_start, w["end"] - clip_start) for w in words
+         if w.get("start") is not None and w.get("end") is not None),
+        key=lambda p: p[0])
+    rel = [(a, b) for a, b in rel if b <= dur + 0.01]
+    if not rel:
+        return None
+
+    # The handover is where the clip's speech STOPS. Everything the operator
+    # asked for follows from that: "selesai dari si gibran suruh bawa kotak
+    # makan, langsung jedag jedug".
+    #
+    # An earlier version searched backwards for the last pause leaving `span`
+    # of room and picked 18.86s on a 28.55s clip — a pause in the MIDDLE of the
+    # dialogue, so the freeze landed on speech again, the opposite of the fix.
+    # The freeze does not need room inside the clip: `loop` clones the frame at
+    # `start` and the encoder's -t drops the real tail, so the ending extends
+    # the output by itself. The only thing that matters here is that it begins
+    # after the last word.
+    last = max(b for _a, b in rel)
+    if last >= dur - 0.01:
+        # Speech runs to the final frame — there is no "after" to freeze on.
+        return None
+    return last
+
+
+def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     """(brightness_term, extra_filters) for the closing treatment.
 
     The brightness term joins the beat-flash expression in one `eq`; the extra
@@ -1216,6 +1302,13 @@ def _outro_filters(dur, mood=None, seconds=None):
     if kind == "none" or span <= 0 or dur < span * 3:
         return "", []
     start = max(0.0, dur - span)
+    # Snap the ending to where speech actually stops, so the freeze lands AFTER
+    # the payoff line rather than `span` seconds before the clip runs out.
+    if words:
+        snapped = _outro_snap(dur, words, clip_start, span)
+        if snapped is not None:
+            start = snapped
+            span = dur - start
 
     if kind == "stinger":
         count = max(2, int(round(span * OUTRO_RATE)))
@@ -1254,7 +1347,19 @@ def _outro_filters(dur, mood=None, seconds=None):
         # rest of the clip, and the real tail is pushed past the end where the
         # encoder's -t drops it. OUTRO_FREEZE is kept as a FLOOR so a clip
         # whose ending is shorter than one freeze still gets a readable still.
-        freeze_secs = max(OUTRO_FREEZE, dur - start)
+        # The freeze is at least OUTRO_JAMET_SECONDS long, EXTENDING the clip
+        # when the sentence ends close to the cut.
+        #
+        # `dur - start` alone is right only when the ending was placed
+        # mechanically. Once it snaps to the end of speech, the remainder can be
+        # a fraction of a second — on the Gibran clip speech stopped at 28.20s
+        # of 28.55s, so the freeze would have been 0.35s, far too short to
+        # read. The span is the floor, and `loop` simply clones more frames to
+        # reach it; the encoder's -t is what sets the output length, so a
+        # longer-than-remainder freeze lengthens the clip instead of
+        # overwriting speech.
+        freeze_secs = max(OUTRO_FREEZE, OUTRO_JAMET_SECONDS, dur - start) \
+            if kind == "jamet" else max(OUTRO_FREEZE, dur - start)
         frames = max(1, int(round(freeze_secs * FPS)))
         pad = OUTRO_SHAKE_PX
         # The shake runs ON the frozen frame, not after it. `loop` inserts
@@ -1327,9 +1432,14 @@ def _outro_filters(dur, mood=None, seconds=None):
             # it. Measured on the first attempt at this fix: the clip ran
             # 34.83s instead of 31.81s and the last 3s was moving video again
             # (frame-difference 4-17 with no per-beat decay, against 0.4-0.9
-            # inside the frozen stretch). Cutting the stream back to `dur`
-            # drops exactly that tail and leaves the still holding to the end.
-            f"trim=end={dur:.3f}",
+            # inside the frozen stretch). Cutting the stream back drops exactly
+            # that tail and leaves the still holding to the end.
+            #
+            # The cut is at start + freeze_secs, not at `dur`. When the ending
+            # snapped to the end of speech the freeze is LONGER than what was
+            # left of the clip, and trimming to `dur` would chop the still back
+            # to 0.35s — the thing the floor above exists to prevent.
+            f"trim=end={start + freeze_secs:.3f}",
             "setpts=PTS-STARTPTS",
             (f"crop=w={cw}:h={ch}"
              f":x='(iw-ow)/2+{pad:.0f}*{flip}*{env}*{win}'"
@@ -2363,7 +2473,9 @@ def render_clip(video_path, start, end, words, out_path, *,
             # the treatment landed mid-speech and the last seconds shipped
             # untouched. Measured on the delivered file: SATAVG 7.0 -> 6.9
             # across the supposed ramp, i.e. nothing happened.
-            outro, outro_filters = _outro_filters(dur, mood=mood)
+            outro, outro_filters = _outro_filters(dur, mood=mood,
+                                                  words=words,
+                                                  clip_start=start)
             bright = "+".join(x for x in (flash, outro) if x)
             chains.append(f"[0:v]{cover_v or cover},setsar=1"
                           + (f",{zoom}" if zoom else "")
@@ -2399,7 +2511,9 @@ def render_clip(video_path, start, end, words, out_path, *,
             p_beats = _music_beats(bgm, dur, intro_dur) \
                 if isinstance(bgm, str) else []
             p_flash = _flash_expr(p_beats or p_punches, dur)
-            p_outro, p_filters = _outro_filters(dur, mood=mood)
+            p_outro, p_filters = _outro_filters(dur, mood=mood,
+                                                words=words,
+                                                clip_start=start)
             p_bright = "+".join(x for x in (p_flash, p_outro) if x)
             # Slams go on the strongest beats only, a smaller share than the
             # flicker: a throw interrupts the frame much more than a brightness
@@ -2411,7 +2525,14 @@ def render_clip(video_path, start, end, words, out_path, *,
             # Keep slams out of the frozen ending. The freeze exists so the
             # last seconds hold still; throwing the frame there would animate
             # the still and re-break what the previous fix just established.
-            _freeze_at = _outro_start(dur) if OUTRO_FREEZE > 0 else dur
+            _freeze_at = (_outro_start(dur, mood=mood, words=words,
+                                       clip_start=start)
+                          if OUTRO_FREEZE > 0 else dur)
+            # _outro_start returns None when the clip is too short for an
+            # ending. Comparing against None raised TypeError here, which would
+            # have taken down the whole render on a short clip.
+            if _freeze_at is None:
+                _freeze_at = dur
             p_slam_beats = [t for t in p_slam_beats if t + SLAM_HOLD < _freeze_at]
             sx, sy = _slam_offsets(p_slam_beats, dur)
             slam = ""
@@ -2485,7 +2606,8 @@ def render_clip(video_path, start, end, words, out_path, *,
         # and know nothing about it, so 6 of 21 caption tiles kept animating on
         # top of a frozen picture — the operator's "kenapa subtitlenya masih
         # jalan?". Clamp every window to where the ending begins.
-        outro_at = _outro_start(dur, mood=mood)
+        outro_at = _outro_start(dur, mood=mood, words=words,
+                                clip_start=start)
         for i, ov in enumerate(overlays):
             src_label = ins_label if i == 0 else f"[v{i}]"
             dst_label = f"[v{i + 1}]"
