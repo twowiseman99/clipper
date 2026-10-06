@@ -1,3 +1,98 @@
+## Captions that hold, an ending that waits for the sentence
+
+Two operator reports on the same render: "kenapa masi ada subtitlenya
+dikit-dikit ya?" and "nanti selesai dari si gibran suruh bawa kotak makan,
+langsung jedag jedug ... jadi durasi videonya jg engga kependekan".
+
+Same shape behind both: a boundary computed from a count instead of from the
+speech.
+
+### Captions covered 64% of the clip
+
+Each phrase's last word ended on its own `end`, so every pause between phrases
+blanked the caption lane. Measured on the delivered file:
+
+```
+coverage          64.2%
+gaps > 0.3s          12, totalling 10.12s
+two biggest       2.84s and 1.80s -- with 13 words BEING SPOKEN inside them
+```
+
+The last word of a phrase now holds until the next phrase begins, capped by
+`CAPTION_HOLD_MAX` (1.2s) so a genuine silence still clears the lane.
+
+```
+coverage      64.2% -> 91.7%
+leftover gaps    12 -> 2, both verified silent in the transcript
+```
+
+### The clip carried 3.3s of someone else's sentence
+
+`snap_to_speech_end` only accepted silences of 1.2s or more. After the payoff
+("...yang dimasak ikut") the breath was 0.62s, and the next qualifying silence
+was 3.3s later — so "tapi dua perempuan rekomisasi apa itu?" rode along.
+
+A shorter pause now also ends the clip, but only when NOTHING AFTER IT matches
+the clip's own keywords. Punctuation cannot be the guard here: this transcript
+marks no full stop at "ikut", and gap size does not separate the cases either
+(0.62s after the payoff against 0.52s mid-sentence elsewhere).
+
+```
+31.81s -> 28.55s, ending on "...yang dimasak ikut"
+```
+
+### The freeze landed on the payoff line
+
+`_outro_start` computed `dur - span`, which put the freeze at 23.81s while
+"anaknya membawa kotak dari rumah ... yang dimasak" ran to 27.94s. The line the
+clip exists for played under a frozen frame with its captions suppressed.
+`_outro_snap()` moves the ending to where speech actually stops.
+
+### And then the freeze was 0.35s long
+
+Snapping leaves only 0.35s of clip behind the sentence, so `freeze_secs = dur -
+start` produced a 0.35s still and `trim=end=dur` cut it back to that. The jamet
+freeze now takes `OUTRO_JAMET_SECONDS` as a floor and trims to
+`start + freeze_secs`, so it EXTENDS the output instead of fitting inside the
+remainder.
+
+```
+body 28.55s -> file 31.20s, freeze 3.00s
+```
+
+### Two wrong turns, both caught by measuring
+
+Extending the segment by the outro span to "make room" pulled the aside back in
+(28.55s -> 31.55s) and played it UNDER the freeze. The freeze needs no source
+footage at all: `loop` clones the frame at the cut and the encoder's `-t` drops
+the real tail.
+
+Searching backwards for the last pause that leaves `span` of room picked 18.86s
+on a 28.55s clip — a pause in the middle of the dialogue, which is the opposite
+of the fix.
+
+### Verified
+
+`jobs/clip_1791296210_122.mp4`, 31.20s, 1080x1920, md5 differs from the
+previous render:
+
+```
+freeze starts     28.20s   (speech ends 28.20s)
+_freeze_floor       0.0    (moving video reads 2.09-2.70)
+captions          91.7%    (was 64.2)
+```
+
+`tests/_v51.py` pins all four properties and pushes the ending through real
+ffmpeg, because a test asserting on a filter string passes while ffmpeg refuses
+the graph.
+
+`_v43` asserted on a CALL STRING (`_outro_start(dur, mood=mood)`) and failed the
+moment the signature grew a `words=` argument, while the behaviour it guards was
+untouched. It now checks the behaviour. Suite: 49 ok; `_v9`/`_v10` still need
+the deleted `media/uf9833efdc72b/PPOKdwOCMLA.words.json`.
+
+-- Dalmislave
+
 ## v0.8.0 — the shake travelled further than the reference and still felt like a tremor
 
 Operator: "goyangnya jgn kayak geter" tapi goyang aga jauh gitu, kayak bantingan
@@ -1998,57 +2093,3 @@ error banner, which is the error state doing its job.
 
 Eleven banner comments built from rules of dashes lost the decoration and kept
 their words. Nothing else changed: the density scan came back clean, with no
-step narration, no empty labels, no vague TODOs and no end markers.
-
-_Dalmislave_
-
----
-
-## v0.3.1 - the renderer stops working on a newer ffmpeg
-
-Found while trying to render a clip on a 2026 ffmpeg build: **every render
-fails on ffmpeg 8**, with nothing useful to go on.
-
-```
-RuntimeError: ffmpeg failed: Unrecognized option 'filter_complex_script'.
-```
-
-ffmpeg 8 dropped `-filter_complex_script` for the generic `-/filter_complex`.
-`edit.py` had the old spelling hardcoded, so the day a box upgrades ffmpeg the
-pipeline stops rendering, and the error names an option rather than the
-problem. Nothing about the failure suggests "your ffmpeg is too new".
-
-The graph still has to come from a file, because one caption is one overlay
-input and the command line would otherwise hit the OS argument limit. Only the
-spelling was in question, so the binary is asked once and the answer cached:
-`-filter_complex_script` when `ffmpeg -h full` still lists it, otherwise
-`-/filter_complex`. Version strings were not used to decide. Distro builds,
-static builds and vendored builds all disagree about what a version means, and
-the capability is the thing that matters.
-
-Verified against both: ffmpeg n7.0.1 picks the old flag, N-126482 picks the
-new one, and a clip renders on the new one to 1080x1920 H.264 with audio.
-
-That render also settled something v0.2.8 left open. The `ffmpeg -i` banner
-parser behind `probe_video` had only ever been checked against fixtures, since
-no ffmpeg was available at the time. It now reads a live banner correctly at
-both ends of the pipeline: 1920x1080 h264 in, 1080x1920 h264 out.
-
-_Dalmislave_
-
----
-
-## v0.3.2 - the repo sets itself up
-
-Everything needed to clone this and get to a rendered clip is now in the repo,
-so the instructions do not have to travel separately.
-
-**`README.md`** (the repo had none). Two setup paths, because they cost very
-different amounts: the clip path needs four Python packages and no credentials
-at all, the full pipeline needs twelve plus a Clippo session and upload tokens.
-It leads with the branch warning, since `main` is around 3000 lines behind and
-does not contain `job.py`, `bgm.py` or `report.py`.
-
-**`AGENTS.md`.** The three commands an agent needs, the `job.py` contract, and
-what exit 3 means, so a busy host reads as "retry later" rather than a failure.
-
