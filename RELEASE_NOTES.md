@@ -1,3 +1,92 @@
+## 7fa4550 — the snap was eating the melancholy outro
+
+Operator: "Ok berarti kita skrng ada 2 preset ya? Jedag jedug sama preset sedih,
+ga lu replace kan codenya?"
+
+Nothing was replaced. But checking it properly — by RENDERING the sombre preset
+instead of reading the diff — found a real bug in it.
+
+### Both presets are intact and take different paths
+
+```
+sedih  OUTRO=melancholy  kind=melancholy  span 8.00s  5 filters
+jamet  OUTRO=jamet       kind=jamet       span 5.00s  9 filters
+```
+
+Every jamet change from `b0ad70c` sits behind `kind == "jamet"`: `_jamet_span`,
+`JAMET_BODY_MIN`, the fps-before-loop fix. Verified by raising
+`OUTRO_JAMET_SECONDS` to 9.0 and confirming the melancholy span does not move.
+
+### The bug the check found
+
+`_outro_snap` moves the ending to the last word **and shrinks it**, because the
+caller then does `span = dur - start`.
+
+That is correct for jamet, whose `loop` clones frames and makes its own room — a
+snap 0.35s before the cut still yields a full 5s freeze. The melancholy outro
+has no such mechanism: its 8s desaturation ramp, vignette, slow-mo and fade all
+have to fit inside the remaining footage. Measured with the real transcript:
+
+```
+dur 24.00 -> ramp 0.10s     dur 28.55 -> ramp 0.35s
+dur 35.00 -> ramp 3.54s     dur 45.00 -> ramp 0.08s
+```
+
+The sombre ending was effectively absent on every duration. On the delivered
+render SATAVG held at ~11 from the first second to the last — 109% of where it
+started — instead of ramping to grey.
+
+The fix is conditional on whether the ending EXTENDS the clip, not a shared
+threshold. Tightening the room check for everyone would have un-snapped the
+jamet freeze and put it back on top of the payoff line, which is the whole
+reason the snap exists:
+
+```python
+if not extends and dur - last < span * SNAP_MIN_ROOM:
+    return None
+```
+
+Both call sites pass `extends=(kind == "jamet")`. Third time this file has been
+bitten by one value read from two places, so they were patched together.
+
+### A second thing that looked like a bug and was not
+
+`_outro_output_len` only understood the jamet `trim=`, so for melancholy it
+reported `dur` and made the dip to black look like it was scheduled past the end
+of the stream (`st=46.93` on a 45.03s file). It is not — the slow-mo stretches
+the tail. Confirmed in ffmpeg rather than argued from the graph:
+
+```
+dur 24.00  computed 27.43  ffmpeg 27.40  fade 25.93 -> inside
+dur 28.55  computed 31.98  ffmpeg 31.97  fade 30.48 -> inside
+```
+
+### Re-rendered sedih, md5 differs
+
+```
+before fix  45.03s  SATAVG 10.29 -> 11.21  (109%, flat)
+after fix   48.37s  SATAVG 10.29 ->  0.00  (greyscale)
+```
+
+### Verification
+
+`_v56` is new. It asserts the two presets disagree on mood/outro/broll/flash,
+that the melancholy chain has no `loop=` and keeps its `hue=s=` ramp, that the
+jamet body floor does not reach the sombre path, and that the snap leaves the
+melancholy ramp whole while still firing for jamet.
+
+54 ok, with `_v9`/`_v10` still failing on a deleted transcript.
+
+Negative controls, both verified to fail: swapping sedih's preset to jamet trips
+"both presets now use the same mood"; disabling the room check trips "the
+melancholy ramp is 0.10s on a 24.00s clip".
+
+Worth recording: no test caught this because none of them rendered the sombre
+preset. The jamet work was covered frame by frame while sedih was only ever
+reasoned about.
+
+Signed: Dalmislave
+
 ## b0ad70c — the jamet freeze runs a full 5 seconds, always
 
 Operator: "Setelah "Sebab itu yg dimasak ibu" / Lansung freze frame jedag jedug
@@ -1998,91 +2087,3 @@ is live — which is the current state.
 - `ai.py` retries transport errors and 5xx with backoff, and still raises 4xx
   immediately.
 - Dashboard escaping now covers quotes and `>`. Campaign ids come from Clippo's
-  API and reach a `value="..."` attribute.
-- Google client imports are lazy, so `pipeline.py --help` and `preflight.py`
-  work on a box that has not finished its setup — which is the box being
-  diagnosed.
-
----
-
-## Trying it
-
-```bash
-pip install -r requirements.txt
-playwright install chromium          # only for Clippo and profile stats
-```
-
-Render one clip from a local file — no Clippo, no 9Router, no upload:
-
-```bash
-python edit.py preview footage.mp4 --start 0 --end 45 \
-  --hook "**Cara Paling Elegan** Nanya Nama Orang Kalau **Kamu Terlanjur Lupa!**" \
-  --bgm background_music/01.mp3 --out coba.mp4
-```
-
-The transcript comes from faster-whisper and is cached beside the video, so the
-second run is instant. Other flags: `--intro`, `--frame-mode`,
-`--caption-style`, `--hook-style`, `--words`.
-
-Check a server before a real run, then exercise the whole chain without
-spending an upload:
-
-```bash
-python preflight.py                  # fonts, ffmpeg, 9Router, session, BGM, accounts
-python pipeline.py --dry-run         # renders real clips, uploads nothing
-```
-
-`--dry-run` writes no clip rows and no `segment_usage` rows and returns the task
-to `DISCOVERED`, so the same segments stay free for the real run.
-
-Every module runs its own checks: `python db.py`, `python segments.py`,
-`python bgm.py`, `python edit.py`, and so on.
-
----
-
-## v0.2.1 — agent entry point
-
-`job.py` is the contract an agent drives: two links in, one clip out.
-
-```bash
-python job.py --list                        # catalogue of styles and music, JSON
-python job.py --content URL --opening URL   # render, JSON result on stdout
-```
-
-Both print JSON on stdout and nothing else; progress goes to stderr and a
-failure prints `{"ok": false, "error": ...}` with a non-zero exit, so a caller
-never has to read a traceback to tell someone what went wrong. `--list` returns
-every choosable style with the label a person should see, plus the music
-library, the mood vocabulary and the length windows — enough for an agent to
-offer the options without hardcoding them.
-
-The opening link answers a question the renderer had left open: b-roll comes
-from the user, per job.
-
-Posting to chat, parsing the request and holding the conversation stay with the
-agent, which knows its own transport. This module stops at the file.
-
-**Audio fix that came out of building it.** A BGM track shorter than the clip is
-looped, and once it wraps past its own length it hands `amix` packets with no
-timestamp; the muxer rejects them and the render fails outright. Re-stamping the
-mixed result fixes it. This had been latent — it only shows when the clip
-outruns the music, which an intro makes more likely. Verified across the matrix:
-intro with and without BGM, BGM without intro, neither, and a clip shorter than
-the track.
-
-_Dalmislave_
-
----
-
-## v0.2.2 — failure reports, and testing the download on its own
-
-**`report.py`.** A traceback pasted out of a terminal loses what actually
-decides the answer: which ffmpeg, whether cookies were there, how much disk was
-left, which style the job ran with. Every failure in `job.py` and `pipeline.py`
-now writes a JSON report carrying all of it, and the path comes back in the
-job's own JSON so a caller can hand it on without shell access to the box.
-
-Set `CLIPPER_GITHUB_TOKEN` and `CLIPPER_GITHUB_REPO` and it also files a GitHub
-issue — the one channel a maintainer can read without access to the machine. A
-repeat of a failure already open comments on that issue instead of opening
-another: failures are fingerprinted by exception type plus the first line with
