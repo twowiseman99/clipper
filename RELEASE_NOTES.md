@@ -1,3 +1,91 @@
+## b0ad70c — the jamet freeze runs a full 5 seconds, always
+
+Operator: "Setelah "Sebab itu yg dimasak ibu" / Lansung freze frame jedag jedug
+goyang sama perubahan exposure, ikutin beat selama 5 detik", and on the
+trade-off: "sementara nomor 2 dulu, selalu 5 detik".
+
+The freeze already landed in the right place — 28.20s, the end of "...yang
+dimasak ikut" — so this is about its length. `OUTRO_JAMET_SECONDS` 3.0 -> 5.0,
+fixed, not scaled by clip length.
+
+### A frame-rate bug was hiding behind the shorter window
+
+```
+overlay -> loop=loop=150:size=1:start=846 -> trim=end=33.200 -> ... -> fps=30
+```
+
+`loop` counts FRAMES and `start` is computed as `start*FPS`, so the two have to
+agree on what a frame is. This source is 60fps and the conversion sat at the END
+of the chain, so loop ran on the 60fps stream:
+
+```
+start=846 @60fps  ->  14.10s, not 28.20s
+loop=150  @60fps  ->   2.50s of clones, not 5.00s
+```
+
+The delivered file reported 33.20s of audio over 31.07s of video — the last
+2.13s had **no picture** — and the flicker stopped 2.5s into the freeze.
+Measured 932 frames out, exactly `(28.55 + 150/60) * 30`: the arithmetic was
+right and the rate was wrong, which is why the graph read as correct on
+inspection. Confirmed in ffmpeg on a 60fps source, same expressions:
+
+```
+fps AFTER  loop   ->  932 frames / 31.07s
+fps BEFORE loop   ->  996 frames / 33.20s
+```
+
+### Two guards assumed a shorter freeze
+
+`dur < span * 3` needed 15s of clip before any ending existed, which silently
+removed the outro from 9.5s and 12s clips (`_v36`, `_v48`) — the same failure as
+the 8s span dropping the outro from a 22s clip, already recorded in
+`_outro_filters`. Replaced by `JAMET_BODY_MIN`: the freeze has to leave 4s of
+body behind, which is what the original complaint was about.
+
+The body floor was initially gated on `seconds is None`, so callers passing an
+explicit span — the renderer and `_v48` both do — stayed on the old rule and a
+12s clip still lost its ending. Three call sites, patched together.
+
+`_v43` capped the ending at 15% of runtime, and 5s of a 31.8s clip is 16%. That
+cap was written for the 8s stinger; it now asserts the surviving body (26.8s).
+
+### Retuning the hit density for a longer window
+
+`FLASH_WINDOW_FRACTION` 0.50 -> 0.65. A fraction tuned for a 3s window does not
+carry to a 5s one, and the largest GAP matters more than the count: one 1.3s
+hole in a 5s ending reads as the effect having stopped.
+
+```
+0.50 -> 6 hits, median 0.78s, largest gap 1.31s
+0.65 -> 7 hits, median 0.78s, largest gap 0.78s
+```
+
+### Delivered file
+
+```
+33.20s video == 33.20s audio, 996 frames, 1080x1920
+freeze 28.20-33.20, 21 exposure frames (last at +4.60s), none in the body
+every second of the freeze carries a hit
+```
+
+### Verification
+
+`_v55` is new and asserts the output's own duration AND frame count against the
+audio, so a rate mismatch anywhere in the chain cannot pass.
+
+`_v54`'s ending check was rewritten. It compared freeze median against body
+median, and a longer freeze holds a still frame between hits — so adding
+stillness DROPPED the median (5.10px against the body's 6.85px) while the hits
+themselves were unchanged at 8.4/s over 15px. The ending was fine and the ruler
+was wrong. It now counts hard throws against the control.
+
+53 ok, with `_v9`/`_v10` still failing on a deleted transcript.
+
+Negative controls: the fps-bug render fails `_v55` on the 2.13s audio/video gap;
+the earlier rejected render fails `_v54` at 69.6% of frames against 61.6%.
+
+Signed: Dalmislave
+
 ## 8d9e06b — nothing in the body moves the frame
 
 Operator, after being asked to check frame by frame: "baru nonton detik awal aja
@@ -1998,78 +2086,3 @@ Set `CLIPPER_GITHUB_TOKEN` and `CLIPPER_GITHUB_REPO` and it also files a GitHub
 issue — the one channel a maintainer can read without access to the machine. A
 repeat of a failure already open comments on that issue instead of opening
 another: failures are fingerprinted by exception type plus the first line with
-paths and numbers flattened, so the same wall hit nightly leaves one thread
-rather than a pile.
-
-Nothing secret goes in a report. API keys, cookie contents and OAuth tokens are
-never read — only whether they are present, which is the diagnostic value. The
-self-check asserts none of them appear in the output.
-
-Use a fine-grained token scoped to issues on this repo alone. It sits on the
-VPS, so it should be able to do nothing else.
-
-**`python fetch.py URL`** downloads one link and reports what landed. Download
-is the only stage that depends on cookies, a PO token and the host's
-reputation, so when a job dies at the first step this says whether the link or
-the setup is at fault — without spending a whole render to find out.
-
-_Dalmislave_
-
----
-
-## v0.2.3 — hardening the agent path
-
-Three things that decide whether `job.py` can be pointed at a chat channel
-where anyone can paste a link.
-
-**Downloads are keyed by URL, not by run.** Every job used the same folder, and
-a Drive fetch walks its whole directory — so the second job picked up the first
-job's file. Verified before the fix: two jobs, `max(files, key=getsize)`
-returned the previous job's video. Keying by a hash of the URL fixes that and
-buys something back: the same link retried with a different style reuses its
-download *and* its cached transcript instead of paying for both again. Cached
-folders are swept by age (`CLIPPER_MEDIA_TTL_HOURS`, default 24), and the sweep
-only touches folders it named, so a pipeline task's media is never pulled out
-from under it.
-
-**Input limits.** There were none. A three-hour link meant gigabytes down, an
-hour of whisper, and a render behind it. A YouTube link is now checked against
-`CLIPPER_MAX_SOURCE_SECONDS` (default 60 min) from its metadata *before* the
-download, and everything is checked for size (`CLIPPER_MAX_SOURCE_GB`, default
-2) and duration after. The refusal names the actual and the allowed in units
-that read at whatever the limit is set to, because that message goes straight
-back to whoever sent the link.
-
-If the duration cannot be probed — ffmpeg missing from PATH — the limit is
-skipped, but loudly. It used to be skipped in silence, which is the worse
-failure: a Drive link has no other guard.
-
-**One job at a time per host.** Whisper and ffmpeg each want most of a small
-VPS; two in parallel do not run twice as fast, they run out of memory. A second
-request exits `3` with `{"busy": true}` and no failure report — it is not a
-fault of that job, and the caller should retry rather than escalate. `--wait N`
-blocks instead, for callers that would rather queue.
-
-_Dalmislave_
-
----
-
-## v0.2.4 — the pipeline survives being killed
-
-The two items that stood at the top of the gap list since the first review.
-
-**A task killed mid-run is no longer lost.** `process()` only ever collected
-`DISCOVERED`, so a worker killed during `EDITING` or `UPLOADING` left its task
-in a state nothing would ever pick up again. Tasks sitting in a worker-held
-state past `CLIPPER_STALE_MINUTES` (default 90 — longer than whisper on a long
-video) are swept back into the queue at the start of each run.
-
-**And it resumes rather than restarts.** Rendering is the expensive stage, so
-clips an earlier attempt already produced are reused: the resume check runs
-*before* segment selection, so a retry skips the model call too. Clip rows now
-carry the metadata and account the upload needs, because asking the model again
-would put a different title on a file that already exists. Measured on the
-crash-and-resume cycle: **zero** extra model calls, and the title on the
-published clip is the one from the first attempt.
-
-A rendered file that has gone missing under its clip row is the other case: the
