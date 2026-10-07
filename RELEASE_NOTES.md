@@ -1,3 +1,78 @@
+## 8d9e06b — nothing in the body moves the frame
+
+Operator, after being asked to check frame by frame: "baru nonton detik awal aja
+ud najis gw liat editan editan di detik awal, goyang" gajelas".
+
+The previous two rounds measured BRIGHTNESS only (signalstats YAVG), which is
+blind to a crop or a zoom: the frame can slide sideways at a perfectly flat
+average luminance. Measured with vidstabdetect on the delivered file:
+
+```
+moving frames (>3px)    22 / 240    9.2%
+clustered at            0.87 - 1.93s
+```
+
+### Two effect families were never on the beat path
+
+**Zoom punch-ins** fire on emphasised WORDS, not beats, so they inherited none of
+the freeze window the previous fix installed: 12 of them, three stacked inside
+the first 1.7s. Now clamped with `_after()` like the flicker and the slam.
+
+`_zoompan()` also called `_punch_times()` itself, so clamping the caller's copy
+changed nothing and the punches shipped anyway. It now accepts `punch_times`.
+Same shape as the `FRAME_MODE` trap already documented in that function: a value
+with two independent sources is read twice, and fixing the one you edited is not
+evidence.
+
+**`_pan_cover`**, the speaker-tracking crop, moved 18.6px inside its window
+against 4.3px elsewhere in the body, with two reframes inside 2.1s.
+
+### Turning the pan off was wrong, and the suite said so
+
+`_v46` forbids `CLIPPER_PAN=0`, and it is right. With a fixed window this clip's
+subject walks from 0.377 to 0.896 of frame width while the window spans 0.316,
+leaving him OUTSIDE it in 56% of samples. The choice is not "movement or no
+movement" but "camera move or lost subject".
+
+So the pan stays and gets slower: `PAN_HOLD` and `PAN_SLIDE` 0.6 -> 2.0.
+
+```
+hold 0.6 slide 0.6    7 keyframes    4% outside    675 px/s   (shipped)
+hold 2.0 slide 2.0    3 keyframes    9% outside    317 px/s   (now)
+```
+
+Same subject coverage at a third of the speed, so the reframe stops registering
+as an edit while still following him.
+
+### Delivered file, against a fair control
+
+The control is the FULL pillar card — blurred background, foreground overlay,
+same scales — with the crop window frozen and no effects at all.
+
+```
+body 0-28.2s        62.3% of frames / 6.40px    control 61.6% / 5.10px
+freeze 28.2-31.2s   80.4% / 8.18px, peaks to 91px
+                    1080x1920, 31.20s
+```
+
+A bare scale+crop of the source is NOT a fair control and cost a round: it
+measures 4.12px, which reads as "we are still adding movement", while the pillar
+composite with a frozen window measures 5.10px. The composite itself carries
+about a pixel of it.
+
+### Verification
+
+`_v54` is new and pins movement itself rather than any one filter, so a third
+effect family cannot reintroduce this quietly. `_v46` was rewritten: it asserted
+a keyframe COUNT, which fails on a slower pan that still tracks correctly, and
+now asserts the subject stays inside the window. 52 ok, with `_v9`/`_v10` still
+failing on a deleted transcript.
+
+Negative control: the rejected render fails `_v54` at 69.6% of frames against
+the control's 61.6%.
+
+Signed: Dalmislave
+
 ## 81a02f4 — the effects live in the freeze, not across the clip
 
 Operator, asked to check the delivered render frame by frame: "itu kenapa efeknya
@@ -1998,72 +2073,3 @@ crash-and-resume cycle: **zero** extra model calls, and the title on the
 published clip is the one from the first attempt.
 
 A rendered file that has gone missing under its clip row is the other case: the
-row is dropped and its timestamp released, since nothing can publish it any
-more. Requeuing deliberately does *not* release reservations — a clip about to
-be resumed would otherwise have its slot claimed by another task mid-flight.
-
-**Failing a task no longer frees another task's segments.** The release deleted
-every `segment_usage` row for the video, not the ranges the failing task
-reserved. Two campaigns routinely share footage, so one failure re-opened
-timestamps another task had already published — and the next run cut and
-uploaded the same moment again. It now matches the exact range and skips
-anything already out. The regression test builds precisely that situation: two
-tasks on one video, one publishes, the other fails, and the published
-reservations must survive.
-
-An existing self-check had to be corrected to land this: its fixture inserted a
-clip with no start or end, so it only passed because the old code ignored the
-range entirely.
-
-_Dalmislave_
-
----
-
-## v0.2.5 — the render path stands on its own
-
-Confirming what the agent path actually needs, and cutting what it does not.
-
-`classify_source` moved from `clippo.py` to `fetch.py`. It decides which
-downloader a link belongs to, so it belongs with the routing table; leaving it
-in the Clippo adapter meant anything wanting to download a link imported a
-campaign-platform module to find out how. `clippo.py` re-exports it, so the
-adapter contract is unchanged.
-
-`job.py` now falls back to heatmap selection when the router is unreachable,
-the same ladder `pipeline.py` has always had. It used to raise instead, which
-made a 9Router hiccup take the whole chat flow down for something it could
-still have produced.
-
-Demonstrated with the router hard-failing on every call: the clip still renders
-— topical selection degrades to heatmap, metadata degrades to transcript-derived
-copy, music still lands. And with `job.py` loaded and a job run, none of
-`clippo`, `playwright`, `db`, `sqlite3`, `accounts`, `pipeline` or
-`upload_youtube` is imported at all. The render path touches no campaign
-platform, no database and no upload credentials.
-
-_Dalmislave_
-
----
-
-## v0.2.6 — the download path is exercised, not just described
-
-The downloader is `fetch.py`. There is no `download.py` — that was the old
-"Clipper Gemini" name, and nothing in this repo answers to it.
-
-Until now the network stages were the untested half: routing and the file
-filter were covered, but `fetch_youtube` and `fetch_gdrive` themselves had
-never run, in CI or anywhere. That mattered more than usual because v0.2.3 put
-a duration pre-check inside `fetch_youtube` — new code on the one path nothing
-executed.
-
-Both are now driven against stubbed `yt_dlp` and `gdown` modules. What that
-actually covers:
-
-* an over-long video is refused **before** the download — asserted by checking
-  yt-dlp was called once with `download=False` and never with `download=True`;
-* the merged-extension fallback, where yt-dlp reports `.webm` and the file on
-  disk is the muxed `.mp4`;
-* the heatmap sidecar being written, and read back by `heatmap_for`;
-* no heatmap offered meaning no sidecar, which is not an error;
-* the 360p warning firing when a download comes back under 720p;
-* a Drive folder that rate-limits mid-way still returning what landed, with the
