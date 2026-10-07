@@ -1,3 +1,94 @@
+## fc920d2 — the camera settles, and stops before the ending
+
+Operator, on the sombre preset: "Tpi kok hooknya hilang dan videonya masi goyang
+ya di preset sedih?"
+
+Two complaints, and only one of them was the renderer's fault.
+
+### The missing hook was mine
+
+I omitted `--hook` from the sedih render command. Twice. The clip had no hook
+because nothing asked for one — `job.py` treats "no hook flag" as the intended
+result, not a fallback. Re-rendered with it: hook is 3.37s in front, file 48.40s.
+
+### The movement was real
+
+Measured on the delivered 45s render against a fair control (same pillar card,
+same scales, window frozen, no effects):
+
+```
+static window    >3px 50.5%   hard throws 4.68/s
+delivered sedih  >3px 66.1%   hard throws 7.22/s
+```
+
+`flash: False` in the preset only disables the exposure flicker. **PAN is not a
+preset field at all**, so the sombre cut inherited jamet's reframing. And since
+moves are triggered per face-sample, a 45s clip collected more of them than a
+28s one: slides at 24-26s, 33-35s and 36-38s.
+
+Isolated by replaying the graph's OWN pan expression over the source footage
+instead of reasoning about it — a hand-written approximation was rejected by
+ffmpeg, which is its own lesson:
+
+```
+static window   >15px 4.68/s
+the pan set     >15px 8.43/s
+```
+
+### Two faults
+
+1. The only spacing rule was `t <= keys[-1][0]`, which stops a move starting
+   before the previous one LANDS. A 1.0s gap passed it, so the camera never read
+   as settled. `PAN_GAP` (6.0s) is now a real quiet period between slides.
+
+2. Nothing stopped a pan running into the outro. The 36-38s slide overlapped an
+   ending that starts at 37.0s, so the desaturation ramp and the reframe were
+   fighting over the same seconds. A reframe is framing for SPEECH; once the
+   ending has begun there is no speech left to follow.
+
+`_pan_keys` now takes `pan_until`, threaded through `_pan_cover` and
+`_pillar_pan_x` — both call sites patched together, and the renderer passes the
+`_outro_start` it already computes rather than recomputing it.
+
+### Result, and what it does not fix
+
+```
+before  >3px 66.1%  >15px 7.22/s
+after   >3px 63.1%  >15px 6.76/s
+```
+
+3 slides down to 2; the one crossing the ending is gone. But 6.76/s is still
+above the 4.68/s control, so the remaining movement is the two surviving slides
+themselves, not a third fault.
+
+Slowing them was measured and barely helps — same keyframes, slide duration
+varied:
+
+```
+slide 2.0s  ->  8.43 throws/s
+slide 4.0s  ->  7.62 throws/s
+slide 6.0s  ->  7.27 throws/s
+```
+
+Fewer moves is the lever, not slower ones. Not tuning further without the
+operator's call: a frozen window was already measured at 56% of the clip with
+the subject out of frame, which is worse than this.
+
+### Verification
+
+`_v57` drives `_pan_keys` with a synthetic track — no footage, no network. It
+asserts `PAN_GAP` reduces move count, that every slide is separated by a real
+quiet period, that no keyframe crosses the ending, and that the window still
+travels 0.45 of the frame width so this is not a frozen-window regression.
+
+55 ok, with `_v9`/`_v10` still failing on a deleted transcript.
+
+Negative controls, both verified to fail: restoring `t <= keys[-1][0]` trips
+"PAN_GAP did not reduce the number of camera moves (21 vs 21)"; disabling the
+outro bound trips "a pan keyframe sits at 42.00s, past the 37.00s outro start".
+
+Signed: Dalmislave
+
 ## 7fa4550 — the snap was eating the melancholy outro
 
 Operator: "Ok berarti kita skrng ada 2 preset ya? Jedag jedug sama preset sedih,
@@ -1998,92 +2089,3 @@ behind `caption_style="karaoke"`.
 Side effect worth knowing: this is roughly one overlay PNG per phrase instead
 of one per word. A 60-second clip drops from ~150 ffmpeg inputs to ~25.
 
-**Pull-quote hook.** A teal quote mark above a stack of white boxes, one per
-wrapped line, so the right edge stays ragged. `**Double asterisks**` in the hook
-text render bold and the rest regular; an unmarked hook renders bold
-throughout. `hook_style="card"` gives the single continuous card instead.
-
-**Two openings.** Pass `intro=` a b-roll clip and the hook lives there, cutting
-to the segment when the card leaves — the way both references open. Without one
-the hook rides over the opening seconds instead. The trade-off is real: with no
-intro, the seconds under the hook carry no subtitle, because nothing is allowed
-to share the screen with it.
-
-**Everything stays out of the platform UI.** TikTok, Reels and Shorts paint over
-roughly the bottom 15% of the frame. Captions and the hook are both anchored by
-their *bottom* edge and grow upward, so neither a long hook nor a three-line
-caption can walk off under the app. The self-check asserts it for one-, three-
-and five-line hooks.
-
----
-
-## Music
-
-New `bgm.py`. The model never picks a file — it cannot hear music, and a
-hallucinated filename is unrenderable. It labels the *clip* with one of seven
-moods, which it can do from the transcript, and the mood resolves to a track
-locally against `background_music/tracks.json`. Adding or retiring a track never
-touches the prompt, and the label rides along in the metadata call that already
-runs per clip, so it costs no extra round-trip.
-
-Within a mood the track is chosen by a stable hash of the clip's identity: the
-same clip re-rendered after a retry gets the same track, which `random.choice`
-could not promise. Sibling clips of one task exclude each other's track.
-
-Royalty-free is not attribution-free: a manifest entry with an `attribution`
-line has it appended to the clip's description before upload.
-
-```json
-{"tracks": [
-  {"file": "01.mp3", "mood": ["hype"], "attribution": "Music: X by Y (CC BY 4.0)"},
-  {"file": "02.mp3", "mood": ["hype", "funny"]}
-]}
-```
-
-Without a manifest, moods are read from filenames like `03_tense_slowbuild.mp3`.
-An empty folder means no BGM, not an error.
-
----
-
-## Clip length and destinations
-
-**One cut has to fit everywhere it goes.** `duration_window()` takes the whole
-destination set and returns the tightest window — highest floor, lowest ceiling.
-YouTube Shorts in the set binds at 90s; without it, TikTok's 180 opens up.
-
-| Platform | Window |
-|---|---|
-| YouTube Shorts | 30–90s |
-| TikTok | 30–180s |
-| Instagram Reels | 30–90s |
-
-Overridable per host: `CLIPPER_DURATION_YOUTUBE=20-90`.
-
-The old floors were 60s for TikTok and Instagram, which meant a sharp
-thirty-second moment could never be clipped for them at all.
-
-**Destinations are derived, not chosen.** The campaign brief says which
-platforms it wants; the `accounts` table says where there is an account cleared
-for campaign work; only platforms with a working uploader are publishable. The
-intersection is the destination set. A human can pin it per campaign from the
-dashboard when the rule gets it wrong.
-
-The `accounts` table had been inert since it was written — a paused or banned
-account changed nothing. It is now the gate, and it reads the *applied* status:
-the promotion `evaluate()` suggests is explicitly not enough, so a bad stat sync
-cannot push a platform into campaign work on its own.
-
-Clippo's submission form takes only TikTok and Instagram URLs, so a clip
-published to YouTube earns nothing from a campaign. Paying surfaces are
-therefore sized on their own; YouTube is a destination only while nothing paying
-is live — which is the current state.
-
----
-
-## Reliability
-
-- `metadata.generate` no longer fails the whole task when 9Router is
-  unreachable; it degrades to transcript-derived copy.
-- `ai.py` retries transport errors and 5xx with backoff, and still raises 4xx
-  immediately.
-- Dashboard escaping now covers quotes and `>`. Campaign ids come from Clippo's
