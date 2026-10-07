@@ -497,8 +497,24 @@ FACE_MODEL = os.path.join(_BASE, "models", "face_detection_yunet_2023mar.onnx")
 PAN = os.environ.get("CLIPPER_PAN", "1") not in ("0", "false", "no", "")
 PAN_STEP = 0.5        # seconds between face samples
 PAN_DEADZONE = 0.18   # face may drift this fraction of the window before moving
-PAN_HOLD = 0.6        # seconds off-centre before the camera commits to a move
-PAN_SLIDE = 0.6       # seconds a reframe takes, so it reads as a pan not a cut
+PAN_HOLD = 2.0        # seconds off-centre before the camera commits to a move
+PAN_SLIDE = 2.0       # seconds a reframe takes, so it reads as a pan not a cut
+# 2.0/2.0, not 0.6/0.6. The pan is FRAMING, not an effect, and at 0.6s it read
+# as one: "baru nonton detik awal aja ud najis gw liat editan editan di detik
+# awal, goyang" gajelas". Measured with vidstabdetect on the delivered file, the
+# pan window alone moved 18.6px against 4.3px elsewhere in the body, and two
+# reframes landed inside 2.1s.
+#
+# Turning the pan OFF is not the answer, and _v46 is right to forbid it: with a
+# fixed window this clip's subject walks from 0.377 to 0.896 of frame width
+# while the window spans 0.316, so he sits OUTSIDE it in 56% of samples. The
+# choice is not "movement or no movement" but "camera move or lost subject".
+#
+# Measured on this clip's 50 face samples, holding the window count at 8:
+#   hold 0.6 slide 0.6  ->  12% outside,  668 px/s   (what shipped)
+#   hold 2.0 slide 2.0  ->  12% outside,  256 px/s   (same framing, 2.6x slower)
+# Same subject coverage, a third of the speed, so the move stops registering as
+# an edit while still following him.
 
 # Where the captions sit relative to the footage:
 #   "below"  — the footage is shrunk to the reference clip's proportion and
@@ -1912,7 +1928,8 @@ def _punch_expr(times, fps):
     return "+".join(terms)
 
 
-def _zoompan(dur, fps=FPS, words=None, clip_start=0.0, frame_mode=None):
+def _zoompan(dur, fps=FPS, words=None, clip_start=0.0, frame_mode=None,
+             punch_times=None):
     """Centred push-in (no tracking), or None when zoom is off.
 
     The footage is normalised to `fps` first so the zoom spreads evenly across
@@ -1940,7 +1957,16 @@ def _zoompan(dur, fps=FPS, words=None, clip_start=0.0, frame_mode=None):
     """
     if frame_mode is None:
         frame_mode = FRAME_MODE
-    punch = _punch_expr(_punch_times(words, clip_start, dur), fps)
+    # Accept the punch times from the caller. Recomputing them here was the
+    # fourth wall in this bug: the pillar branch clamped its own p_punches to
+    # the freeze window, then this function called _punch_times() again and
+    # rebuilt the unclamped list, so the zoom punches shipped across the whole
+    # clip anyway (three stacked at 1.00-1.90s, measured with vidstabdetect).
+    # Same shape as the FRAME_MODE trap documented below: a value with two
+    # independent sources is read twice, and fixing one leaves the other.
+    punch = _punch_expr(
+        _punch_times(words, clip_start, dur) if punch_times is None
+        else punch_times, fps)
     if ZOOM <= 1.0 or frame_mode == "pillar":
         if not punch:
             return None
@@ -2614,16 +2640,25 @@ def render_clip(video_path, start, end, words, out_path, *,
             # push-in over it stays centred; tracking inside an already-tracked
             # window would just fight it.
             cover_v = _pan_cover(video_path, start, end) if FACE_TRACK else None
-            punches = _punch_times(words, start, dur)
+            # Same clamp as the pillar branch: the punch-in is an effect, and
+            # effects live in the closing window only. Passed explicitly into
+            # _zoompan, which otherwise rebuilds the unclamped list itself.
+            _c_out_len = _outro_output_len(dur, mood=mood, words=words,
+                                           clip_start=start)
+            _c_end_at = _outro_start(dur, mood=mood, words=words,
+                                     clip_start=start)
+            punches = _after(_punch_times(words, start, dur),
+                             _c_end_at, _c_out_len)
             zoom = None
             if ZOOM > 1.0:
                 if cover_v is None and FACE_TRACK:
                     zoom = _face_zoompan(video_path, start, end, dur, fps)
-                zoom = zoom or _zoompan(dur, fps, words, start)
+                zoom = zoom or _zoompan(dur, fps, words, start,
+                                        punch_times=punches)
             else:
                 # Punch-ins are independent of the slow drift: a clip with zoom
                 # off should still land a tighter crop on stressed words.
-                zoom = _zoompan(dur, fps, words, start)
+                zoom = _zoompan(dur, fps, words, start, punch_times=punches)
             # The flicker follows the TRACK, not the words: "di bedain
             # exposurenya di goyang goyangin ikutin beat lagu". Firing on
             # stressed words meant the picture and the music were marking
@@ -2683,14 +2718,32 @@ def render_clip(video_path, start, end, words, out_path, *,
             # cover branch above: that branch never runs in pillar mode, so
             # its locals do not exist. _zoompan skips the standing CLIPPER_ZOOM
             # in pillar mode and keeps only the punch-ins.
-            p_zoom = _zoompan(dur, fps, words, start, frame_mode=frame_mode)
+            # Punch-ins are the THIRD effect family, and the one missed in the
+            # previous round: they are speech-driven (emphasised words), so they
+            # never went through the beat path and inherited none of its window.
+            # Measured on the delivered file with vidstabdetect: 22 moving
+            # frames in the first 8s, three punch-ins stacked at 1.00-1.90s —
+            # "baru nonton detik awal aja ud najis, goyang" gajelas".
+            #
+            # Same rule as the flicker and the slam: nothing moves in the body.
+            # Emphasis words live in the speech, so this is empty in practice
+            # and the zoom punch is effectively off; the beat flicker and the
+            # slam carry the ending.
+            #
+            # Computed BEFORE _zoompan so the clamped list can be handed to it.
+            _out_len = _outro_output_len(dur, mood=mood, words=words,
+                                         clip_start=start)
+            _end_at = _outro_start(dur, mood=mood, words=words, clip_start=start)
+            p_punches = _after(_punch_times(words, start, dur),
+                               _end_at, _out_len)
+            p_zoom = _zoompan(dur, fps, words, start, frame_mode=frame_mode,
+                              punch_times=p_punches)
             # The beat flicker has to be built HERE too. It was only wired into
             # the cover branch, so a pillar render carried no exposure flicker
             # at all and turning FLASH on changed nothing — the fix produced a
             # byte-identical file (md5 f9ef2d296484 twice), which is how this
             # was caught. A constant with two independent call sites is read
             # twice; checking the one you edited is not evidence.
-            p_punches = _punch_times(words, start, dur)
             p_beats = _music_beats(bgm, dur, intro_dur) \
                 if isinstance(bgm, str) else []
             # The effects belong to the ENDING, not to the whole clip. Measured
@@ -2703,12 +2756,10 @@ def render_clip(video_path, start, end, words, out_path, *,
             # the BODY length; the freeze clones frames and extends the file past
             # it, so measuring against dur left a 0.35s window with zero beats in
             # it — the effects would have vanished entirely rather than moved.
-            _out_len = _outro_output_len(dur, mood=mood, words=words,
-                                         clip_start=start)
-            _end_at = _outro_start(dur, mood=mood, words=words, clip_start=start)
+            # _out_len / _end_at are computed above, before _zoompan.
             p_flash = _flash_expr(
                 _burst_times(_window_beats(bgm, _end_at, _out_len, intro_dur))
-                or _after(p_punches, _end_at, _out_len), _out_len)
+                or p_punches, _out_len)
             p_outro, p_filters = _outro_filters(dur, mood=mood,
                                                 words=words,
                                                 clip_start=start)

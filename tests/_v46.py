@@ -115,7 +115,48 @@ finally:
 
 assert "lt(t," in x, "PAN on still produced a static crop: %r" % x
 keys = x.count("lt(t,")
-assert keys >= 3, "only %d pan keyframes: the window is barely moving" % keys
+# Counting keyframes measures the wrong thing, and it broke when the pan was
+# SLOWED DOWN to stop reading as an effect (PAN_HOLD/PAN_SLIDE 0.6 -> 2.0): the
+# window still follows the subject, in fewer and longer moves. What matters is
+# that he stays inside the frame, so assert that directly.
+#
+# Measured on this clip, window width 0.422 of frame, 56 face samples:
+#   hold 0.6 slide 0.6  ->  7 keyframes,  4% of samples outside,  675 px/s
+#   hold 2.0 slide 2.0  ->  3 keyframes,  9% of samples outside,  317 px/s
+# and with PAN off entirely, a fixed window leaves him outside 56% of the time.
+assert keys >= 2, "only %d pan keyframes: the window is not following" % keys
+
+pts = edit._sample_pan_faces(SRC, 122.0, 153.81)
+assert pts, "no face samples: the coverage check would pass vacuously"
+_W = _H = None
+try:
+    import cv2
+    _cap = cv2.VideoCapture(SRC)
+    _W = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    _H = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    _cap.release()
+except Exception:
+    pass
+if _W and _H:
+    win_frac = edit.CANVAS_W / (_W * (card_h / _H))
+    # Read the keyframes from _pan_keys rather than scraping the expression.
+    # The expression is a RAMP — "0.7453+(-0.3304)*(t-24)/2.0" — so a regex for
+    # floats picks up ramp slopes and durations as if they were positions, and
+    # reported 64% outside against a measured 9%.
+    keyframes = edit._pan_keys(pts, win_frac)
+    assert keyframes, "no pan keyframes from _pan_keys"
+    outside = 0
+    for t, c in pts:
+        pos = keyframes[0][1]
+        for kt, kc in keyframes:
+            if kt <= t:
+                pos = kc
+        if not (pos - win_frac / 2 <= c <= pos + win_frac / 2):
+            outside += 1
+    share = 100.0 * outside / len(pts)
+    assert share <= 25.0, (
+        "the subject sits outside the pan window in %.0f%% of samples: the "
+        "window is not following him" % share)
 
 # Ramps must be gradual. A keyframe pair closer than the ramp length would be
 # a snap, which reads as a cut rather than a camera move. The expression shape
