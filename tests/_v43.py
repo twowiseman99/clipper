@@ -124,19 +124,24 @@ end_none, _ = selector.snap_to_speech_end(
 assert abs(end_filler - end_none) < 0.01, (
     "filler-only keys changed the cut (%.2f vs %.2f)" % (end_filler, end_none))
 
-# The ending must be a fraction of the clip, not a quarter of it. The 12.8s
-# render the operator rejected gave 3.06s (24%) to the outro. Measure against
-# the REAL segment this came from rather than the synthetic fixture, whose
-# word spacing is compressed: --start 122.0 on the Gibran transcript yields
-# 31.8s, where a 3s ending is under a tenth of the clip.
+# The ending must leave a real clip behind it. The 12.8s render the operator
+# rejected gave 3.06s (24%) to the outro, and "videonya ampas cuman 12 detik"
+# was about the clip being short, not about the ending being long.
+#
+# This used to cap the ending at 15% of runtime. That cap cannot survive the
+# freeze the operator then asked for — "selalu 5 detik", which is 16% of the
+# 31.8s segment this clip comes from — so the check moved to what the complaint
+# was actually about: how much VIDEO is left after the freeze.
 REAL_DUR = 31.8
-share = edit.OUTRO_JAMET_SECONDS / REAL_DUR
-assert share < 0.15, (
-    "the ending is %.0f%% of a %.1fs clip" % (share * 100, REAL_DUR))
+body = REAL_DUR - edit.OUTRO_JAMET_SECONDS
+assert body >= 20.0, (
+    "a %.1fs freeze leaves only %.1fs of body on a %.1fs clip"
+    % (edit.OUTRO_JAMET_SECONDS, body, REAL_DUR))
+assert edit.JAMET_BODY_MIN > 0, "no body floor: short clips become all ending"
 
 # The rejected render is the negative control: the same ending on a 12.8s clip
-# is what "videonya ampas cuman 12 detik" was about.
-assert edit.OUTRO_JAMET_SECONDS / 12.83 > 0.2, (
+# leaves 7.8s, which is what "videonya ampas cuman 12 detik" was about.
+assert 12.83 - edit.OUTRO_JAMET_SECONDS < 10.0, (
     "fixture drift: the rejected 12.8s render no longer looks ending-heavy, "
     "so this check cannot tell the two cases apart")
 
@@ -144,7 +149,7 @@ dur_early = end_early - 10.0
 
 print("_v43 ok — captions clamp at the freeze (outro_start agrees with "
       "outro_filters on 5 durations), opening %.1fs earlier still ends on the "
-      "sentence (%.2f, %s), ending is %.0f%% of %.1fs real vs %.0f%% of the "
-      "rejected 12.8s"
-      % (own - 10.0, end_early, why_early, share * 100, REAL_DUR,
-         edit.OUTRO_JAMET_SECONDS / 12.83 * 100))
+      "sentence (%.2f, %s), a %.1fs freeze leaves %.1fs of body on %.1fs vs "
+      "%.1fs on the rejected 12.8s"
+      % (own - 10.0, end_early, why_early, edit.OUTRO_JAMET_SECONDS, body,
+         REAL_DUR, 12.83 - edit.OUTRO_JAMET_SECONDS))

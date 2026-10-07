@@ -306,7 +306,16 @@ FLASH_SUBBEAT = float(os.environ.get("CLIPPER_FLASH_SUBBEAT", "0.10"))
 # gap 1.11s. The window is short enough that a larger share is still a burst
 # pattern, not a drip.
 FLASH_WINDOW_FRACTION = float(
-    os.environ.get("CLIPPER_FLASH_WINDOW_FRACTION", "0.50"))
+    os.environ.get("CLIPPER_FLASH_WINDOW_FRACTION", "0.65"))
+# 0.65, not 0.50. Retuned when the freeze went 3.0s -> 5.0s: a fraction tuned
+# for one window length does not carry to another. Measured on this track's
+# onsets inside the 5.00s freeze:
+#   0.35 -> 4 hits, median 1.31s, largest gap 1.56s
+#   0.50 -> 6 hits, median 0.78s, largest gap 1.31s   (a visible hole)
+#   0.65 -> 7 hits, median 0.78s, largest gap 0.78s   (even, no hole)
+#   0.80 -> 9 hits, median 0.53s
+# The largest gap matters more than the count: one 1.3s hole in a 5s ending
+# reads as the effect having stopped.
 # Body slams: the frame is thrown a long way on a beat, then holds still.
 #
 # "goyangnya jgn kayak geter\" tapi goyang aga jauh gitu, kayak bantingan
@@ -377,7 +386,22 @@ OUTRO_SECONDS = float(os.environ.get("CLIPPER_OUTRO_SECONDS", "8.0"))
 # three seconds is plenty and more just stalls the clip. Separate constants
 # also mean the guard below (dur < span*3) scales per ending, so a 22s viral
 # cut can still have an outro while a 22s sombre cut correctly cannot.
-OUTRO_JAMET_SECONDS = float(os.environ.get("CLIPPER_OUTRO_JAMET_SECONDS", "3.0"))
+OUTRO_JAMET_SECONDS = float(os.environ.get("CLIPPER_OUTRO_JAMET_SECONDS", "5.0"))
+# 5.0, asked for directly: "Lansung freze frame jedag jedug goyang sama
+# perubahan exposure, ikutin beat selama 5 detik". At 3.0s the ending reads as a
+# stumble rather than a beat drop — there is room for about six hits at 1.9/s,
+# and the viewer needs a couple of them before the pattern registers at all.
+#
+# Always 5s, chosen over a proportional freeze: "sementara nomor 2 dulu, selalu
+# 5 detik". The guards that assumed a shorter freeze are relaxed instead.
+#
+# JAMET_BODY_MIN replaces the old `dur < span * 3` rule. That rule needed 15s of
+# clip before any ending existed at 5s, which silently removed the outro from
+# 9.5s and 12s clips — the same class of failure as the 8s span dropping the
+# outro from a 22s clip, already recorded in _outro_filters. What actually
+# matters is that the freeze leaves recognisable video behind it, so the test is
+# on the BODY that survives, not on a multiple of the freeze.
+JAMET_BODY_MIN = float(os.environ.get("CLIPPER_JAMET_BODY_MIN", "4.0"))
 # Stinger shape. Pulses per second: 4 reads as rhythm, past about 6 it is a
 # strobe, which is unpleasant and an accessibility problem.
 OUTRO_RATE = float(os.environ.get("CLIPPER_OUTRO_RATE", "4"))
@@ -1266,6 +1290,27 @@ def _outro_kind(mood=None):
     return "stinger"
 
 
+def _jamet_span(dur):
+    """Freeze length for a jamet ending. Always OUTRO_JAMET_SECONDS.
+
+    The operator was offered a proportional freeze for short clips and chose a
+    fixed one instead: "sementara nomor 2 dulu, selalu 5 detik". So the length
+    does not vary with `dur`, and the two guards that assumed it would are
+    relaxed rather than the length being trimmed:
+
+      * `dur < span * 3` used to need 15s of clip before any ending existed,
+        which silently removed the outro from 9.5s and 12s clips. It is now a
+        check that the freeze leaves some body behind — see JAMET_BODY_MIN.
+      * _v43's "ending under 15% of runtime" ceiling cannot hold at 5s on a
+        31.8s clip (16%) and was written for the 8s stinger. The jamet ending
+        has its own ceiling now.
+
+    `dur` is kept in the signature: callers pass it, and a future proportional
+    rule would need it back.
+    """
+    return OUTRO_JAMET_SECONDS
+
+
 def _outro_start(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     """Where the closing treatment begins, or None when there is no ending.
 
@@ -1276,8 +1321,17 @@ def _outro_start(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     kind = _outro_kind(mood)
     span = float(seconds if seconds is not None else OUTRO_SECONDS)
     if kind == "jamet" and seconds is None:
-        span = OUTRO_JAMET_SECONDS
-    if kind == "none" or span <= 0 or dur < span * 3:
+        span = _jamet_span(dur)
+    if kind == "none" or span <= 0:
+        return None
+    # The body floor applies to EVERY jamet ending, not only the ones that take
+    # the default span. Gating it on `seconds is None` left callers that pass an
+    # explicit span — the renderer and _v48 both do — on the old `span * 3`
+    # rule, which at 5s demands 15s of clip and returned None for a 12s one.
+    if kind == "jamet":
+        if dur - span < JAMET_BODY_MIN:
+            return None
+    elif dur < span * 3:
         return None
     if words:
         snapped = _outro_snap(dur, words, clip_start, span)
@@ -1373,8 +1427,13 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     # asked for "muka gibrannya di stop jadi image terus goyang" and got a
     # plain cut, with nothing in the ledger but "edit DID NOT RUN".
     if kind == "jamet" and seconds is None:
-        span = OUTRO_JAMET_SECONDS
-    if kind == "none" or span <= 0 or dur < span * 3:
+        span = _jamet_span(dur)
+    if kind == "none" or span <= 0:
+        return "", []
+    if kind == "jamet":
+        if dur - span < JAMET_BODY_MIN:
+            return "", []
+    elif dur < span * 3:
         return "", []
     start = max(0.0, dur - span)
     # Snap the ending to where speech actually stops, so the freeze lands AFTER
@@ -1433,7 +1492,7 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
         # reach it; the encoder's -t is what sets the output length, so a
         # longer-than-remainder freeze lengthens the clip instead of
         # overwriting speech.
-        freeze_secs = max(OUTRO_FREEZE, OUTRO_JAMET_SECONDS, dur - start) \
+        freeze_secs = max(OUTRO_FREEZE, _jamet_span(dur), dur - start) \
             if kind == "jamet" else max(OUTRO_FREEZE, dur - start)
         frames = max(1, int(round(freeze_secs * FPS)))
         pad = OUTRO_SHAKE_PX
@@ -1501,6 +1560,18 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
         # that never bends.
         zoom = (f"1+{OUTRO_PUNCH_ZOOM:.3f}*{env}*{win}")
         return "", [
+            # fps FIRST, before loop. `loop` counts FRAMES, and `start` here is
+            # computed as start*FPS — so the two have to agree on what a frame
+            # is. This source is 60fps and the conversion sat at the END of the
+            # chain, so loop ran on the 60fps stream: start=846 landed at
+            # 14.10s instead of 28.20s, and loop=150 cloned 2.50s instead of
+            # 5.00s. The file then reported 33.20s of audio over 31.05s of
+            # video, and the last 2.1s had no picture at all.
+            #
+            # Measured: 932 frames out, exactly (28.55 + 150/60) * 30. The
+            # arithmetic was right and the frame RATE was wrong, which is why
+            # the graph looked correct on inspection.
+            f"fps={FPS}",
             f"loop=loop={frames}:size=1:start={int(round(start * FPS))}",
             # loop INSERTS its clones, so the clip grows by freeze_secs and the
             # real tail is pushed after the still instead of being replaced by

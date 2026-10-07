@@ -100,9 +100,9 @@ def _movement(path, ss, t, thresh=3.0):
         dy = statistics.median([int(b) for _a, b in vs])
         mags.append((dx * dx + dy * dy) ** 0.5)
     if not mags:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     return (100.0 * len([m for m in mags if m > thresh]) / len(mags),
-            statistics.median(mags))
+            statistics.median(mags), max(mags))
 
 CLIP = os.environ.get("V54_CLIP", "")
 if not CLIP or not os.path.exists(CLIP):
@@ -134,9 +134,9 @@ subprocess.run(
      "-an", "-c:v", "libx264", "-preset", "ultrafast", control],
     capture_output=True, timeout=900)
 
-c_pct, c_med = _movement(control, 0.0, DUR)
-b_pct, b_med = _movement(CLIP, 0.0, freeze_at)
-f_pct, f_med = _movement(CLIP, freeze_at, out_len - freeze_at)
+c_pct, c_med, _c_peak = _movement(control, 0.0, DUR)
+b_pct, b_med, b_peak = _movement(CLIP, 0.0, freeze_at)
+f_pct, f_med, f_peak = _movement(CLIP, freeze_at, out_len - freeze_at)
 
 # The body must not move MORE than footage that has no effects on it at all.
 # An absolute floor would fail on any handheld source; the control is the
@@ -148,10 +148,28 @@ assert b_pct <= c_pct + 8.0, (
     "body moves in %.1f%% of frames against a control of %.1f%%" % (b_pct, c_pct))
 
 # And the ending has to be livelier than the body, or the jedag-jedug is gone.
-assert f_med > b_med, (
-    "freeze median %.2fpx is not above the body's %.2fpx: the ending is dead"
-    % (f_med, b_med))
+# Measure the HIT RATE against the control, not the median against the body.
+#
+# The median comparison broke when the freeze went 3s -> 5s, and it was the
+# wrong instrument: a longer freeze holds a genuinely still frame between hits,
+# so adding seconds of stillness DROPS the median even though the hits
+# themselves are unchanged. Measured on the 5s render, the freeze had a median
+# of 5.10px against the body's 6.85px — and 8.40 hits/s over 15px against the
+# body's 7.91, peaking at 93.6px. The ending was fine; the ruler was wrong.
+# At a 3px threshold both sides read ~61%: that threshold answers "is anything
+# moving at all", which handheld footage always does. A SLAM is a long throw, so
+# count frames over 15px instead — measured 8.4/s in the freeze against 6.8/s
+# in the control.
+c_hit, _, _ = _movement(control, 0.0, DUR, thresh=15.0)
+f_hit, _, _ = _movement(CLIP, freeze_at, out_len - freeze_at, thresh=15.0)
+assert f_hit >= c_hit, (
+    "the freeze throws the frame hard in %.1f%% of frames against the "
+    "control's %.1f%%: the ending is dead" % (f_hit, c_hit))
+assert f_peak > b_peak * 0.6, (
+    "the freeze peaks at %.1fpx against the body's %.1fpx: the slams are not "
+    "landing" % (f_peak, b_peak))
 
 print("_v54 ok — body %.1f%%/%.2fpx vs control %.1f%%/%.2fpx (no added "
-      "movement), freeze %.1f%%/%.2fpx carries the hits"
-      % (b_pct, b_med, c_pct, c_med, f_pct, f_med))
+      "movement), freeze hits hard in %.1f%% of frames vs %.1f%% and peaks "
+      "at %.0fpx"
+      % (b_pct, b_med, c_pct, c_med, f_hit, c_hit, f_peak))
