@@ -402,6 +402,11 @@ OUTRO_JAMET_SECONDS = float(os.environ.get("CLIPPER_OUTRO_JAMET_SECONDS", "5.0")
 # matters is that the freeze leaves recognisable video behind it, so the test is
 # on the BODY that survives, not on a multiple of the freeze.
 JAMET_BODY_MIN = float(os.environ.get("CLIPPER_JAMET_BODY_MIN", "4.0"))
+# How much of its own length a NON-extending ending must still have after being
+# snapped to the last word. The jamet freeze is exempt (it clones frames, so it
+# makes its own room); the melancholy ramp is not, and without this it was
+# snapped down to 0.08-0.35s of actual runtime.
+SNAP_MIN_ROOM = float(os.environ.get("CLIPPER_SNAP_MIN_ROOM", "0.75"))
 # Stinger shape. Pulses per second: 4 reads as rhythm, past about 6 it is a
 # strobe, which is unpleasant and an accessibility problem.
 OUTRO_RATE = float(os.environ.get("CLIPPER_OUTRO_RATE", "4"))
@@ -1334,13 +1339,14 @@ def _outro_start(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     elif dur < span * 3:
         return None
     if words:
-        snapped = _outro_snap(dur, words, clip_start, span)
+        snapped = _outro_snap(dur, words, clip_start, span,
+                              extends=(kind == "jamet"))
         if snapped is not None:
             return snapped
     return max(0.0, dur - span)
 
 
-def _outro_snap(dur, words, clip_start, span):
+def _outro_snap(dur, words, clip_start, span, extends=False):
     """Move the ending to the first pause after the clip's OWN speech stops.
 
     "nanti selesai dari si gibran suruh bawa kotak makan, langsung jedag jedug"
@@ -1385,6 +1391,24 @@ def _outro_snap(dur, words, clip_start, span):
     if last >= dur - 0.01:
         # Speech runs to the final frame — there is no "after" to freeze on.
         return None
+    # Only an ending that EXTENDS the clip can start this late.
+    #
+    # The jamet freeze does: `loop` clones the frame at `start` and the trim
+    # keeps the clones, so a snap 0.35s before the cut still yields a full 5s
+    # freeze. A melancholy outro has no such mechanism — its 8s desaturation
+    # ramp, vignette, slow-mo and fade all have to fit INSIDE the remaining
+    # footage. Snapping it to the last word left 0.08-0.35s of room on every
+    # duration measured (24s, 28.55s, 35s, 45s), so the sombre ending was
+    # effectively absent: SATAVG held at ~11 from the first second to the last
+    # instead of ramping to grey, and the dip to black was scheduled past the
+    # end of the stream (fade st=46.93 on a 45.03s file).
+    #
+    # So the room check is conditional on `extends`, not a shared threshold:
+    # tightening it for melancholy would have un-snapped the jamet freeze and
+    # put it back on top of the payoff line, which is what the snap exists to
+    # prevent.
+    if not extends and dur - last < span * SNAP_MIN_ROOM:
+        return None
     return last
 
 
@@ -1397,6 +1421,12 @@ def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     fade, the music bed — has to agree with that or the extra seconds come out
     silent.
 
+    The melancholy outro extends the clip too, by a different mechanism: its
+    `setpts` slow-mo stretches the last `span` seconds to span/OUTRO_SLOWMO.
+    Measured in ffmpeg on a 24.0s source, the delivered stream is 27.40s and
+    the dip to black at st=25.93 lands INSIDE it — which is why a fade
+    scheduled past `dur` is correct here and not the bug it looks like.
+
     Read out of the filter list the renderer actually uses, not recomputed, so
     the two cannot drift apart.
     """
@@ -1408,6 +1438,17 @@ def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
                 return max(dur, float(f.split("=")[-1]))
             except ValueError:
                 break
+    # No trim: a slow-mo tail, if any, sets the length.
+    for f in filters:
+        if not f.startswith("setpts="):
+            continue
+        m = re.search(r"lt\(T,([0-9.]+)\)", f)
+        if not m:
+            continue
+        at = float(m.group(1))
+        if 0 < OUTRO_SLOWMO < 1 and at < dur:
+            return max(dur, at + (dur - at) / OUTRO_SLOWMO)
+        break
     return dur
 
 
@@ -1438,8 +1479,14 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     start = max(0.0, dur - span)
     # Snap the ending to where speech actually stops, so the freeze lands AFTER
     # the payoff line rather than `span` seconds before the clip runs out.
+    #
+    # `span = dur - start` is why this mattered so much for melancholy: the
+    # snap did not just move the ending, it SHRANK it. An 8s ramp snapped to
+    # 44.92s on a 45.0s clip became a 0.08s ramp, and every expression built
+    # below divides by that span.
     if words:
-        snapped = _outro_snap(dur, words, clip_start, span)
+        snapped = _outro_snap(dur, words, clip_start, span,
+                              extends=(kind == "jamet"))
         if snapped is not None:
             start = snapped
             span = dur - start
