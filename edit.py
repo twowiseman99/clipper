@@ -528,6 +528,12 @@ PAN_STEP = 0.5        # seconds between face samples
 PAN_DEADZONE = 0.18   # face may drift this fraction of the window before moving
 PAN_HOLD = 2.0        # seconds off-centre before the camera commits to a move
 PAN_SLIDE = 2.0       # seconds a reframe takes, so it reads as a pan not a cut
+# Minimum QUIET time between the end of one slide and the start of the next.
+# Without it the only rule was "do not start mid-slide", so a 45s sombre clip
+# got moves at 24-26s, 33-35s and 36-38s — a 1.0s gap between the last two,
+# which reads as the camera never settling. Measured against a static window on
+# the same footage: 4.68 hard throws/s static, 8.43/s with that pan set.
+PAN_GAP = float(os.environ.get("CLIPPER_PAN_GAP", "6.0"))
 # 2.0/2.0, not 0.6/0.6. The pan is FRAMING, not an effect, and at 0.6s it read
 # as one: "baru nonton detik awal aja ud najis gw liat editan editan di detik
 # awal, goyang" gajelas". Measured with vidstabdetect on the delivered file, the
@@ -2267,7 +2273,7 @@ def _sample_pan_faces(video_path, start, end, step=PAN_STEP, anchor=None):
         cap.release()
 
 
-def _pan_keys(pts, win_frac):
+def _pan_keys(pts, win_frac, pan_until=None):
     """[(t, centre)] keyframes for the crop window, as source-width fractions.
 
     Turns raw per-sample face positions into camera moves. A face drifting
@@ -2297,7 +2303,16 @@ def _pan_keys(pts, win_frac):
         pending_to = want             # track the latest reading while waiting
         if t - pending_since < PAN_HOLD:
             continue
-        if t <= keys[-1][0]:          # still mid-slide; let it land first
+        # PAN_GAP, not just "not mid-slide". `t <= keys[-1][0]` only stopped a
+        # move from starting before the previous one LANDED, so two reframes
+        # could sit 1.0s apart and the camera never reads as settled.
+        if t < keys[-1][0] + PAN_GAP:
+            continue
+        # A reframe is framing for the SPEECH. Once the ending has begun there
+        # is no speech left to follow, and on the sombre preset a slide ran
+        # from 36-38s straight into an outro that starts at 37.0s — the ramp
+        # and the pan fighting over the same seconds.
+        if pan_until is not None and t + PAN_SLIDE > pan_until:
             continue
         keys.append((t, cur))
         cur = pending_to
@@ -2322,7 +2337,7 @@ def _pan_expr(keys):
     return expr
 
 
-def _pan_cover(video_path, start, end):
+def _pan_cover(video_path, start, end, pan_until=None):
     """A 'cover' filter whose crop window follows the speaker, or None.
 
     Same scale and same 9:16 crop size as the static cover — only the window's
@@ -2348,7 +2363,7 @@ def _pan_cover(video_path, start, end):
     pts = _sample_pan_faces(video_path, start, end)
     if not pts:
         return None
-    keys = _pan_keys(pts, win_frac)
+    keys = _pan_keys(pts, win_frac, pan_until=pan_until)
     if not keys:
         return None
     x = _pan_expr(keys)
@@ -2398,7 +2413,7 @@ def _static_window_x(pts, win_frac):
     return f"'iw*{best[1]:.4f}-ow/2'"
 
 
-def _pillar_pan_x(video_path, start, end, card_h):
+def _pillar_pan_x(video_path, start, end, card_h, pan_until=None):
     """x expression for the pillar card's crop window.
 
     Scaling a 16:9 source to 75% of a 1920 canvas makes it 2560 wide, so the
@@ -2446,7 +2461,7 @@ def _pillar_pan_x(video_path, start, end, card_h):
         return centre
     if not PAN:
         return _static_window_x(pts, win_frac)
-    keys = _pan_keys(pts, win_frac)
+    keys = _pan_keys(pts, win_frac, pan_until=pan_until)
     if not keys:
         return centre
     return f"'iw*({_pan_expr(keys)})-ow/2'"
@@ -2736,7 +2751,12 @@ def render_clip(video_path, start, end, words, out_path, *,
             # available, exactly like `cover` does, instead of keeping the
             # middle of the frame and hoping the subject is in it.
             card_h = int(CANVAS_H * PILLAR_COVER) // 2 * 2
-            pan_x = _pillar_pan_x(video_path, start, end, card_h)
+            # Where the ending begins, so the pan stops before it. On the
+            # sombre preset a slide ran 36-38s into an outro starting at 37.0s.
+            _p_end_at = _outro_start(dur, mood=mood, words=words,
+                                     clip_start=start)
+            pan_x = _pillar_pan_x(video_path, start, end, card_h,
+                                  pan_until=_p_end_at)
             fg = (f"scale=-2:{card_h},"
                   f"scale=w='max(iw,{CANVAS_W})':h=-2,"
                   f"crop={CANVAS_W}:{card_h}:x={pan_x}:y='(ih-oh)/2'")
@@ -2757,14 +2777,18 @@ def render_clip(video_path, start, end, words, out_path, *,
             # A panning crop window already keeps the speaker in shot, so the
             # push-in over it stays centred; tracking inside an already-tracked
             # window would just fight it.
-            cover_v = _pan_cover(video_path, start, end) if FACE_TRACK else None
-            # Same clamp as the pillar branch: the punch-in is an effect, and
-            # effects live in the closing window only. Passed explicitly into
-            # _zoompan, which otherwise rebuilds the unclamped list itself.
+            # Computed BEFORE the pan so the window can be told where the
+            # ending begins: a reframe is framing for the speech, and there is
+            # no speech left once the outro has started.
             _c_out_len = _outro_output_len(dur, mood=mood, words=words,
                                            clip_start=start)
             _c_end_at = _outro_start(dur, mood=mood, words=words,
                                      clip_start=start)
+            cover_v = _pan_cover(video_path, start, end,
+                                 pan_until=_c_end_at) if FACE_TRACK else None
+            # Same clamp as the pillar branch: the punch-in is an effect, and
+            # effects live in the closing window only. Passed explicitly into
+            # _zoompan, which otherwise rebuilds the unclamped list itself.
             punches = _after(_punch_times(words, start, dur),
                              _c_end_at, _c_out_len)
             zoom = None
