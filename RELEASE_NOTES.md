@@ -1,3 +1,68 @@
+## Hook from another video, judged after the crop
+
+Operator asked for the hook to come from a different video: find the Gibran
+scene, keep the mute rule.
+
+**Two things were missing.** There was no way to say which second of the
+opening footage to use — `--opening` took the file's first frames, and on a 220s
+ceremony reel those are a military officer and Megawati. Added
+`--opening-start`, and taught `job._fetch_one` to accept a local path, because a
+verified cut is a file and `classify_source` rejects a plain path.
+
+**One thing was wrong, and it shipped twice.** The subject check ran on the
+footage handed in, not on the footage the viewer gets. Gibran was in the file —
+5 of 5 sampled frames, the repo's own vision gate, confidence floor 0.62 —
+standing on the **left** of a 1280x720 frame. The renderer composes 1080x1920
+and keeps the middle. What survived the crop was the woman walking through the
+centre. Both wrong renders reported `warnings: []`.
+
+Every component verified in isolation:
+
+```
+intro_start reaches render_clip?   yes, 125.5
+-ss in the ffmpeg command?         yes, correctly before -i
+same options standalone?           4/4 GIBRAN
+input ffmpeg actually opened?      gibran_hook.mp4, 0.67 MB, correct
+```
+
+What found it was extracting the same timestamp from both files and looking at
+the two frames. When each part is right and the composite is wrong, the bug is
+in the composition.
+
+**Scene search, measured not guessed:**
+
+```
+10s windows, loose prompt   14 pass, all described as "Indonesian officials"
+7s windows, strict prompt   0 pass (the reel cuts between three people)
+0.5s samples, strict        hits cluster at 125.5-130.0s
+real 4.5s cut               4/6 — the tail had already become Megawati
+real 2.8s cut               6/6, confidence floor 0.62
+```
+
+A 0.5s grid is not a continuous range. The grid called 125.5-130.0 all hits;
+the real cut failed at +1.8s and +4.2s.
+
+**Delivered:** hook cut to 720x720 at 126.8s for 2.8s, **no audio stream at
+all** — the mute rule no longer depends on a flag staying set when there is
+nothing to mute. Verified by eye on the delivered file: 3/3 hook frames show
+Gibran, zero show Megawati. Freeze still exactly 150 frames (5.00s), 50
+exposure spikes inside it against 2 in the body, a/v drift 0.007s.
+
+`tests/_v59.py` asserts the cut is not landscape; the negative control is the
+1280x720 file that shipped wrong, which fails with the reason in the message.
+`tests/_v58.py` covers the new flag end to end and pins the mute guard for
+link-sourced openings. Suite **60 ok** (was 55).
+
+Still unexplained: with `-ss` inside the renderer the hook landed at
+start + hook_duration, not at start. Trimming the scene to its own file and
+passing it with start 0 sidesteps it, and hands over footage already checked
+rather than a seek to be trusted.
+
+Known-failing: `_v9`/`_v10`, historic — their `words.json` reference was
+deleted. Verified failing on clean HEAD via `git stash`.
+
+— Dalmislave
+
 1|## 6831dcb — the agency log, written for a person
 2|
 3|Operator, reading the first ledger that actually reached the channel: "enhance,
@@ -1998,216 +2063,3 @@ for identical output.
 - `censor.py` — masks profanity and anatomical terms with asterisks.
 - `bgm_add.py` — downloads background music tagged by mood; ducking is 0.8
   under the hook and 0.2 under speech, 0.6s fade.
-- Zoom cycles on a cosine (~12s) because a single slow push across 82s is not
-  visible.
-- `docs/9ROUTER.md` — tunnel and model-routing notes, no keys.
-- `segments.py` — the topical picker's exception is printed instead of
-  swallowed. A transient router error had been presenting as "no good segment".
-
-## Still broken / not done
-
-- **BGM library has one track** (`inspiring_giants_league.mp3`, tagged
-  `inspiring`). Clips with mood `emotional` fall back to it and the log says
-  so. Needs more tracks per mood.
-- **Whisper mishears Indonesian names and particles** — `seolah` → `sololah`,
-  `saudara` → `sudara`. Captions show the mistake. No correction list yet.
-- **Punch-in cuts and flash transitions are not implemented.** B-roll search
-  works but insertion into the timeline does not.
-- `trace_path` in the newly installed codebase index misses cross-module
-  callers (it reported 1 caller for `score_words`; grep finds 3, including
-  `job.py:317`). Use `search_code` instead.
-
----
-
-**v0.2.4 "camera that follows the speaker"** · branch `claude/code-clipper-review-v9e3im`
-1 commit · 5 files · `edit.py`: face-tracked camera (YuNet); `fetch.py`: SABR bypass
-
-_Dalmislave_
-
----
-
-## What this is
-
-The camera now follows the speaker's face instead of only pushing in centred.
-This release also commits the download fix that had been running uncommitted
-on the box.
-
-## Face-tracked camera
-
-When `CLIPPER_ZOOM` is on, the renderer detects faces with a YuNet model
-(`models/face_detection_yunet_2023mar.onnx`, bundled) on the cropped 9:16
-frame, once per second. The zoom centre follows the primary face (nearest the
-previous position, so a two-person shot tracks one speaker rather than hopping)
-along a piecewise-linear path, clamped so the crop never leaves the frame. No
-face detected, and the camera falls back to the centred push-in. Set
-`CLIPPER_FACE_TRACK=0` to disable.
-
-## Download fix, finally committed
-
-`fetch.py` had been running with an uncommitted patch: `player_client`
-`web_embedded` (supports cookies, bypasses the SABR streaming YouTube forces on
-the web client) and `remote_components ejs:github` (JS solver for the `n`/nsig
-parameter). That is what makes a flagged VPS download at 2160p instead of
-failing the bot-check; it is now in the tree.
-
-## Still broken
-
-No `cookies.txt` (YouTube capped at 360p and hits the bot-check without one),
-empty BGM folder (silent clips), no Clippo session or uploader tokens (full
-pipeline only).
-
----
-
-**v0.2.3 "motion and word-by-word captions"** · branch `claude/code-clipper-review-v9e3im`
-1 commit · 3 files · `edit.py` + `job.py`: Ken Burns push-in, karaoke default, .env fix
-
-_Dalmislave_
-
----
-
-## What this is
-
-Two render changes the operator asked for: captions that highlight the spoken
-word, and a slow camera push-in so a static talking-head shot moves.
-
-## Camera movement (Ken Burns push-in)
-
-`CLIPPER_ZOOM` (default 1.0 = off) pushes the frame in by that factor over the
-clip. It is a centred zoom on the full-frame ("cover") path only: a zoom on the
-fill/fit band would drag the band edge around. Captions are overlaid after the
-zoom, so they stay sharp while the picture moves. The zoompan filter got `fps=`
-pinned, otherwise zoompan's default 25 fps stretches the clip by a second and
-desyncs the audio; verified 5s in, 5s out.
-
-## Word-by-word captions
-
-`caption_style="karaoke"` was already implemented (white text, active word
-light blue `#87CEFA`) but not the default. The box now runs it via
-`CLIPPER_CAPTION_STYLE=karaoke`.
-
-## A latent bug fixed: .env was loaded too late
-
-`edit.py` (and `fetch.py`, `transcribe.py`) read `CLIPPER_*` at import time,
-but `.env` was only parsed when `metadata` imported `ai`, which happens after
-`edit` in `job.py`'s import order, so every `CLIPPER_*` override in `.env` was
-silently ignored. `job.py` now loads `.env` at the top, before any module
-imports.
-
-## Still broken
-
-Unchanged: no `cookies.txt` (360p), empty BGM folder (silent clips), no Clippo
-session or uploader tokens.
-
----
-
-**v0.2.2 "copy that represents the clip"** · branch `claude/code-clipper-review-v9e3im`
-1 commit · 2 files · `metadata.py`: viral-title craft + a real description
-
-_Dalmislave_
-
----
-
-## What this is
-
-Titles and descriptions were reading flat: a title could be the first sentence
-of the transcript, and a description could come back as nothing but `#Shorts`.
-Both are fixed.
-
-## Title craft
-
-The `metadata.py` prompt now asks the model to sell the specific moment, not
-the topic: open a curiosity gap, prefer a punchy mini-quote over a label, and
-stay true to what is actually said. Verified live: "Gaji Diakuin Kecil, Tapi
-Kok Mobilnya Ganti Mulu?" instead of a flat restatement.
-
-## Description must represent the clip
-
-The prompt now requires a 2-3 sentence summary of who or what the clip is and
-its key moment, before the hashtags. A fallback in `generate()` does the same
-when the router is unreachable: a description of only hashtags is rebuilt from
-the transcript, so `#Shorts` alone can never ship again.
-
-## Still broken
-
-Unchanged from v0.2.1: no `cookies.txt` (360p), empty BGM folder (silent
-clips), and no Clippo session or uploader tokens (full pipeline only).
-
----
-
-**v0.2.1 "9Router on-box"** · branch `claude/code-clipper-review-v9e3im`
-1 commit · 2 files, `ai.py` +1 line · AI copy path now works against 9Router
-running on the box itself.
-
-_Dalmislave_
-
----
-
-## What this is
-
-9Router now runs locally on the box (`localhost:20128`) with Dalmi's key, and
-the copy path works end to end. Two things changed to make that true.
-
-## Fix: `ai.py` requests a non-streamed reply
-
-9Router streams by default (SSE `data:` chunks), and `ai.py`'s `raw_decode`
-could not parse that, so every copy call raised `JSONDecodeError`. The client
-now sends `"stream": false` and gets a single `chat.completion` object back.
-`ai.py` self-check passes (`chat_json OK`).
-
-## Config: model pinned to one this router serves
-
-The old default `ds/deepseek-v4-pro` is not in this 9Router's catalogue
-(26 models, all `cc/*` and `ag/*`). `NINEROUTER_MODEL` is now
-`cc/claude-sonnet-5`; cheaper swaps are `cc/claude-haiku-4-5-20251001` or
-`ag/gemini-3-flash-low`.
-
-## Still broken
-
-- No `cookies.txt`: YouTube capped at 360p, and flagged-VPS requests hit the
-  bot-check.
-- Empty BGM folder (`bgm/`): clips render silent.
-- Clippo session and uploader tokens absent: the full pipeline cannot submit
-  or upload. The clip path is unaffected.
-
----
-
-**v0.2 "reference style"** · branch `claude/code-clipper-review-v9e3im`
-15 commits, 12 files, +1343 / −122 · one new module (`bgm.py`), one new manifest
-(`requirements.txt`)
-
-_Dalmislave_
-
----
-
-## What this release is
-
-v0.1 proved the spine: crawl Clippo → download → transcribe → pick a segment →
-render → upload to YouTube. It looked nothing like the clips it was imitating.
-
-v0.2 is about the picture. The renderer was rebuilt against two reference clips
-until the output matches their format, and the parts of the pipeline that
-decide *what* gets rendered — how long a clip may be, where it will be posted,
-which music sits under it — stopped being hardcoded.
-
-Nothing here changes how tasks are discovered or uploaded.
-
----
-
-## Renderer
-
-**The footage fills the frame.** `frame_mode="cover"` (new default) crops the
-source to 9:16 and uses it as the whole canvas — no band, no blurred fill. The
-earlier band was an artifact of feeding it landscape crops. `fill` (a 40% band
-over a blurred copy) and `fit` (whole frame letterboxed) remain for landscape
-sources, where covering means a hard zoom.
-
-**Phrase captions.** Whole phrases in one colour instead of a per-word
-highlight: gold with a heavy black stroke, centred, two lines maximum, with the
-punchline tinted magenta. Phrases break where the speaker pauses; when one runs
-past six words it is cut at the clearest pause inside the window and continued
-as the next caption, never truncated. The per-word karaoke style is still there
-behind `caption_style="karaoke"`.
-
-Side effect worth knowing: this is roughly one overlay PNG per phrase instead
-of one per word. A 60-second clip drops from ~150 ffmpeg inputs to ~25.
-
