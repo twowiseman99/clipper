@@ -2576,6 +2576,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 caption_style=CAPTION_STYLE, accent_words=(),
                 frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE,
                 hook_style=HOOK_STYLE, intro=None, intro_seconds=None,
+                intro_start=0.0,
                 inserts=(), mood=None):
     """Render one vertical clip [start, end) with burned-in captions.
 
@@ -2682,6 +2683,13 @@ def render_clip(video_path, start, end, words, out_path, *,
         if intro:
             # loop a short b-roll rather than ending the intro early
             intro_idx = 1
+            # -ss BEFORE -i so the seek is applied to the input, and the hook
+            # can start at a chosen moment instead of the file's first frame.
+            # Operator: "di video ini cari scene gibran" — the opening footage
+            # is a 220s ceremony reel, and the subject is present for 4.5s of
+            # it, so "the start of the file" is the wrong 7 seconds.
+            if intro_start:
+                inputs += ["-ss", f"{float(intro_start):.3f}"]
             inputs += ["-stream_loop", "-1", "-t", f"{intro_dur}",
                        "-i", os.path.abspath(intro)]
         if bg_video:
@@ -3187,6 +3195,9 @@ def _preview_cli(argv):
                    help="**double asterisks** render bold")
     p.add_argument("--intro", default=None, help="b-roll played before the clip")
     p.add_argument("--intro-seconds", type=float, default=None)
+    p.add_argument("--intro-start", type=float, default=0.0,
+                   help="second in the opening file where the hook footage "
+                        "begins; 0 keeps the file's first frame")
     p.add_argument("--out", default="preview.mp4")
     p.add_argument("--words", default=None, help="transcript JSON, skips whisper")
     p.add_argument("--bgm", default=None, help="path to a music track")
@@ -3213,6 +3224,7 @@ def _preview_cli(argv):
     render_clip(a.footage, a.start, end, seg, a.out,
                 hook=a.hook, bgm=a.bgm or False,
                 intro=a.intro, intro_seconds=a.intro_seconds,
+                intro_start=a.intro_start,
                 frame_mode=a.frame_mode, caption_style=a.caption_style,
                 hook_style=a.hook_style)
     print(f"wrote {a.out} ({os.path.getsize(a.out) // 1024} KB)")

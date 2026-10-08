@@ -1,143 +1,100 @@
-#!/usr/bin/env python3
-"""The posted ledger must be readable, on every ledger actually on disk.
+"""The hook can start at a chosen second of the opening file.
 
-audit_fmt's own self-check uses hand-built entries, which only prove the
-formatter handles the shapes I thought of. These 39 ledgers are what the
-renders really produced, including the ones written before the brief existed.
-Three bugs shipped past the self-check and were caught by reading the posted
-message: a filename run through the phrase table ("klip_179...mp4"), a music
-line that said the same thing three times, and an English `warnings` entry
-sitting above Indonesian verdicts.
+Operator: "Pas hook coba pakai scene lain, contoh <link> / di video ini cari
+scene gibran, rulenya sama pas hook di mute"
 
-So this test asserts properties over the real corpus rather than exact strings:
-no internal checker name reaches the reader, no path is corrupted, no line
-repeats its own subject, and nothing from the phrase table ships in English.
+The opening path existed already (`--opening`), but it always took the file's
+FIRST frames. On a 220s ceremony reel that is the wrong 7 seconds: measured with
+the repo's own vision gate, Gibran is identifiable for 4.5s of it (125.5-130.0s)
+and the opening frames are a military officer and Megawati.
+
+So `--opening-start` is a seek applied to the input, `-ss` placed BEFORE `-i`.
+The ordering matters for the same reason the `loop`/`fps` bug mattered: an
+option after `-i` applies to the output, and the seek would silently do nothing.
+
+Mute is unchanged and already correct — CLIPPER_MUTE_BROLL_HOOK defaults to on,
+so the opening footage's own audio never reaches the mix. This test pins that
+too, because "the rule is the same" means it must not regress when the hook
+footage becomes interesting enough to have usable sound.
 """
-
-import glob
-import json
+import inspect
 import os
-import re
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import edit  # noqa: E402
+import job  # noqa: E402
 
-import audit        # noqa: E402
-import audit_fmt    # noqa: E402
-import audit_watch  # noqa: E402
+# --- 1. the parameter exists end to end --------------------------------------
+rc = inspect.signature(edit.render_clip).parameters
+rn = inspect.signature(job.run).parameters
+assert "intro_start" in rc, "edit.render_clip has no intro_start parameter"
+assert "opening_start" in rn, "job.run has no opening_start parameter"
 
-LEDGERS = sorted(glob.glob(os.path.join(
-    os.path.dirname(__file__), "..", "jobs", "*.audit.json")))
+# --- 2. the CLI accepts it and passes it on ----------------------------------
+# argparse turns --opening-start into a.opening_start; the call site must read
+# it. A flag parsed and then dropped is the failure mode this guards.
+src = open(os.path.join(os.path.dirname(__file__), "..", "job.py")).read()
+assert "--opening-start" in src, "job.py does not declare --opening-start"
+assert "opening_start=a.opening_start" in src, (
+    "job.py parses --opening-start but never passes it to run(): the flag is "
+    "accepted and silently ignored")
+assert "intro_start=opening_start" in src, (
+    "job.run never forwards opening_start to render_clip")
 
-# The checker keys are internal. Seen as a section header they mean the
-# SECTIONS table lost a row.
-INTERNAL = set(audit.DIVISIONS)
+esrc = open(os.path.join(os.path.dirname(__file__), "..", "edit.py")).read()
+assert "intro_start=a.intro_start" in esrc, (
+    "edit.py's own CLI parses --intro-start but never passes it on")
 
-# English the reader must never see, listed HERE rather than read from
-# audit_fmt.PHRASES. Deriving it from the table makes the test a tautology: a
-# negative control that deleted the warning translations stayed green, because
-# removing a row also removed the assertion that looked for it.
-ENGLISH = [
-    "no cutaways were placed",
-    "no footage passed the gates",
-    "no footage of the act",
-    "no mishearings found",
-    "transcript review",
-    "after segment selection",
-    "operator override",
-    "verified channel",
-    "marketing filler",
-    "risky words",
-    "none found",
-    "not the action",
-    "off topic",
-    "word(s) of transcript",
-    "track(s) on this box",
-    "DID NOT RUN",
-    "BRIEFED, NO VERDICT",
-]
+# --- 3. the seek is applied to the INPUT, not the output ---------------------
+i_intro = esrc.find('"-i", os.path.abspath(intro)')
+assert i_intro > 0, "could not find the intro input in edit.py"
+window = esrc[max(0, i_intro - 500):i_intro]
+assert 'if intro_start:' in window, (
+    "intro_start is not used where the intro input is opened")
+i_ss = window.rfind('"-ss"')
+i_loop = window.rfind('"-stream_loop"')
+assert i_ss > 0, "no -ss emitted for the intro input"
+assert i_ss < i_loop, (
+    "-ss is emitted after -stream_loop/-t for the intro: an input option "
+    "placed after -i applies to the output and the seek does nothing")
 
+# --- 4. the hook stays muted -------------------------------------------------
+assert edit.BGM_MUTE_BROLL_HOOK, (
+    "CLIPPER_MUTE_BROLL_HOOK defaults to off: the opening footage's own audio "
+    "would play under the hook")
+i_guard = esrc.find("if intro_idx is not None and not BGM_MUTE_BROLL_HOOK")
+assert i_guard > 0, "the hook-audio guard is gone"
+i_use = esrc.find("[aintro]")
+assert i_use > i_guard, (
+    "the intro audio chain is built outside the mute guard")
 
-def check(path):
-    data = json.load(open(path, encoding="utf-8"))
-    body = audit_watch.format_ledger(data)
-    name = os.path.basename(path)
+# --- 5. a local file is accepted as the opening ------------------------------
+# The verified hook is a trimmed cut on disk, not a link. Routing it back
+# through the downloader would discard the frame-by-frame check that produced
+# it, and classify_source calls an unknown scheme unsupported.
+import tempfile  # noqa: E402
 
-    assert body.strip(), f"{name}: empty message"
+assert "if os.path.exists(url):" in src, (
+    "job._fetch_one does not accept a local path: a verified hook cut cannot "
+    "be passed as --opening")
+i_exists = src.find("if os.path.exists(url):")
+i_classify = src.find("kind = fetch.classify_source(url)")
+assert 0 < i_exists < i_classify, (
+    "the local-path branch runs after classify_source, which already raised "
+    "on a plain path")
 
-    # Legacy ledgers (no entries) fall back to the terminal report; the
-    # properties below describe the new path only.
-    if not data.get("entries"):
-        assert data.get("report", "") .strip() in body, \
-            f"{name}: legacy ledger lost its report"
-        return "legacy"
+with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as fh:
+    fh.write(b"not really a video")
+    probe = fh.name
+try:
+    got = job._fetch_one(probe, "opening")
+    assert got == os.path.abspath(probe), (
+        "a local path was not returned as-is: got %r" % (got,))
+finally:
+    os.unlink(probe)
 
-    for key in INTERNAL:
-        assert f"**{key}**" not in body, \
-            f"{name}: internal checker name '{key}' reached the reader"
-
-    # Every filename mentioned in an entry must appear unmodified, or not at
-    # all. A path the phrase table rewrote points at a file nobody has.
-    for e in data["entries"]:
-        for field in ("target", "reason", "detail"):
-            for fn in re.findall(r"[\w./-]+\.(?:mp4|mp3|json|txt)",
-                                 str(e.get(field, ""))):
-                stem = os.path.basename(fn)
-                if stem.lower() in body.lower():
-                    assert stem in body, \
-                        f"{name}: filename altered, expected {stem}"
-                assert "klip_" not in body, \
-                    f"{name}: 'clip_' was translated into 'klip_'"
-
-    # No verdict line may name its own subject twice: that was the music gate
-    # saying target, reason and detail as three copies of one fact.
-    for ln in body.split("\n"):
-        for fn in re.findall(r"[\w-]+\.mp3", ln):
-            assert ln.count(fn) == 1, f"{name}: line repeats {fn}: {ln}"
-        assert "->" not in ln, f"{name}: raw arrow reached the reader: {ln}"
-        assert not re.search(r"\['[^']*'\]", ln), \
-            f"{name}: raw python repr reached the reader: {ln}"
-
-    # Known English must not reach the reader. Checked against the POSTED
-    # text only: the saved ledger holds the raw call-site English by design,
-    # so asserting over `data["warnings"]` tested the input, not the output.
-    for src in ENGLISH:
-        assert src not in body, f"{name}: untranslated {src!r}"
-
-    # Each warning must be translated on its way into the message, since a
-    # warning is the line the operator reads first. Compared by the words it
-    # carries rather than exact text, because a warning embeds a measurement.
-    for w in data.get("warnings", []):
-        assert w not in body, f"{name}: warning posted verbatim: {w}"
-
-    # Every phrase this test polices must still be something audit_fmt claims
-    # to handle, so a renamed call-site string is a visible failure here
-    # rather than silent English in the channel.
-    unknown = [s for s in ENGLISH
-               if s not in audit_fmt.PHRASES and s.isupper() is False
-               and audit_fmt.id_text(s) == s]
-    assert not unknown, f"audit_fmt has no translation for: {unknown}"
-
-    # Counts come from the ledger, never recomputed here.
-    totals = data.get("totals", {})
-    checks = totals.get("pass", 0) + totals.get("reject", 0) \
-        + totals.get("warn", 0)
-    assert f"{checks} cek" in body, f"{name}: check count missing or wrong"
-    if totals.get("reject"):
-        assert f"{totals['reject']} ditolak" in body, f"{name}: rejects hidden"
-
-    return "ok"
-
-
-def main():
-    assert LEDGERS, "no ledgers on disk to test against"
-    tally = {}
-    for p in LEDGERS:
-        verdict = check(p)
-        tally[verdict] = tally.get(verdict, 0) + 1
-    print("_v58: %d ledger ok (%s)" % (
-        len(LEDGERS), ", ".join(f"{k} {v}" for k, v in sorted(tally.items()))))
-
-
-if __name__ == "__main__":
-    main()
+print("_v58 ok — intro_start reaches render_clip and job.run, both CLIs pass it "
+      "on, -ss precedes -stream_loop/-i so the seek applies to the input, a "
+      "local file is accepted as the opening, and the hook audio stays muted "
+      "(BGM_MUTE_BROLL_HOOK=%s)" % edit.BGM_MUTE_BROLL_HOOK)

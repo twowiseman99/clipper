@@ -187,8 +187,18 @@ def catalogue():
 # One job: two links in, one clip out.
 
 def _fetch_one(url, tag):
-    """Download one link to its own folder. Returns the biggest video file."""
+    """Download one link to its own folder. Returns the biggest video file.
+
+    A path that already exists on disk is used as-is. The hook footage is often
+    a verified cut of a longer reel — the scene was located, judged frame by
+    frame and trimmed — and re-downloading the whole reel to seek inside it
+    throws that verification away.
+    """
     import fetch
+
+    if os.path.exists(url):
+        _log(f"[{tag}] local file -> {os.path.basename(url)}")
+        return os.path.abspath(url)
 
     kind = fetch.classify_source(url)
     if kind not in fetch.ROUTES:
@@ -808,7 +818,8 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
         return []
 
 
-def run(content_url, opening_url=None, hook=None, platform="youtube",
+def run(content_url, opening_url=None, opening_start=0.0, hook=None,
+        platform="youtube",
         start=None, seconds=None, mood=None, out=None, max_mb=0, context=None,
         copy_style=None, snap_end=False, **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
@@ -1069,7 +1080,8 @@ def run(content_url, opening_url=None, hook=None, platform="youtube",
     edit.render_clip(content, seg_start, seg_end, seg_words, out,
                      hook=meta["hook"], bgm=track["path"] if track else False,
                      accent_words=meta.get("punchline_words") or (),
-                     intro=opening, inserts=inserts,
+                     intro=opening, intro_start=opening_start or 0.0,
+                     inserts=inserts,
                      mood=(track or {}).get("mood") or meta.get("mood"),
                      **style)
 
@@ -1205,6 +1217,11 @@ def main(argv=None):
                    help="print the catalogue of styles and music, then exit")
     p.add_argument("--content", help="link to the video the clip is cut from")
     p.add_argument("--opening", help="link to the b-roll shown first (optional)")
+    p.add_argument("--opening-start", type=float, default=0.0,
+                   help="second in the opening video where the hook footage "
+                        "begins. The default of 0 takes the file's first "
+                        "frames, which on a long reel is rarely the scene "
+                        "asked for")
     p.add_argument("--hook", help="hook text; **bold** with double asterisks. "
                                   "Without this and without --opening the clip "
                                   "gets no hook at all")
@@ -1297,7 +1314,8 @@ def main(argv=None):
         _edit.FLASH = True
     try:
         with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
-            res = run(a.content, a.opening, hook=a.hook, platform=a.platform,
+            res = run(a.content, a.opening, opening_start=a.opening_start,
+                      hook=a.hook, platform=a.platform,
                       start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
                       snap_end=a.end_at_sentence,
                       max_mb=a.max_mb, context=a.context,
