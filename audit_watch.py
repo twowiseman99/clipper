@@ -23,6 +23,9 @@ import sys
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import audit_fmt  # noqa: E402  (path set above so cron can run from anywhere)
+
 JOBS = pathlib.Path(os.environ.get("CLIPPER_JOBS", "/home/ubuntu/clipper/jobs"))
 STATE = pathlib.Path(os.environ.get(
     "AUDIT_WATCH_STATE", "/home/ubuntu/.hermes/audit-watch/state.json"))
@@ -85,27 +88,21 @@ def chunk(text, limit=DISCORD_LIMIT):
 
 
 def format_ledger(data):
-    """The message body: what was made, then who checked what."""
-    totals = data.get("totals", {})
-    head = [
-        f"**{data.get('title') or os.path.basename(data.get('clip', ''))}**",
-        f"`{totals.get('pass', 0)} pass · {totals.get('reject', 0)} reject"
-        + (f" · {totals.get('warn', 0)} warn`" if totals.get("warn")
-           else "`"),
-    ]
-    meta = []
-    if data.get("mood"):
-        meta.append(f"mood `{data['mood']}`")
-    if data.get("music"):
-        meta.append(f"musik `{data['music']}`")
-    if data.get("duration_sec"):
-        meta.append(f"{data['duration_sec']:.0f}s")
-    if meta:
-        head.append(" · ".join(meta))
-    for w in data.get("warnings", []):
-        head.append(f"⚠️ {w}")
-    report = data.get("report", "").strip()
-    return "\n".join(head) + "\n```\n" + report + "\n```"
+    """The message body.
+
+    Built from `entries` by audit_fmt rather than from the saved `report`
+    string. The report is the terminal rendering: fixed-width columns and the
+    checkers' internal names, which arrives in Discord as a block to decode.
+    The entries are the same facts without the formatting, so the chat message
+    can be written for a reader while still saying only what the gates said.
+    """
+    if data.get("entries"):
+        return audit_fmt.format_ledger(
+            data, checkers=tuple(audit_fmt.ORDER))
+    # A ledger saved before entries were recorded still has its report text.
+    # Shipping that beats shipping an empty message.
+    title = data.get("title") or os.path.basename(data.get("clip", ""))
+    return f"🎬 **{title}**\n```\n{data.get('report', '').strip()}\n```"
 
 
 def post(webhook, text):
@@ -161,14 +158,27 @@ def _selftest():
     # this whole ledger exists to prevent.
     body = format_ledger({
         "title": "T", "clip": "/x/c.mp4",
-        "totals": {"pass": 3, "reject": 1, "warn": 1},
+        "totals": {"pass": 3, "reject": 1, "warn": 0},
         "mood": "hype", "music": "m.mp3", "duration_sec": 22.0,
         "warnings": ["outro jamet: clip too short"],
-        "report": "ENGINEERING  edit  DID NOT RUN",
+        "entries": [
+            {"checker": "edit", "target": "outro", "verdict": "pass",
+             "reason": "jamet", "detail": "last 5s"},
+            {"checker": "footage", "target": "abc @40s",
+             "verdict": "reject", "reason": "not the action", "detail": ""},
+        ],
+        "report": "MARKETING  edit  1 pass",
     })
     assert "outro jamet" in body, "warning not shown"
-    assert "1 reject" in body and "1 warn" in body, "totals missing"
-    assert "DID NOT RUN" in body, "report body missing"
+    assert "1 ditolak" in body, "totals missing"
+    assert "Editing" in body and "Frame b-roll" in body, "sections missing"
+    # The terminal report is not what gets posted; the entries are.
+    assert "MARKETING  edit" not in body, "posted the terminal rendering"
+
+    # A ledger saved before entries existed still produces a message rather
+    # than an empty one.
+    old = format_ledger({"title": "T", "report": "legacy text"})
+    assert "legacy text" in old, "legacy ledger lost its report"
     print("audit_watch: self-check ok")
 
 

@@ -1,4 +1,126 @@
-## fc920d2 — the camera settles, and stops before the ending
+1|## 6831dcb — the agency log, written for a person
+2|
+3|Operator, reading the first ledger that actually reached the channel: "enhance,
+4|pake bahasa yg lebih manusiawi, lebih enak diliat".
+5|
+6|The log was being delivered. It was just unreadable.
+7|
+8|### What was wrong
+9|
+10|`audit.py` renders the ledger for a terminal: six fixed-width columns, the
+11|checkers' internal keys (`sourcing`, `footage`, `edit`), and reasons written in
+12|English at each call site. `audit_watch.py` was posting that exact text inside a
+13|Discord code fence, so the operator got a monospace block to decode, with the
+14|column layout wrapping on a phone.
+15|
+16|The internal names are the worse half. Nobody outside this repo knows that
+17|`footage` means per-frame while `sourcing` means per-video, or that `edit` holds
+18|cutaway placement and the outro.
+19|
+20|### What changed
+21|
+22|New module `audit_fmt.py`, presentation only. It builds the message from the
+23|ledger's `entries` instead of the saved `report` string, so the facts are the
+24|gates' own and the formatting is written for a reader:
+25|
+26|```
+27|🎬 **Gibran Minta Maaf ke Ibu Korban MBG, Lalu Dia Titip Satu Hal Ini**
+28|32 detik · mood emotional · 6 cek · lolos semua
+29|
+30|**Transkrip** · Indonesian Transcript Linguist
+31|↳ dikasih: 72 kata transkrip, sesudah segmen dipilih
+32|✅ review transkrip — ga ada salah dengar
+33|
+34|**Editing** · Short-Video Editing Coach
+35|↳ dikasih: outro = 'jamet', klip 31,8s, butuh 15s buat 5s ending
+36|✅ beku — floor 0,39, beku terus sampai 5s terakhir
+37|
+38|⏸️ ga jalan di render ini: Sumber b-roll, Frame b-roll
+39|```
+40|
+41|Checker keys became the thing that was checked (`footage` -> "Frame b-roll").
+42|The brief prints as a sentence saying what we handed the agent. Gates that never
+43|ran collapse into one line at the bottom instead of six empty sections, which is
+44|where they were burying the gates that did run.
+45|
+46|It adds no verdict and no number. Every line traces to an entry `audit.py`
+47|recorded, and the counts in the headline are the ledger's own.
+48|
+49|### The phrase table is a lookup, not a translator
+50|
+51|Reasons are translated through a table with a passthrough fallback. Anything not
+52|in the table ships in English, on purpose: a machine-translated reason would
+53|read fluently and could claim something the gate never decided, and a ledger
+54|that misreports a verdict is worse than one with an English word in it.
+55|
+56|Warnings are the exception that needed code. "motion floor 3.05 in the last 5s"
+57|is a different string every render, so `id_warning()` rewrites the sentence
+58|around the measurement with the number untouched.
+59|
+60|### Three bugs the self-check missed and reading the output caught
+61|
+62|The hand-built fixtures in `audit_fmt._selftest` only cover shapes I thought of.
+63|All three of these were found by posting the real ledgers and reading them:
+64|
+65|1. `clip_1791434587_122.mp4` arrived as `klip_1791434587_122.mp4`. The word
+66|   "clip" is in the phrase table, so the translator rewrote a real path into one
+67|   that points at nothing. Filenames and `youtube_id @ 95s` are now masked out
+68|   before translation and restored after.
+69|2. The music line said the same thing three times: target `a.mp3`, reason
+70|   `mood ['hype']`, detail `mood hype -> a.mp3`. Cheap in a terminal, noise in a
+71|   message. A detail that only restates the target or reason is dropped, and the
+72|   raw Python repr `['hype']` is unwrapped.
+73|3. `warnings` shipped in English above Indonesian verdicts, which is the line
+74|   the operator reads first.
+75|
+76|### Test notes
+77|
+78|`tests/_v58.py` asserts properties over all 40 ledgers on disk rather than exact
+79|strings: no internal checker name reaches the reader, no path is corrupted, no
+80|line repeats its own subject, no known English survives, and the counts match
+81|the ledger's `totals`.
+82|
+83|Its first version was a tautology. It read the forbidden English out of
+84|`audit_fmt.PHRASES`, so the negative control that deleted the warning
+85|translations stayed green — removing a table row also removed the assertion
+86|looking for it. The English list is now written in the test file, with a second
+87|assertion that `audit_fmt` still claims to handle every phrase in it, so a
+88|renamed call-site string fails loudly instead of leaking English into the
+89|channel.
+90|
+91|Negative controls, each reverted after:
+92|
+93|```
+94|disable filename masking   -> FAIL  'clip_' was translated into 'klip_'
+95|disable detail trimming    -> FAIL  line repeats hype_dj_nansuya...mp3
+96|post warnings verbatim     -> FAIL  warning posted verbatim: outro jamet: motion floor 2.53...
+97|restore                    -> ok    40 ledger ok
+98|```
+99|
+100|`audit`, `audit_fmt` and `audit_watch` were missing from `tests/run_all.sh`
+101|while all three had self-checks, so the ledger's own tests only ran when someone
+102|remembered to invoke them by hand. Added.
+103|
+104|### Known failing, not caused by this change
+105|
+106|`tests/_v9` fails on clean HEAD with the working tree stashed:
+107|
+108|```
+109|FileNotFoundError: media/uf9833efdc72b/PPOKdwOCMLA.words.json
+110|```
+111|
+112|Its fixture transcript was deleted. Unrelated to this work and still red.
+113|
+114|### Cron
+115|
+116|Job `agency-agent-log` (`6831dcb85dee`) runs `audit_watch.sh` every 15 minutes
+117|into #agency-agent, and stays silent when no render has finished. The 39
+118|ledgers that predate it are marked as sent, so the channel gets new renders
+119|rather than the backlog.
+120|
+121|— Dalmislave
+122|
+123|## fc920d2 — the camera settles, and stops before the ending
 
 Operator, on the sombre preset: "Tpi kok hooknya hilang dan videonya masi goyang
 ya di preset sedih?"

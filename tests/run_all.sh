@@ -15,10 +15,17 @@ PY=.venv/bin/python
 fail=0
 
 echo "== module self-checks =="
-for m in segments edit broll_place broll censor language glossary metadata bgm; do
+# audit/audit_fmt/audit_watch were missing from this list while all three had
+# self-checks, so the ledger's own tests only ran when someone remembered to
+# invoke them by hand.
+for m in segments edit broll_place broll censor language glossary metadata bgm \
+         audit audit_fmt; do
     printf '%-14s ' "$m"
     if timeout 240 $PY "$m.py" >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi
 done
+
+printf '%-14s ' "audit_watch"
+if $PY audit_watch.py --selftest >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi
 
 printf '%-14s ' "job --selftest"
 if $PY job.py --selftest >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi
