@@ -1,3 +1,68 @@
+## Stop on the right sentence, and find the knob that actually shakes
+
+Operator: "stopnya kejauhan, harusnya sebab itu yang dimasak ibu dirumah
+lansung stop pause freeze, jedag jedug nya lebih rusuh".
+
+**Stop point.** The phrase ends at **150.20s** in `words.json` ("...dimasak
+ibu"). `--end-at-sentence` was carrying on into "tapi dua perempuan rekomendasi
+apa itu?" — the part that felt too far. Replaced with `--seconds 28.2` from
+122.0, which lands exactly on the phrase end. Clip is now 31.00s, down from
+39.27s.
+
+**The rowdiness knob was not where it looked.** Swept the four obvious
+constants first and they barely moved the needle:
+
+```
+setelan       BEKU rata  puncak
+baseline          12.77   39.74
+SLAM_PX 52        13.15   39.72
+SHAKE_PX 46       12.80   39.27
+FLASH_BURST 5     13.42   43.91
+semua naik        13.61   44.69   (+6.6%)
+```
+
+`FLASH_BEAT_FRACTION` 0.12 -> 0.25 -> 0.40 changed **nothing** (12.77 every
+time), because the freeze shake is a continuous sine, not beat-picked. The real
+lever is `OUTRO_PUNCH_PER_BEAT` — hits per beat:
+
+```
+PUNCH_PER_BEAT 1    12.77   39.74   (default)
+PUNCH_PER_BEAT 2    14.31   47.02
+PUNCH_PER_BEAT 3    16.96   45.50   <- shipped, +33%
+```
+
+Shipped `CLIPPER_OUTRO_PUNCH_PER_BEAT=3 CLIPPER_OUTRO_SHAKE_PX=40
+CLIPPER_FLASH_BURST=5`. Delivered freeze measures **18.86 mean / 51.70 peak**
+against a body of 2.65 — 7.1x busier, up from 3.6x.
+
+**The instrument was broken and reported zeros.** Every shake figure in the
+first sweep read `0`. The `.trf` files were 90 KB of real data, but this
+ffmpeg's vidstabdetect writes local motion (`Frame 7 (List 8 [(LM 40 76 ...)])`)
+and the parser looked for `x=`. Zero matches, `if xs:` false, pre-initialised
+zeros returned as if measured. A failed measurement must not be able to look
+like a measured zero — return None and the reason.
+
+Replacement instrument: `tblend=all_mode=difference` then `signalstats` YAVG,
+validated against a control whose answer was already known (the jamet freeze
+must read far busier than the body — 9.67 vs 2.68 on the previous render)
+before being pointed at the question.
+
+**Verified on the delivered file:** hook frame 1.4s shows Gibran, no Megawati;
+freeze is exactly 150 frames (5.00s) via `loop=loop=150:size=1:start=696`; stop
+frame at 25.6s sits on "bawa bekal dari rumah"; hook RMS -23.4 dB against body
+-17.4 dB.
+
+One warning fired — "outro jamet: motion floor 2.12 in the last 5s — the freeze
+is not holding". It is a false alarm at this setting: the freeze IS holding
+(single frame looped 150x), and what the check reads as movement is the shake
+filter doing its job. Left in place rather than silenced, since the threshold
+belongs to a quieter default; worth revisiting if PUNCH_PER_BEAT=3 becomes the
+preset.
+
+`_v58`/`_v59` still green. No code changed — every knob is already an env var.
+
+— Dalmislave
+
 ## Hook from another video, judged after the crop
 
 Operator asked for the hook to come from a different video: find the Gibran
@@ -1998,68 +2063,3 @@ _Dalmislave_
 
 ---
 
-## What this is
-
-Project #1 of **Oden Tal Company** (`docs/ODEN_TAL_COMPANY.md`). This release
-adds a third caption style, derives word emphasis from the speaker's audio
-instead of guessing, sources b-roll from YouTube, and closes five security
-findings in the new code.
-
-## Editorial caption style
-
-`--caption-style editorial` draws serif captions with a per-line opaque plate
-(alpha 215) plus a 3px stroke, keeping the karaoke word highlight. Legibility
-needed all three layers: a shadow alone vanished over bright footage.
-
-The enlarged word is a **line break**, not an emphasis marker, so it is now
-always the last word of the phrase. Two earlier attempts (any stressed word,
-then any stressed word in the back half) both scrambled reading order —
-`tadi saya inget sudara` rendered as `tadi saya sudara / INGET`. Emphasis is
-carried by caps and colour, which do not move words.
-
-## Emphasis from audio
-
-`emphasis.py` scores each word on loudness and per-syllable pace relative to
-its **neighbours** rather than the whole clip, so quiet passages can still
-carry stress. Stopwords are blocked and at most 40% of a phrase can be marked
-(`CLIPPER_EMPH_MAX_SHARE`). `CLIPPER_EMPH_THRESHOLD` tunes how many words
-qualify; the current default of 1.15 marks ~32% of words, which may be too
-many — it is a taste call, not a bug.
-
-A failed audio read scores everything 0.0 and the captions fall back to the
-model's punchline pick, so emphasis never blocks a render.
-
-## B-roll search
-
-`broll.py` finds cutaway footage **on YouTube for the clip's own subject** —
-nothing is generated. Queries are built from proper nouns (the speaker's name
-anchors hook footage) plus content words from the phrase being spoken. The
-source video is excluded, and results are filtered by duration.
-
-## Security findings closed
-
-Five issues in code written this cycle:
-
-- `emphasis.py` — ffmpeg had no `timeout`; a stalled decode would hang the
-  render. Now bounded by `CLIPPER_EMPH_TIMEOUT` (120s) with a fail-soft return.
-- `emphasis.py` — `sys` was never imported, so the error path itself would
-  raise. Only reachable on failure, which is when it matters.
-- `broll.py` — video ids arrive over the network and were interpolated into a
-  URL unchecked. Now matched against `[A-Za-z0-9_-]{11}`; durations are
-  coerced with a guard.
-- `broll.py` — search terms came from a transcript and could contain a colon,
-  which would change what `ytsearchN:` requests. Terms are scrubbed.
-- `edit.py` — `accent_words` comes from the model and was lowercased without a
-  type check; a non-string item would raise mid-render.
-
-## Memory
-
-`_pcm()` returned a list of Python floats — 47.8 MB for an 82s clip, scaling
-with length. Now an `array('h')` with scaling folded into the reducer: 5.8 MB
-for identical output.
-
-## Also in this release
-
-- `censor.py` — masks profanity and anatomical terms with asterisks.
-- `bgm_add.py` — downloads background music tagged by mood; ducking is 0.8
-  under the hook and 0.2 under speech, 0.6s fade.
