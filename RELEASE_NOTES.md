@@ -1,3 +1,53 @@
+## The stop point has a two-sided bound, and the search grid moved with it
+
+Operator: "harusnya stop di setelah bilang suruh anak bawa bekal ... langsung
+freeze jedag jedug ikutin beat". Two renders missed it in opposite directions,
+and a test that only checked "a freeze exists" passes on both.
+
+The freeze is measured back from the END of the clip, so `--seconds` controls
+where it lands:
+
+```
+--seconds 28.2   freeze at source 145.20s   cuts INTO the payoff line
+                 ("anaknya membawa kotak dari rumah ... yang dimasak ibu" runs
+                  to 149.9s, so it plays under a frozen frame, captions
+                  suppressed)
+--seconds 33.4   freeze at source 153.46s   runs PAST it into unrelated speech
+                 ("tapi dua perempuan rekomisasi apa itu?", 150.8-153.2s)
+--seconds 28.4   freeze at source 150.20s   lands in the 0.9s gap
+```
+
+`tests/_v63.py` asserts both bounds against the real transcript, with each
+failing value as its own negative control, and asserts the window is NARROW —
+only 2 of 8 tested values land correctly. A bound that accepts most inputs is
+not a bound.
+
+### The grid is relative to the freeze point, so moving the stop moved the grid
+
+With the stop fixed, the render then warned honestly: "no frame in the last 6s
+clearly shows the subject — kept the mechanical frame". That reads like absent
+footage. It was not: `freeze_pick.STEP` was 0.4s and the grid is anchored to the
+freeze point, so shifting the stop by 0.2s shifted every candidate. The scan
+tried 149.0 and 149.4 — and the Gibran frame already verified by eye is at
+**149.2**, which was never sampled.
+
+In moving crowd footage 0.2s is enough to become a different person, so STEP is
+now 0.2 by default (32 candidates instead of 16). The pick returned 149.20s and
+the warning went away.
+
+Worth keeping: when a model-backed gate reports "nothing qualified", check WHICH
+CANDIDATES it was allowed to see before touching thresholds or the prompt. Same
+diagnosis order as the b-roll query attribution — print the actual inputs first.
+A grid defined relative to a moving reference point is a silent sampling bug;
+the gate was never wrong, it just never got the frame.
+
+Delivered file: freeze window matches the chosen still at 0.344 median over 45
+sampled frames, clip body 0.826. Hook spectrum still emotional 0.947 / hype
+0.471. Last audible word "ikut" (glossary: ibu) at 149.94s, then the freeze.
+Suite 64 green; `_v9`/`_v10` unchanged, missing fixture on clean HEAD.
+
+Signed: Dalmislave
+
 ## The clash table that was never consulted
 
 The clip shipped with `hype_dj_nansuya_gang_jedag_jedug` under a man apologising

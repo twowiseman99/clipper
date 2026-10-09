@@ -24,7 +24,13 @@ import tempfile
 # Judge this many frames per second of search window. The freeze needs ONE
 # frame, so density beats breadth: a 1s grid called 149.0s a hit and the 0.2s
 # grid around it found the face was turned in 4 of the 5 neighbouring frames.
-STEP = float(os.environ.get("CLIPPER_FREEZE_STEP", "0.4"))
+# 0.4s melewatkan frame yang benar. Grid ini TERIKAT ke titik freeze, bukan ke
+# jam absolut, jadi menggeser stop point 0.2s menggeser seluruh grid: dengan
+# --seconds 28.4 kandidatnya jadi 149.0 dan 149.4, sementara frame Gibran yang
+# sudah diverifikasi ada di 149.2 — tidak pernah dicoba, dan gate melaporkan
+# "tidak ada frame yang jelas menampilkan subjek" seolah footagenya yang kosong.
+# Di kerumunan yang bergerak, 0.2s sudah cukup untuk berganti orang.
+STEP = float(os.environ.get("CLIPPER_FREEZE_STEP", "0.2"))
 # How far before the freeze point to look. Kept narrow on purpose: a still from
 # far away is a different shot, and cutting to it reads as a mistake rather
 # than an edit.
