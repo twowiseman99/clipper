@@ -820,7 +820,8 @@ def _gather_inserts(seg_words, seg_start, dur, context, source_path,
 
 def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         platform="youtube",
-        start=None, seconds=None, mood=None, out=None, max_mb=0, context=None,
+        start=None, seconds=None, mood=None, mood_from_preset=False,
+        out=None, max_mb=0, context=None,
         copy_style=None, snap_end=False, **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
@@ -1008,9 +1009,25 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                              style=copy_style)
     meta["hook"] = _hook_for(hook, opening, topic_hook, meta["hook"])
 
-    track, why = bgm.pick(mood or meta.get("mood"), key=f"job:{int(seg_start)}")
-    audit.briefed("sound", f"mood = {mood or meta.get('mood')!r}",
-                  "operator override" if mood else "read from transcript",
+    # A preset's mood must never silence the transcript. The clip itself knows
+    # whether it is grief or hype; the preset only knows which LOOK was asked
+    # for. So when the two disagree and the pair is a forbidden one, the
+    # transcript wins the MUSIC while the preset keeps the ending.
+    _mood = mood or meta.get("mood")
+    if mood_from_preset and meta.get("mood") and meta["mood"] != mood:
+        if bgm._clashes(mood, meta["mood"]):
+            warnings.append(
+                f"music mood: the clip-type preset asks for {mood!r} "
+                f"but the transcript reads {meta['mood']!r}, which clash — "
+                f"used {meta['mood']!r} for the music")
+            audit.warned("sound", "mood clash",
+                         f"preset {mood!r} vs transcript {meta['mood']!r}",
+                         f"used {meta['mood']!r}")
+            _mood = meta["mood"]
+    track, why = bgm.pick(_mood, key=f"job:{int(seg_start)}")
+    audit.briefed("sound", f"mood = {_mood!r}",
+                  "operator override" if (mood and not mood_from_preset)
+                  else "read from transcript",
                   f"{len(bgm.load_tracks())} track(s) on this box")
     if track:
         audit.passed("sound", track.get("file", "?"),
@@ -1354,6 +1371,7 @@ def main(argv=None):
     # wins over the preset, so --clip-type jamet --mood emotional is possible;
     # the preset is a default, not a cage.
     preset = CLIP_TYPES.get(a.clip_type or "", {})
+    mood_from_preset = False
     if preset:
         # edit.OUTRO is read at import time, so setting the environment here is
         # only reliable while edit is still unimported. Set the module constant
@@ -1363,7 +1381,16 @@ def main(argv=None):
         if os.environ.get("CLIPPER_OUTRO") in (None, "", "auto"):
             _edit.OUTRO = preset["outro"]
         if a.mood is None:
+            # The preset's mood is a DEFAULT, not an operator override. Filling
+            # a.mood here used to make it indistinguishable from `--mood hype`
+            # typed by hand, and `mood or meta["mood"]` downstream then let
+            # "jamet" beat a transcript that read `emotional` — so a clip of
+            # Gibran apologising to a poisoned child's mother shipped with a
+            # jedag-jedug anthem under it. bgm._CLASH already forbids
+            # emotional x hype; it was never consulted because the clashing
+            # mood arrived as a user override.
             a.mood = preset["mood"]
+            mood_from_preset = True
         if a.broll is None:
             a.broll = preset["broll"]
         if a.flash is None:
@@ -1382,7 +1409,8 @@ def main(argv=None):
         with _Lock(wait=a.wait if a.wait is not None else LOCK_WAIT):
             res = run(a.content, a.opening, opening_start=a.opening_start,
                       hook=a.hook, platform=a.platform,
-                      start=a.start, seconds=a.seconds, mood=a.mood, out=a.out,
+                      start=a.start, seconds=a.seconds, mood=a.mood,
+                      mood_from_preset=mood_from_preset, out=a.out,
                       snap_end=a.end_at_sentence,
                       max_mb=a.max_mb, context=a.context,
                       copy_style=a.copy_style, **style)

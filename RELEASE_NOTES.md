@@ -1,3 +1,55 @@
+## The clash table that was never consulted
+
+The clip shipped with `hype_dj_nansuya_gang_jedag_jedug` under a man apologising
+to the mother of a poisoned child. `mood: "emotional"` was printed in the same
+JSON result. `warnings: []`.
+
+`bgm._CLASH` has forbidden `emotional x hype` since the register work. It was
+never called with two different moods, because one of them had already been
+overwritten 200 lines upstream:
+
+```python
+preset = CLIP_TYPES.get(a.clip_type or "", {})
+if preset and a.mood is None:
+    a.mood = preset["mood"]              # jamet -> "hype"
+...
+track, why = bgm.pick(mood or meta.get("mood"), ...)   # preset wins the `or`
+```
+
+After the first assignment, a preset DEFAULT and a hand-typed `--mood hype` are
+the same value, so the `or` downstream reads "the operator asked for this" and
+the transcript never reaches `bgm.pick`. A guard can only fire if both opinions
+survive to the comparison — overwriting one destroys the disagreement the guard
+exists to detect. Same shape as `FLASH_BEAT_FRACTION` being unreachable because
+the call site hardcoded `fraction=1.0`.
+
+Fix: keep the provenance (`mood_from_preset`). When a preset mood disagrees with
+the transcript and the pair is in `_CLASH`, the transcript wins the MUSIC and
+the preset keeps the ENDING. Those answer different questions — the preset knows
+which look was asked for, the clip knows whether it is grief. A warning names
+both sides and which one was used.
+
+`tests/_v62.py` locks it, including a negative control that stubs the track list
+down to hype only and requires SILENCE rather than a clashing track, and an
+assert that `_outro_kind("emotional")` is still `"jamet"` with `OUTRO="jamet"` —
+mood and ending are exactly the two things that tempt you to read from one
+value.
+
+Measured on the delivered audio, not the log. Average spectrum of the hook
+window (music plays solo there; in the body, speech dominates the energy
+envelope and both renders correlate to the same speaking rhythm — that
+instrument cannot tell the tracks apart):
+
+```
+old render  -> hype 0.946   inspiring 0.782   emotional 0.489
+new render  -> emotional 0.947   inspiring 0.573   hype 0.471
+```
+
+Freeze frame unchanged: matches the gate's chosen still at 0.346. Suite 63
+green; `_v9`/`_v10` still fail on clean HEAD for a missing fixture.
+
+Signed: Dalmislave
+
 ## The frozen portrait: gate the content, and measure the file
 
 Two renders shipped a five second still of a bystander. The freeze timing was
