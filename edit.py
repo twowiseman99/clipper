@@ -1458,13 +1458,22 @@ def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     return dur
 
 
-def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
+def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
+                   freeze_frame_at=None):
     """(brightness_term, extra_filters) for the closing treatment.
 
     The brightness term joins the beat-flash expression in one `eq`; the extra
     filters are appended to the video chain. Both are "" / [] when the clip is
     too short to give the ending its own space — a treatment covering most of
     the clip is not an ending.
+
+    `freeze_frame_at` separates WHICH frame is frozen from WHEN the freeze
+    starts. They used to be the same number, because `loop` clones the frame
+    sitting at the freeze point. Nothing checked who was in it, so moving the
+    stop point to the end of a sentence also moved the still onto whoever
+    happened to be on camera there — a five second portrait of a bystander.
+    Clip-relative seconds, and the caller is responsible for having checked the
+    frame's contents; None keeps the old mechanical behaviour.
     """
     kind = _outro_kind(mood)
     span = float(seconds if seconds is not None else OUTRO_SECONDS)
@@ -1625,7 +1634,14 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0):
             # arithmetic was right and the frame RATE was wrong, which is why
             # the graph looked correct on inspection.
             f"fps={FPS}",
-            f"loop=loop={frames}:size=1:start={int(round(start * FPS))}",
+            # Which frame is cloned is NOT where the freeze starts. `start`
+            # below is the SOURCE frame; the clones are inserted into the
+            # stream at that point and the encoder's -t drops the real tail,
+            # so the still still occupies the end of the clip either way.
+            # Picking the frame by its contents is the caller's job
+            # (freeze_pick.pick); this just honours the choice.
+            f"loop=loop={frames}:size=1:start="
+            f"{int(round((start if freeze_frame_at is None else max(0.0, min(freeze_frame_at, dur))) * FPS))}",
             # loop INSERTS its clones, so the clip grows by freeze_secs and the
             # real tail is pushed after the still instead of being replaced by
             # it. Measured on the first attempt at this fix: the clip ran
@@ -2577,7 +2593,8 @@ def render_clip(video_path, start, end, words, out_path, *,
                 frame_mode=FRAME_MODE, caption_place=CAPTION_PLACE,
                 hook_style=HOOK_STYLE, intro=None, intro_seconds=None,
                 intro_start=0.0,
-                inserts=(), mood=None):
+                inserts=(), mood=None, freeze_at=None,
+                freeze_still=None):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -2838,7 +2855,8 @@ def render_clip(video_path, start, end, words, out_path, *,
             # across the supposed ramp, i.e. nothing happened.
             outro, outro_filters = _outro_filters(dur, mood=mood,
                                                   words=words,
-                                                  clip_start=start)
+                                                  clip_start=start,
+                                                  freeze_frame_at=freeze_at)
             # Same split as the pillar branch: the outro's ramp stays upstream of
             # the freeze loop, the flicker goes below it or the loop freezes the
             # flicker along with the picture (probed: 0 events above, 10 below).
@@ -2910,6 +2928,10 @@ def render_clip(video_path, start, end, words, out_path, *,
             p_flash = _flash_expr(
                 _burst_times(_window_beats(bgm, _end_at, _out_len, intro_dur))
                 or p_punches, _out_len)
+            # freeze_frame_at is intentionally NOT passed: moving loop's
+            # start= is what shortened the freeze to 1.0s. The chosen frame
+            # arrives as an overlay upstream instead, so loop keeps its own
+            # start and its own length.
             p_outro, p_filters = _outro_filters(dur, mood=mood,
                                                 words=words,
                                                 clip_start=start)
@@ -2958,11 +2980,42 @@ def render_clip(video_path, start, end, words, out_path, *,
                 slam = (f"pad=iw+{m * 2}:ih+{m * 2}:{m}:{m}:color=black,"
                         f"crop=w=iw-{m * 2}:h=ih-{m * 2}"
                         f":x='{m}+({sx or '0'})':y='{m}+({sy or '0'})'")
+            # `loop`'s `start=` is BOTH which frame gets cloned and where the
+            # freeze begins, so moving it to pick a better frame shortened the
+            # still: start=816 with trim=end=28.2s (frame 846) left 30 frames,
+            # a 1.0s freeze instead of 5.0s. The two cannot be separated
+            # through `loop`.
+            #
+            # So the chosen frame is composited OVER the footage from the
+            # freeze point onward, upstream of the loop. The loop then clones a
+            # frame that already shows the chosen still, keeps its own start
+            # (freeze length stays 5.0s), and the shake and flicker downstream
+            # still land on the held picture.
+            _p_src = "pbase"
             chains.append(f"[0:v]{cover},setsar=1"
                           + (f",{p_zoom}" if p_zoom else "")
                           + (f",eq=brightness='{p_outro_bright}':eval=frame"
                              if p_outro_bright else "")
-                          + "".join(f",{f}" for f in p_filters)
+                          + f"[{_p_src}]")
+            if freeze_still and os.path.exists(freeze_still):
+                _sp = os.path.abspath(freeze_still).replace("\\", "\\\\")
+                _sp = _sp.replace(":", "\\:").replace("'", "\\'")
+                chains.append(f"movie='{_sp}'[fzstill]")
+                # The overlay must already be ON at the frame `loop` clones.
+                # loop clones the frame AT the freeze point, and
+                # enable='gte(t,freeze)' is evaluated on a frame boundary there
+                # — measured: the clone came from the frame just before the
+                # switch, so the still never appeared and the render was
+                # byte-identical to one with no still at all (md5 fd1ad1a1
+                # twice). Arming it a few frames early costs nothing: those
+                # frames are inside the ending and get replaced by the clone.
+                _arm = max(0.0, _freeze_at - 0.2)
+                chains.append(
+                    f"[{_p_src}][fzstill]overlay=0:0:"
+                    f"enable='gte(t,{_arm:.3f})'[pbasef]")
+                _p_src = "pbasef"
+            chains.append(f"[{_p_src}]"
+                          + ",".join(p_filters)
                           # Brightness and slam both go AFTER the outro filters.
                           # Those end with the freeze loop, and anything placed
                           # upstream of it gets frozen along with the picture:

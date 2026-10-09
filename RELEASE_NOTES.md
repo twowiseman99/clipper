@@ -1,3 +1,81 @@
+## The frozen portrait: gate the content, and measure the file
+
+Two renders shipped a five second still of a bystander. The freeze timing was
+never wrong — it lands at the end of the speech, as asked. What was unguarded is
+WHICH frame gets cloned.
+
+**`freeze_pick.py`** picks it by content. It asks one question: rank the faces by
+how readable each is, and is the most readable one the subject? Being biggest or
+nearest the camera explicitly does not count. Negative controls: both frames
+that shipped wrong (source 145.2s, 145.6s) are rejected, with the reason naming
+the woman in the maroon shawl.
+
+Three question shapes were tried. Worth recording because two of them looked
+like footage problems:
+
+```
+"is X clearly in the foreground"   passed the WRONG frame (145.6s)
+"is there a more readable face"    0 of 108, 0 of 41, 0 of 14 — in crowd
+                                   footage a competitor ALWAYS exists, so the
+                                   veto could never pass
+"rank faces by readability"        3/3 calibration frames separated correctly
+```
+
+The counts from the broken shape are not evidence and were quoted twice before
+that was caught. Calibrate a rewritten gate question against frames whose answer
+you already confirmed by eye, before running it over a corpus.
+
+**The gate now judges composed pixels.** `_compose_filter()` rebuilds the pillar
+geometry from `edit.py`'s own constants, and the chosen still is handed to the
+renderer as a PNG (`render_still`) rather than as a timestamp. Source 149.2s
+passed the gate and still delivered a bystander on screen, because composition
+moves the window — the same failure as the hook that shipped as Megawati. Same
+pixels in both places, by construction.
+
+**`loop`'s `start=` cannot be repurposed.** It sets both the cloned frame and
+where the freeze begins, and `trim=end=` cuts at the body length: `start=816`
+with `trim=end=28.200` left 30 frames, a 1.0s freeze instead of 5.0s. The still
+is now composited upstream of the loop, which keeps its own start and its own
+length. One subtlety: `enable='gte(t,freeze)'` is off at the exact frame the loop
+clones, which produced a byte-identical render (md5 `fd1ad1a1` twice). The
+overlay is armed 0.2s early.
+
+**`tests/_v60.py` was rewritten because it passed through all of that.** It
+asserted `loop=loop=150` was still in the filter string — the number being
+tuned, while a different filter did the cutting. It now renders with real ffmpeg
+and measures the delivered file. Four instruments lied first:
+
+```
+md5 per frame, ffv1 lossless ....... 211 identical frames (truth)
+md5 per frame, libx264 crf20 .......  16  encoder re-codes identical pixels
+testsrc2 fixture ................... pattern repeats, manufactures twin frames
+mean-abs-diff, threshold guessed .... 300/300 "same" on a moving clip
+frame counter drawn in the corner ... discarded by the pillar crop; the test
+                                      clip was effectively static
+```
+
+Calibrated thresholds, both sides: identical frames through crf20 read 0.0-0.6,
+genuinely different frames read 8.29, so 3.0 sits in the gap.
+
+Verified on the delivered file, not on the log: the freeze window matches the
+chosen still at 0.34 while the clip body sits at 0.87 — a 2.5x separation, which
+is the positive control that makes the number mean something. 150 frames held,
+hook -23.0 dB against -16.8 dB in the body, stop landing after "dimasak ibu" at
+149.9s with "tapi dua perempuan" dropped. `warnings: []`.
+
+Test suite: 62 green. `_v9` and `_v10` still FAIL, and they fail identically on
+clean HEAD (verified by `git stash`): both load
+`media/uf9833efdc72b/PPOKdwOCMLA.words.json`, a fixture no longer on the box.
+Not caused by this work.
+
+`tests/_v53.py` needed a fix of its own. It located the chain by searching for
+the literal source text `for f in p_filters`, so refactoring that line to
+`",".join(p_filters)` made it report "pillar chain shape changed" on working
+code. It now matches the variable instead. A test that reads the source text of
+one phrasing fails on the phrasing, not on the behaviour.
+
+Signed: Dalmislave
+
 ## Postscript: why FLASH_BEAT_FRACTION read 12.77 three times
 
 The sweep that finished after the clip shipped confirmed the result and exposed

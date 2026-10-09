@@ -100,7 +100,12 @@ assert edit.FLASH_WINDOW_FRACTION > edit.FLASH_BEAT_FRACTION, (
 src = open(edit.__file__).read()
 chain = src[src.index("elif frame_mode == \"pillar\" and not split_screen"):]
 chain = chain[:chain.index("base_label}]")]
-i_loop = chain.find("for f in p_filters")
+# Find where the outro filters (ending with the freeze loop) are emitted.
+# Matching the literal comprehension "for f in p_filters" broke when the chain
+# was refactored to ",".join(p_filters) — the test read the SOURCE TEXT of one
+# phrasing rather than the thing it cares about, and reported "pillar chain
+# shape changed" on working code. Match the variable instead.
+i_loop = chain.find("p_filters")
 # Search for the flicker's own variable, not a substring of it: "p_bright"
 # also matches "p_outro_bright", which is emitted ABOVE the loop on purpose,
 # so the naive find() reported the wrong order on correct code.

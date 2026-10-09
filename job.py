@@ -1076,12 +1076,78 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
 
     out = out or os.path.join(
         OUT_DIR, f"clip_{int(time.time())}_{int(seg_start)}.mp4")
+
+    # WHICH frame gets frozen is decided by what is in it, not by where the
+    # clip stops. The jamet ending freezes at the end of the clip's own speech
+    # — correct, and what the operator asked for — but `loop` clones whatever
+    # frame sits there. Moving the stop point to the end of a sentence moved
+    # the still onto a bystander and shipped a five second portrait of a woman
+    # nobody can name.
+    #
+    # A veto has no fallback, so a failed pick is a WARNING plus the mechanical
+    # frame, never a silently wrong still.
+    freeze_at = None
+    freeze_still = None
+    if _kind == "jamet":
+        # The still is a PORTRAIT, so the gate needs a PERSON, not the clip
+        # topic. _footage_subject answers "where was this shot", which is the
+        # wrong question for "who is frozen on screen" — asked that way a
+        # bystander in the right place passes. The first proper noun shared by
+        # the context and the transcript is the person the clip is about.
+        import broll
+        _names = broll.repeated_names(
+            context or "", " ".join(str(w.get("word") or "")
+                                    for w in seg_words))
+        _names = _names or broll.proper_nouns(context or "")
+        _subject = _names[0] if _names else ""
+        _freeze_abs = edit._outro_start(
+            seg_end - seg_start, mood=(track or {}).get("mood")
+            or meta.get("mood"), words=seg_words, clip_start=seg_start)
+        if _subject and _freeze_abs is not None:
+            audit.briefed("freeze", "subject", _subject)
+            import freeze_pick
+            _picked = freeze_pick.pick(
+                content, seg_start + _freeze_abs, _subject,
+                audit=lambda k, m: audit.record("freeze", k, "info", m),
+                clip_end=seg_end)
+            if _picked is None:
+                warnings.append(
+                    "freeze frame: no frame in the last "
+                    f"{freeze_pick.LOOKBACK:.0f}s clearly shows the subject — "
+                    "kept the mechanical frame, the still may show a bystander")
+                audit.rejected("freeze", "pick", "no qualifying frame")
+            else:
+                freeze_at = max(0.0, _picked - seg_start)
+                # Hand the renderer the COMPOSED still, not a timestamp. The
+                # gate judged the 1080x1920 composition; passing a timestamp
+                # would let the renderer compose it again with a pan offset and
+                # deliver different pixels — exactly how source 149.2s became a
+                # bystander on screen. Same still, same bytes, both places.
+                freeze_still = os.path.join(
+                    os.path.dirname(out),
+                    os.path.basename(out).replace(".mp4", ".freeze.png"))
+                if not freeze_pick.render_still(content, _picked,
+                                                freeze_still):
+                    freeze_still = None
+                    warnings.append(
+                        "freeze frame: the chosen still could not be rendered "
+                        "— kept the mechanical frame")
+                audit.passed("freeze", "pick",
+                             f"source {_picked:.2f}s",
+                             f"clip {freeze_at:.2f}s")
+                _log(f"freeze frame picked at {_picked:.2f}s")
+        else:
+            warnings.append(
+                "freeze frame: no subject to check against — the frozen frame "
+                "was not verified")
+
     _log(f"rendering {seg_end - seg_start:.0f}s...")
     edit.render_clip(content, seg_start, seg_end, seg_words, out,
                      hook=meta["hook"], bgm=track["path"] if track else False,
                      accent_words=meta.get("punchline_words") or (),
                      intro=opening, intro_start=opening_start or 0.0,
-                     inserts=inserts,
+                     inserts=inserts, freeze_at=freeze_at,
+                     freeze_still=freeze_still,
                      mood=(track or {}).get("mood") or meta.get("mood"),
                      **style)
 
