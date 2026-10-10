@@ -445,6 +445,18 @@ OUTRO_GRAIN = float(os.environ.get("CLIPPER_OUTRO_GRAIN", "6"))
 # ending read as fading to nothing instead of holding. Confined to the final
 # ~1.2s it is a closing gesture rather than a slow drain, and it gives the clip
 # a hard end instead of cutting mid-frame on loop.
+# Seconds of portrait held AFTER the footage freeze, inside the same ending.
+# The operator's reference (UBycjaIlBZk) holds an official portrait full-frame
+# for ~2.8s before it ends. 0 disables the tail.
+OUTRO_PORTRAIT = float(os.environ.get("CLIPPER_OUTRO_PORTRAIT", "2.6"))
+# Beat grouping. The reference does NOT hit every onset: measured 9 hits in
+# 14.8s (0.61/s) against 42 onsets (0.303s apart), arriving as runs — 6.50,
+# then 9.90/10.05/10.20, then 13.60-14.30 — with gaps up to 3.40s between runs
+# and 0.15s inside them. Hitting every onset reads as even texture; saving up
+# and then landing a cluster is what makes it feel like a drop.
+# Onsets per cluster, and how many clusters to allow in the window.
+OUTRO_CLUSTER = int(os.environ.get("CLIPPER_OUTRO_CLUSTER", "4"))
+OUTRO_CLUSTERS = int(os.environ.get("CLIPPER_OUTRO_CLUSTERS", "3"))
 OUTRO_FADE = float(os.environ.get("CLIPPER_OUTRO_FADE", "1.2"))
 # How far before the final frame the fade finishes. The reviewer measured the
 # last frame at Y=21 — dark grey, not black — because a fade only reaches zero
@@ -1442,7 +1454,8 @@ def _outro_snap(dur, words, clip_start, span, extends=False):
     return last
 
 
-def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
+def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0,
+                      portrait=None):
     """How long the clip actually is after the ending is applied.
 
     The jamet freeze EXTENDS the clip: `loop` clones the frame at the cut and
@@ -1461,7 +1474,7 @@ def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
     the two cannot drift apart.
     """
     _b, filters = _outro_filters(dur, mood=mood, seconds=seconds, words=words,
-                                 clip_start=clip_start)
+                                 clip_start=clip_start, portrait=portrait)
     for f in filters:
         if f.startswith("trim=end="):
             try:
@@ -1483,7 +1496,8 @@ def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
 
 
 def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
-                   freeze_frame_at=None, beats=None, speech_end=None):
+                   freeze_frame_at=None, beats=None, speech_end=None,
+                   portrait=None):
     """(brightness_term, extra_filters) for the closing treatment.
 
     The brightness term joins the beat-flash expression in one `eq`; the extra
@@ -1600,6 +1614,16 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # overwriting speech.
         freeze_secs = max(OUTRO_FREEZE, _jamet_span(dur), dur - start) \
             if kind == "jamet" else max(OUTRO_FREEZE, dur - start)
+        # The portrait tail is part of the ENDING, not a clip pasted after it:
+        # "Outro di perpanjang, itu ibarat outro juga". `loop` simply clones
+        # more frames, so the ending runs
+        #   footage freeze + beat shake -> portrait -> dip to black
+        # and the dip lands LAST because _fade_st below is keyed to _out_len,
+        # which this lengthens. The portrait overlay is enabled over the tail
+        # window by the caller; here we only make room for it.
+        _portrait_tail = OUTRO_PORTRAIT if (kind == "jamet"
+                                            and portrait) else 0.0
+        freeze_secs += _portrait_tail
         frames = max(1, int(round(freeze_secs * FPS)))
         pad = OUTRO_SHAKE_PX
         # The shake runs ON the frozen frame, not after it. `loop` inserts
@@ -1633,7 +1657,12 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # OUTRO_FREEZE constant: with the constant it stopped at 30.80s and the
         # last 3s of the still sat motionless.
         end = start + freeze_secs
-        win = f"between(t,{shake_from:.3f},{end:.3f})"
+        # The shake stops where the PORTRAIT begins. The portrait is a held
+        # official photograph — throwing it around would make it read as footage
+        # and undo the reason for showing it. So the beat section owns the
+        # footage freeze, the portrait is still, and the dip closes it.
+        shake_end = end - (_portrait_tail if _portrait_tail else 0.0)
+        win = f"between(t,{shake_from:.3f},{shake_end:.3f})"
         # One beat period. The shake is keyed to the track, not to taste:
         # 1.923 Hz is the measured onset rate of the supplied jedag-jedug song
         # (115.4 BPM), so one hit lands on every beat.
@@ -1654,11 +1683,15 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # modulo assumes even spacing, which is exactly the assumption that was
         # wrong. Each hit is `exp(-k*(t-onset))` gated to its own interval, and
         # the direction flips per hit so the frame does not drift one way.
-        hits = [t for t in (beats or []) if shake_from <= t < end]
+        hits = [t for t in (beats or []) if shake_from <= t < shake_end]
+        # Group them. Every onset is a legal hit, but hitting ALL of them is
+        # what the operator called "rusuh doang gajelas": even texture, nothing
+        # to arrive at. The reference saves up and lands clusters.
+        hits = _cluster_beats(hits)
         if hits:
             env_terms, flip_terms = [], []
             for i, bt in enumerate(hits):
-                nxt = hits[i + 1] if i + 1 < len(hits) else end
+                nxt = hits[i + 1] if i + 1 < len(hits) else shake_end
                 # Clamp the tail so a long gap does not leave the frame
                 # drifting: one hit decays over at most its own interval.
                 seg = max(0.05, min(nxt - bt, 0.60))
@@ -1744,8 +1777,14 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         _out_len = start + freeze_secs
         _fade_d = min(OUTRO_FADE, max(0.1, freeze_secs - 0.2))
         _fade_st = max(0.0, _out_len - _fade_d - OUTRO_FADE_LEAD)
+        # When a portrait tail is present the fade must NOT live here. These
+        # filters run UPSTREAM of the portrait overlay, so a fade written here
+        # is painted over by the photograph: measured on the delivered file, the
+        # portrait held from 36.0s to 38.4s at luminance 63 and the dip never
+        # arrived. The caller applies the same fade downstream of the overlay
+        # instead, which is the only place that can darken the portrait itself.
         _fade = [f"fade=t=out:st={_fade_st:.3f}:d={_fade_d:.3f}:color=black"] \
-            if OUTRO_FADE > 0 else []
+            if (OUTRO_FADE > 0 and not _portrait_tail) else []
         return "", [
             # fps FIRST, before loop. `loop` counts FRAMES, and `start` here is
             # computed as start*FPS — so the two have to agree on what a frame
@@ -2005,6 +2044,46 @@ def _burst_times(beats, per=None, sub=None):
         for k in range(per):
             out.append(t + k * sub)
     return sorted(set(out))
+
+
+def _cluster_beats(beats, clusters=None, per=None):
+    """Keep onsets in RUNS, dropping the ones between runs.
+
+    The operator's reference short does not hit every onset. Measured on
+    UBycjaIlBZk: 42 onsets 0.303s apart, but only 9 hits — arriving as a single
+    hit, then a run of three (9.90/10.05/10.20), then a run of five
+    (13.60-14.30). Gaps between runs reach 3.40s; inside a run they are 0.15s.
+
+    Hitting every onset gives even texture, which is what "rusuh doang gajelas"
+    describes. Grouping gives the ending somewhere to arrive.
+
+    Returns a subset of `beats`, so every kept hit is still a REAL onset — the
+    rhythm changes, the alignment does not.
+    """
+    if not beats:
+        return []
+    n_cl = max(1, int(clusters if clusters is not None else OUTRO_CLUSTERS))
+    n_per = max(1, int(per if per is not None else OUTRO_CLUSTER))
+    beats = sorted(float(b) for b in beats)
+    if len(beats) <= n_per:
+        return beats
+    # Anchor the LAST cluster at the end of the window: the ending has to land
+    # on the final frames, not trail off before them. Earlier clusters are
+    # spaced back from it across the available onsets.
+    out, used = [], set()
+    # Cluster k counts back from the end, k=0 being the last one.
+    for k in range(n_cl):
+        # Walk back through the onset list in blocks, leaving a gap of one
+        # block between clusters so the runs stay separated.
+        end_i = len(beats) - k * (n_per * 2)
+        start_i = end_i - n_per
+        if end_i <= 0:
+            break
+        for i in range(max(0, start_i), end_i):
+            if i not in used:
+                used.add(i)
+                out.append(beats[i])
+    return sorted(out)
 
 
 def _music_beats(bgm_path, dur, offset=0.0, fraction=None):
@@ -2719,7 +2798,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                 hook_style=HOOK_STYLE, intro=None, intro_seconds=None,
                 intro_start=0.0,
                 inserts=(), mood=None, freeze_at=None,
-                freeze_still=None):
+                freeze_still=None, portrait=None):
     """Render one vertical clip [start, end) with burned-in captions.
 
     words: [{word,start,end}] with ABSOLUTE source timestamps; caller pre-slices
@@ -2851,8 +2930,11 @@ def render_clip(video_path, start, end, words, out_path, *,
             # Fixing only the graph is the trap here. The first attempt did
             # exactly that (amix duration=longest, apad, atrim) and the file
             # still went silent at 29.0s, because the input was already short.
+            # portrait= matters here: the music bed has to cover the portrait
+            # tail too, or the ending plays silent over the photograph.
             _bgm_len = _outro_output_len(dur, mood=mood, words=words,
-                                         clip_start=start) + intro_dur
+                                         clip_start=start,
+                                         portrait=portrait) + intro_dur
             inputs += ["-stream_loop", "-1", "-t", f"{max(dur + intro_dur, _bgm_len):.3f}",
                        "-i", os.path.abspath(bgm_path)]
         first_overlay_idx = base + (1 if bg_video else 0) + (1 if bgm_path else 0)
@@ -2931,7 +3013,8 @@ def render_clip(video_path, start, end, words, out_path, *,
             # ending begins: a reframe is framing for the speech, and there is
             # no speech left once the outro has started.
             _c_out_len = _outro_output_len(dur, mood=mood, words=words,
-                                           clip_start=start)
+                                           clip_start=start,
+                                           portrait=portrait)
             _c_end_at = _outro_start(dur, mood=mood, words=words,
                                      clip_start=start)
             cover_v = _pan_cover(video_path, start, end,
@@ -3025,7 +3108,7 @@ def render_clip(video_path, start, end, words, out_path, *,
             #
             # Computed BEFORE _zoompan so the clamped list can be handed to it.
             _out_len = _outro_output_len(dur, mood=mood, words=words,
-                                         clip_start=start)
+                                         clip_start=start, portrait=portrait)
             # NOTHING IN THE ENDING MAY FIRE WHILE HE IS STILL TALKING.
             #
             # `_outro_start` returns where the FREEZE begins, and the snap puts
@@ -3072,6 +3155,13 @@ def render_clip(video_path, start, end, words, out_path, *,
             # the BODY length; the freeze clones frames and extends the file past
             # it, so measuring against dur left a 0.35s window with zero beats in
             # it — the effects would have vanished entirely rather than moved.
+            # Where the portrait starts: the END of the output minus the tail.
+            # Read off _out_len, which is derived from the filter list the
+            # renderer actually uses — recomputing it here is how the freeze
+            # length and the audio bed drifted apart before.
+            _portrait_from = None
+            if portrait and OUTRO_PORTRAIT > 0 and _out_len > dur:
+                _portrait_from = max(0.0, _out_len - OUTRO_PORTRAIT)
             # _out_len / _end_at are computed above, before _zoompan.
             # per=1 inside the freeze: ONE flicker per onset, not a burst.
             # _burst_times exists to reach the reference tutorial's 0.10s
@@ -3081,8 +3171,12 @@ def render_clip(video_path, start, end, words, out_path, *,
             # that marks nothing. Measured on the delivered file: hits every
             # 0.200s against music onsets 0.528-0.781s apart. Operator: "jangan
             # rusuh doang gajelas beatnya ikutin musik".
+            # Clustered, like the shake and the slam: the three beat-driven
+            # effects have to agree on WHICH onsets are hits, or grouping one of
+            # them just adds a fourth rhythm on top of the other two.
             p_flash = _flash_expr(
-                _burst_times(_window_beats(bgm, _end_at, _out_len, intro_dur),
+                _burst_times(_cluster_beats(
+                    _window_beats(bgm, _end_at, _out_len, intro_dur)),
                              per=1)
                 or p_punches, _out_len)
             # freeze_frame_at is intentionally NOT passed: moving loop's
@@ -3109,7 +3203,8 @@ def render_clip(video_path, start, end, words, out_path, *,
                                                     + 1.0,
                                                     intro_dur, fraction=1.0)
                                                 if isinstance(bgm, str) else None,
-                                                speech_end=_sp_end)
+                                                speech_end=_sp_end,
+                                                portrait=portrait)
             # Keep the two brightness terms SEPARATE. The outro's own ramp
             # describes what the ending does to the footage and belongs upstream
             # of the freeze; the flicker is a hit on the held frame and has to
@@ -3150,8 +3245,9 @@ def render_clip(video_path, start, end, words, out_path, *,
             #
             # Throwing a held frame is what makes the still read as jedag-jedug:
             # the PICTURE stops, the framing keeps hitting the beat.
-            p_slam_beats = _window_beats(bgm, _freeze_at, _out_len, intro_dur,
-                                         fraction=SLAM_BEAT_FRACTION)
+            p_slam_beats = _cluster_beats(_window_beats(
+                bgm, _freeze_at, _out_len, intro_dur,
+                fraction=SLAM_BEAT_FRACTION))
             sx, sy = _slam_offsets(p_slam_beats, _out_len)
             slam = ""
             if sx or sy:
@@ -3255,6 +3351,37 @@ def render_clip(video_path, start, end, words, out_path, *,
                              if p_bright else "")
                           + (f",{slam}" if slam else "")
                           + f"[{base_label}]")
+            # The portrait tail. It goes DOWNSTREAM of p_filters for the same
+            # reason the flicker does: p_filters ends with the freeze `loop`,
+            # and anything upstream gets frozen along with the picture (probed:
+            # a flicker written above the loop fired 0 times inside the freeze,
+            # the same expression below it fired 10).
+            #
+            # It also goes downstream of `slam` and the brightness term, so the
+            # held portrait is NOT thrown around — the beat section owns the
+            # footage freeze, the portrait is still, and the dip to black that
+            # _outro_filters scheduled at the very end closes over it.
+            # The dip goes LAST, downstream of the portrait, or the photograph
+            # paints over it (measured: luminance 63 held to the final frame).
+            _pfade = ""
+            if portrait and _portrait_from and OUTRO_FADE > 0:
+                _pfd = min(OUTRO_FADE, max(0.1, OUTRO_PORTRAIT - 0.2))
+                _pfst = max(0.0, _out_len - _pfd - OUTRO_FADE_LEAD)
+                _pfade = (f"fade=t=out:st={_pfst:.3f}:"
+                          f"d={_pfd:.3f}:color=black")
+            if portrait and os.path.exists(portrait) and _portrait_from:
+                _pp = os.path.abspath(portrait).replace("\\", "\\\\")
+                _pp = _pp.replace(":", "\\:").replace("'", "\\'")
+                chains.append(
+                    f"movie='{_pp}',scale={CANVAS_W}:{CANVAS_H}:"
+                    f"force_original_aspect_ratio=increase,"
+                    f"crop={CANVAS_W}:{CANVAS_H},setsar=1[portr]")
+                chains.append(
+                    f"[{base_label}][portr]overlay=0:0:"
+                    f"enable='gte(t,{_portrait_from:.3f})'"
+                    + (f",{_pfade}" if _pfade else "")
+                    + f"[{base_label}p]")
+                base_label = f"{base_label}p"
         else:
             # reference style: the footage itself, blurred, fills the frame
             chains.append(f"[0:v]split=2[bgsrc][mnsrc]")
@@ -3285,12 +3412,19 @@ def render_clip(video_path, start, end, words, out_path, *,
             # b-roll cropped to the canvas like any other footage, then joined
             # in front; overlays build on the concatenated stream
             chains.insert(0, f"[{intro_idx}:v]{cover},setsar=1[intro]")
-            chains.append("[intro][vmain]concat=n=2:v=1:a=0[v0]")
+            # base_label, not a literal "vmain": the portrait tail renames it,
+            # and a hardcoded label here is how the graph lost its video stream
+            # ("Invalid stream specifier: vmain").
+            chains.append(f"[intro][{base_label}]concat=n=2:v=1:a=0[v0]")
 
         # Cutaways go on before the captions, and their windows are shifted by
         # the intro: the times come from the transcript, which knows nothing
         # about the hook footage concatenated in front of it.
-        ins_label = "[v0]"
+        # With a hook, concat above produced [v0]. WITHOUT one, base_label IS
+        # the stream — and the portrait tail renames it to v0p, so a literal
+        # "[v0]" here breaks the graph on exactly the no-hook path that the
+        # hooked path hides ("Invalid stream specifier: v0").
+        ins_label = "[v0]" if intro else f"[{base_label}]"
         for n, item in enumerate(ins):
             nxt = f"[bi{n}]"
             chains.append(broll_place.overlay_chain(
@@ -3339,8 +3473,10 @@ def render_clip(video_path, start, end, words, out_path, *,
         # here: two readers of the same constant is how the flash spent a whole
         # release wired to the wrong branch.
         total = dur + intro_dur
+        # The encoder's -t. Without portrait= the file is cut at the old
+        # length and the portrait tail never reaches the viewer.
         _out_len = _outro_output_len(dur, mood=mood, words=words,
-                                     clip_start=start)
+                                     clip_start=start, portrait=portrait)
         if _out_len > dur:
             total = _out_len + intro_dur
         if intro:

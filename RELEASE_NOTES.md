@@ -1,3 +1,119 @@
+## The portrait is part of the ending, and the beat had to learn to wait
+
+Operator handed over a reference short (UBycjaIlBZk) — "ini contoh jedag
+jedug, boleh si tambahin foto gibran yg di pake di video ini" — then corrected
+the order twice: "Salah, potret baru dip to black", "Outro di perpanjang, itu
+ibarat outro juga".
+
+So the jamet ending is now four movements in ONE outro:
+
+    footage freeze + beat shake  ->  held portrait  ->  dip to black
+
+### What the reference actually does, measured
+
+The useful finding was not the photograph. Measured on the reference:
+
+    hits            9 in 14.8s           = 0.61/s
+    positions       6.50 | 9.90 10.05 10.20 | 13.60 13.80 14.00 14.15 14.30
+    gaps            0.15s min, 3.40s max, spread 3.25s
+    music onsets    42, a median 0.303s apart
+
+It does NOT hit every onset. It hits roughly one onset in five, and they
+arrive in RUNS: a long rest, then three or five hits packed 0.15s apart. Our
+own ending had 12 hits against 9 onsets — on the beat, but evenly spread, which
+is the texture the operator called "rusuh doang gajelas". Following the beat
+and arriving somewhere are different things.
+
+`_cluster_beats` keeps onsets in runs and drops the ones between. It only ever
+returns a SUBSET of the real onsets, so grouping changes the rhythm and never
+the alignment, and the last cluster is anchored at the end of the window
+because the ending has to land on the final frames rather than trail off.
+
+All three beat-driven effects — shake, flicker, slam — take the clustered list.
+Grouping one of them in isolation would have added a fourth rhythm on top of
+the other two.
+
+Delivered: 7 hits, first at 31.30s, then a 2.30s rest, then six in 2.35s.
+Spacing spread 2.10s against the reference's 3.25s and 0.00s for any fixed
+grid.
+
+### The portrait tail
+
+`loop` already clones as many frames as asked, so the tail is not a concat: the
+freeze simply runs longer and the portrait is overlaid over its last stretch.
+That is what makes it part of the outro rather than a clip glued on after it.
+
+Three things had to be true, and two of them were wrong on the first render:
+
+  * **The dip has to come last.** First attempt left the fade where it was, in
+    `_outro_filters` — which runs UPSTREAM of the portrait overlay. The
+    photograph painted straight over it: measured on the delivered file, the
+    portrait held luminance 63 from 36.0s to the final frame and the dip never
+    arrived. The fade now moves downstream of the overlay when a portrait is
+    present, which is the only place that can darken the photograph itself.
+    Delivered: 112 (footage) -> 63 (portrait) -> 37 -> 5 -> 3.0.
+  * **The portrait must be HELD, not thrown.** The shake window ends where the
+    portrait begins. A shaken photograph reads as footage and undoes the reason
+    for showing it. Measured: 0.179 mean frame difference across the portrait
+    second, against 19.30 on the shaken freeze.
+  * **Every length query needs to know.** `_outro_output_len` feeds the music
+    bed, the caption clamp, the shake window and the encoder's `-t`. Threading
+    `portrait=` through three of the four and missing the encoder would have cut
+    the file before the tail; missing the music bed would have played the
+    photograph in silence.
+
+### Two label bugs, one found by a test
+
+The portrait overlay renames the video stream, and two downstream consumers
+had the old name hardcoded:
+
+  * `[intro][vmain]concat=...` — "Invalid stream specifier: vmain", hit
+    immediately on the real clip.
+  * `ins_label = "[v0]"` — only on the NO-HOOK path, where `base_label` IS the
+    stream rather than the output of a concat. Every render in this session
+    passes `--opening`, so the hooked path hid it completely; `_v66` renders
+    without a hook and caught it.
+
+That is the same shape as the gates that never ran: a literal where a variable
+belonged, invisible because the common path doesn't touch it.
+
+### Portrait sourcing
+
+Taken from the reference itself at 10.70s, the widest frame of its still
+segment (10.4-13.2s, identified by a sustained 3-6 frame difference — a slow
+zoom on a photograph rather than motion). Full 1080x1920, no letterbox, head
+and peci inside the frame, no caption across it, sharpness 73.3.
+
+A vision check on a 420px copy reported "ratio ~0.60, peci touching the top
+edge, likely AI-generated". Measured on the file: ratio 0.5625 exactly, top 40
+rows uniform (std 0.00, so there is background above the cap), and the 8-pixel
+block-boundary edge ratio is 1.00. The first two were artefacts of the
+downscaled copy sent to the model; the "AI-generated" read is consistent with
+re-encoded video, which is what a YouTube Shorts frame is. Worth stating
+plainly: this is a frame of the operator's own reference video, not a generated
+image.
+
+A portrait held at the end is a factual claim about whose story a clip is — the
+same class as the flag emoji on the Palestine clip — so a missing file or a
+non-jamet clip type is a warning and the ending runs without it.
+
+### Tests
+
+`_v66` asserts: the tail lengthens the ending; the fade leaves the upstream
+list when a portrait is present and stays when it is not; a rendered file shows
+the portrait bright then black on the last frame, with a control that luminance
+must TRAVEL across the tail; clustering only drops real onsets, is less even
+than the grid it came from (no-op control), and has both a tight gap and a wide
+one; and no beat window reaches into the portrait.
+
+Fixture notes worth keeping: a 6.0s source is SHORTER than the 5.0s jamet span,
+so the ending is not applied at all and such a test asserts nothing silently —
+and `testsrc2` has no audio track, which ffmpeg rejects outright.
+
+Suite 67 green. `_v9`/`_v10` remain red on a missing fixture, red on clean HEAD.
+
+    -- Dalmislave
+
 ## The ending fired while he was still talking, and the rattle marked nothing
 
 Operator, on a clip he had already approved: "sebab itu yang dimasak ibu,

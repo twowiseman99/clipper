@@ -822,7 +822,7 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         platform="youtube",
         start=None, seconds=None, mood=None, mood_from_preset=False,
         out=None, max_mb=0, context=None,
-        copy_style=None, snap_end=False, **style):
+        copy_style=None, snap_end=False, portrait=None, **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
     import edit
@@ -1117,6 +1117,22 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
     #
     # A veto has no fallback, so a failed pick is a WARNING plus the mechanical
     # frame, never a silently wrong still.
+    # A portrait held at the end is a FACTUAL CLAIM about whose story this is,
+    # the same class of error as the flag emoji on the Palestine clip. A wrong
+    # face there is worse than no portrait, so a missing or unreadable file is a
+    # warning and the ending runs without it rather than shipping a stranger.
+    if portrait:
+        portrait = os.path.abspath(os.path.expanduser(portrait))
+        if not os.path.exists(portrait):
+            warnings.append(
+                f"portrait: {portrait} does not exist — the ending ran without "
+                "it")
+            portrait = None
+        elif _kind != "jamet":
+            warnings.append(
+                "portrait: only the jamet ending has a tail to hold it — "
+                f"this clip is '{_kind}', so it was ignored")
+            portrait = None
     freeze_at = None
     freeze_still = None
     if _kind == "jamet":
@@ -1179,6 +1195,7 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                      intro=opening, intro_start=opening_start or 0.0,
                      inserts=inserts, freeze_at=freeze_at,
                      freeze_still=freeze_still,
+                     portrait=portrait,
                      mood=(track or {}).get("mood") or meta.get("mood"),
                      **style)
 
@@ -1314,6 +1331,10 @@ def main(argv=None):
                    help="print the catalogue of styles and music, then exit")
     p.add_argument("--content", help="link to the video the clip is cut from")
     p.add_argument("--opening", help="link to the b-roll shown first (optional)")
+    p.add_argument("--portrait",
+                   help="still image (local path) held at the very END of a "
+                        "jamet ending, after the footage freeze and before the "
+                        "dip to black. Part of the outro, not a separate clip.")
     p.add_argument("--opening-start", type=float, default=0.0,
                    help="second in the opening video where the hook footage "
                         "begins. The default of 0 takes the file's first "
@@ -1427,7 +1448,7 @@ def main(argv=None):
                       mood_from_preset=mood_from_preset, out=a.out,
                       snap_end=a.end_at_sentence,
                       max_mb=a.max_mb, context=a.context,
-                      copy_style=a.copy_style, **style)
+                      copy_style=a.copy_style, portrait=a.portrait, **style)
     except Busy as e:
         # not a failure of this job, so it gets no report and its own code —
         # the caller should retry rather than escalate
