@@ -9,6 +9,7 @@ a no-op there), torch/nvenc probing (VPS is CPU; codec via env).
 Split-screen and BGM are toggleable per call (PRD: campaign brief may forbid
 visual additions -> clean mode).
 """
+import math
 import os
 import random
 import re
@@ -449,6 +450,25 @@ OUTRO_GRAIN = float(os.environ.get("CLIPPER_OUTRO_GRAIN", "6"))
 # The operator's reference (UBycjaIlBZk) holds an official portrait full-frame
 # for ~2.8s before it ends. 0 disables the tail.
 OUTRO_PORTRAIT = float(os.environ.get("CLIPPER_OUTRO_PORTRAIT", "2.6"))
+# The portrait gets hit too. Earlier this file argued the opposite — that a
+# thrown photograph reads as footage — and that was my call, not the operator's:
+# "gambar formalnya juga harus di jedag jedgukin". A held still that keeps
+# hitting the beat is the whole jamet idiom; the picture stops, the FRAMING
+# does not.
+#
+# Travel is deliberately larger than the footage shake (OUTRO_SHAKE_PX 64): a
+# photograph has no internal motion, so the same displacement reads as less.
+OUTRO_PORTRAIT_SHAKE_PX = float(
+    os.environ.get("CLIPPER_OUTRO_PORTRAIT_SHAKE_PX", "88"))
+OUTRO_PORTRAIT_ZOOM = float(
+    os.environ.get("CLIPPER_OUTRO_PORTRAIT_ZOOM", "0.18"))
+# The entrance. "pas transisi gambar kasih aja spinning atau gimana, yg lebay"
+# — a spin that unwinds onto the first beat of the tail. Degrees of rotation at
+# the start, decaying to 0; 540 is a lebay one-and-a-half turns.
+OUTRO_PORTRAIT_SPIN = float(
+    os.environ.get("CLIPPER_OUTRO_PORTRAIT_SPIN", "540"))
+OUTRO_PORTRAIT_SPIN_SECS = float(
+    os.environ.get("CLIPPER_OUTRO_PORTRAIT_SPIN_SECS", "0.45"))
 # Beat grouping. The reference does NOT hit every onset: measured 9 hits in
 # 14.8s (0.61/s) against 42 onsets (0.303s apart), arriving as runs — 6.50,
 # then 9.90/10.05/10.20, then 13.60-14.30 — with gaps up to 3.40s between runs
@@ -3379,9 +3399,121 @@ def render_clip(video_path, start, end, words, out_path, *,
                 chains.append(
                     f"[{base_label}][portr]overlay=0:0:"
                     f"enable='gte(t,{_portrait_from:.3f})'"
-                    + (f",{_pfade}" if _pfade else "")
-                    + f"[{base_label}p]")
-                base_label = f"{base_label}p"
+                    + f"[{base_label}po]")
+                _plab = f"{base_label}po"
+                # THE PORTRAIT IS HIT TOO. Applied AFTER the overlay, on the
+                # composed stream, so every expression is in clip time — the
+                # `movie` source has its own clock and gating a filter on that
+                # side would fire at the wrong moment.
+                _pbeats = _cluster_beats(_window_beats(
+                    bgm, _portrait_from, _out_len, intro_dur))
+                _pbeats = [t for t in _pbeats if t >= _portrait_from]
+                _pfx = []
+                # 1. The entrance spin, unwinding onto the tail's first frame.
+                if OUTRO_PORTRAIT_SPIN and OUTRO_PORTRAIT_SPIN_SECS > 0:
+                    _ss = OUTRO_PORTRAIT_SPIN_SECS
+                    _sg = (f"between(t,{_portrait_from:.3f},"
+                           f"{_portrait_from + _ss:.3f})")
+                    # Degrees -> radians, decaying linearly to 0 so the spin
+                    # ARRIVES rather than easing out forever.
+                    _ang = (f"{OUTRO_PORTRAIT_SPIN * math.pi / 180.0:.5f}"
+                            f"*{_sg}*(1-(t-{_portrait_from:.3f})/{_ss:.4f})")
+                    # rotate supports the timeline, so it is gated by enable=
+                    # as well as by the decaying angle. pad/crop/scale below do
+                    # NOT support enable — their windows have to come from the
+                    # between() terms in the expression, which is why the shake
+                    # envelope is built that way rather than gated.
+                    # A rotated 9:16 frame does not cover the canvas: measured
+                    # on the delivered file, mid-spin showed black wedges in the
+                    # corners and the face cropped at the edge. Covering it
+                    # needs h/w = 1.78 at a quarter turn, so the fill scales UP
+                    # with the spin and decays back to 1.0 as it lands — the
+                    # zoom and the rotation share one progress term, or the
+                    # frame pops when they disagree.
+                    # The fill has to follow the ANGLE, not the progress. A
+                    # rotated rectangle needs
+                    #     (W*|cos a| + H*|sin a|) / W
+                    # to cover the canvas, which peaks at 45 degrees (1.96x for
+                    # 1080x1920), not at the quarter turn (1.78x). Scaling by
+                    # progress instead gave 1.61x where 1.96x was needed and the
+                    # corners measured ~1 luminance mid-spin on the delivered
+                    # file — the wedges were still there, just at a different
+                    # moment.
+                    #
+                    # Order: grow, rotate, crop back. Cropping to the canvas
+                    # before the rotation re-exposes exactly the corners the
+                    # growth was there to cover.
+                    _ar = CANVAS_H / float(CANVAS_W)
+                    _fill = f"(abs(cos({_ang}))+{_ar:.4f}*abs(sin({_ang})))"
+                    _pfx.append(
+                        f"scale=w='iw*{_fill}':h=-1:eval=frame")
+                    _pfx.append(
+                        f"rotate='{_ang}':c=black:ow=iw:oh=ih"
+                        f":enable='{_sg}'")
+                    _pfx.append(f"crop={CANVAS_W}:{CANVAS_H}")
+                # 2. The shake, on the same clustered onsets as the freeze.
+                if _pbeats and OUTRO_PORTRAIT_SHAKE_PX > 0:
+                    _env, _flip = [], []
+                    for _i, _bt in enumerate(_pbeats):
+                        _nx = (_pbeats[_i + 1] if _i + 1 < len(_pbeats)
+                               else _out_len)
+                        _sg2 = max(0.05, min(_nx - _bt, 0.60))
+                        _g = f"between(t,{_bt:.3f},{_bt + _sg2:.3f})"
+                        _env.append(f"{_g}*exp(-{OUTRO_PUNCH_DECAY:.2f}"
+                                    f"*((t-{_bt:.3f})/{_sg2:.4f}))")
+                        _flip.append(f"{_g}*{1 if _i % 2 == 0 else -1}")
+                    _e = "(" + "+".join(_env) + ")"
+                    _f = "(" + "+".join(_flip) + ")"
+                    # `pad=...:color=black` then crop is how the footage slam
+                    # travels, and on a held photograph it is VISIBLE: the
+                    # delivered file showed a corner at 4.4 luminance mid-throw.
+                    # Controls settle where it comes from — a 45-degree rotation
+                    # with no fill gives corners of exactly 0.0, with the fill
+                    # 18.7, and the original portrait's own darkest corner is
+                    # 46.6. So 4.4 is the pad's black edge sliding into frame,
+                    # not the rotation.
+                    #
+                    # Scaling up by the travel first means the crop always has
+                    # real picture to move into, so nothing black can enter.
+                    _m = int(OUTRO_PORTRAIT_SHAKE_PX) + 2
+                    _grow = 1.0 + (2.0 * _m) / float(CANVAS_W)
+                    _pfx.append(
+                        f"scale=w='iw*{_grow:.4f}':h=-1,"
+                        # Crop back to the canvas, centred, and let the offset
+                        # move within the margin the growth created. Centre is
+                        # (iw-ow)/2 rather than the pad's fixed _m: the grown
+                        # frame is proportional, so its margin is not _m in
+                        # height and a literal would drift the crop off-centre
+                        # and clip the cap.
+                        # Anchor the crop at the TOP, not the centre. Growing
+                        # the frame to make room for the throw costs 8% of the
+                        # height, and a centred crop takes half of that off the
+                        # top — measured on the delivered file, that was the
+                        # cap and the crown of the head. The bottom of a
+                        # half-length portrait is sash and torso, so the cost
+                        # belongs there. The vertical throw is clamped to the
+                        # margin that remains.
+                        f"crop=w={CANVAS_W}:h={CANVAS_H}"
+                        f":x='(iw-ow)/2+{OUTRO_PORTRAIT_SHAKE_PX:.1f}*{_f}*{_e}'"
+                        f":y='max(0,min(ih-oh,"
+                        f"{OUTRO_PORTRAIT_SHAKE_PX * 0.5:.1f}*{_f}*{_e}))'")
+                    if OUTRO_PORTRAIT_ZOOM > 0:
+                        # Punch-in on the hit, cropping back to canvas so
+                        # 1080x1920 is untouched.
+                        # Same top anchor as the throw crop above: a centred
+                        # crop after a punch-in takes the cap off again.
+                        _pfx.append(
+                            f"scale=w='iw*(1+{OUTRO_PORTRAIT_ZOOM:.3f}*{_e})'"
+                            f":h=-1:eval=frame,"
+                            f"crop={CANVAS_W}:{CANVAS_H}:(iw-ow)/2:0")
+                # 3. The dip closes over all of it, still last.
+                if _pfade:
+                    _pfx.append(_pfade)
+                if _pfx:
+                    chains.append(f"[{_plab}]" + ",".join(_pfx)
+                                  + f"[{_plab}x]")
+                    _plab = f"{_plab}x"
+                base_label = _plab
         else:
             # reference style: the footage itself, blurred, fills the frame
             chains.append(f"[0:v]split=2[bgsrc][mnsrc]")

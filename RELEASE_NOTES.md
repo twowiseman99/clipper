@@ -1,3 +1,100 @@
+## The portrait gets hit too, and corner luminance is the wrong instrument
+
+Operator, reversing a call I had made on my own: "gambar formalnya juga harus
+di jedag jedgukin, pas transisi gambar kasih aja spinning atau gimana, yg lebay
+atau pas geter ganti".
+
+Worth being explicit about what happened: the previous release argued in a
+comment that a thrown photograph "reads as footage and undoes the reason for
+showing it", and a test asserted no beat window could reach the portrait. That
+was my taste, not a requirement, and it was wrong. A held still that keeps
+hitting the beat is the jamet idiom — the PICTURE stops, the framing does not.
+The test now asserts the opposite property.
+
+The tail is three things on the clustered onsets the freeze already uses:
+
+  * an entrance spin, 540 degrees unwinding over 0.45s onto the first hit
+  * the throw, travel 88px (larger than the footage's 64px: a photograph has
+    no internal motion, so the same displacement reads as less)
+  * a punch-in zoom of 0.18 on each hit
+
+Measured on the delivered file: portrait motion 15.36 mean / 88.16 peak against
+0.179 when it was held, 4 hits, dip still reaching 3.0 on the last frame.
+
+### The instrument was wrong for two full rounds
+
+The spin exposes the canvas unless the frame is grown to cover it, and I spent
+two renders chasing that with corner luminance — sampling 30x30 blocks in the
+four corners and calling anything under 8 a leak. It reported a leak every
+time, including after fixes that were correct.
+
+Controls settled it:
+
+    45-degree rotation, no fill      corners  0.0  29.4  22.2   0.0
+    45-degree rotation, with fill            229.9 172.1  18.7  39.8
+    the portrait itself, no rotation          72.8  46.6 201.4  47.5
+    zoom 2.04x, NO rotation at all           192.0  12.3   5.0   2.6
+
+The last row is the one that mattered. A dark corner is just dark picture —
+Gibran's jacket, the peci, the shadowed backdrop. The portrait is 38.7% pixels
+below 16 all by itself. Corner luminance cannot tell exposed canvas from black
+clothing, so it answered a question I was not asking.
+
+The right instrument: run the same filter chain on a source with NO black in
+it (testsrc2 brightened so every pixel is >= 150), where a black pixel can only
+be exposed canvas, and measure the PERCENTAGE of black pixels. With the fill,
+0.0%. Without it, 15-43%. Unambiguous, and the negative control is built in.
+
+Name the instrument before trusting the measurement — the same lesson as
+signalstats YAVG being blind to crop and vidstabdetect being blind to
+brightness, in a new costume.
+
+### The fill has to follow the angle, not the progress
+
+First attempt scaled by the spin's progress term. That peaks at 1.78x (the
+aspect ratio) when the real requirement is
+
+    (W*|cos a| + H*|sin a|) / W
+
+which peaks at 2.04x around 60 degrees and returns to exactly 1.0 as the spin
+lands. Scaling by progress gave 1.61x where 1.96x was needed.
+
+Order also matters: grow, THEN rotate, THEN crop back. Cropping to the canvas
+before the rotation re-exposes exactly the corners the growth was there to
+cover, which is what the first "fix" did.
+
+### Two things the measurement caught that were real
+
+`pad=...:color=black` then crop — how the footage slam travels — slides a black
+edge into frame on a held photograph. Replaced with a scale-up so the crop
+always has picture to move into.
+
+And the crop after that growth was CENTRED, which spent 4% of the height off
+the top: the cap and the crown of the head. Anchored at the top instead, since
+the bottom of a half-length portrait is sash and torso.
+
+### One thing I did NOT fix, and why
+
+The landed portrait has zero headroom — the peci touches the top edge. Before
+padding the frame I measured the source: the portrait has 0 rows of background
+above the head, and so does EVERY frame of the reference's still segment
+(10.35-11.15s, all zero). The reference video cropped it that way. I built a
+blurred-fill version with 168px of headroom and threw it away, because the
+padding read as letterbox — the portrait carries its own black pillarbox
+(columns beyond ~130 sit at 14-16), so blurring it produces more black, not
+background. Matching the reference is the better default; if you want air above
+the head it needs a different source photograph, not a filter.
+
+### Tests
+
+`_v66` gained: the portrait must MOVE (peak frame difference > 2.0 against
+~0.2 for a held still), the spin must expose < 1% black on a no-black source,
+and an unfilled control must expose > 10% or the probe proves nothing.
+
+Suite 67 green. `_v9`/`_v10` still red on a missing fixture, red on clean HEAD.
+
+    -- Dalmislave
+
 ## The portrait is part of the ending, and the beat had to learn to wait
 
 Operator handed over a reference short (UBycjaIlBZk) — "ini contoh jedag

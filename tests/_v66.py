@@ -187,20 +187,82 @@ assert min(_gaps) <= 0.35 and max(_gaps) >= 0.70, (
 print("_v66: %d of %d onsets kept, spread %.2fs vs %.2fs even control"
       % (len(_grouped), len(_even), _spread, _ctl))
 
-# --- 4. the portrait is HELD, not thrown -----------------------------------
-# The shake window has to end where the portrait begins. A thrown photograph
-# reads as footage and undoes the reason for showing it.
-_pt = [f for f in _filters if "between(t," in f]
-_start = edit._outro_start(DUR, mood="hype", words=words, clip_start=0.0)
-assert _start is not None
-_shake_end = _len_tail - edit.OUTRO_PORTRAIT
-for f in _pt:
-    for tok in f.split("between(t,")[1:]:
-        hi = float(tok.split(")")[0].split(",")[1])
-        assert hi <= _shake_end + 0.1, (
-            "a beat window runs to %.3fs, past the start of the portrait at "
-            "%.3fs — the held photograph would be shaken" % (hi, _shake_end))
+# --- 4. the portrait is HIT TOO, and the spin covers the canvas ------------
+# This asserted the opposite until the operator said otherwise ("gambar
+# formalnya juga harus di jedag jedgukin"): the picture stops, the FRAMING
+# keeps hitting the beat.
+_tailmv = []
+_fps = 10
+_tail_from = max(0.0, _dur - edit.OUTRO_PORTRAIT + 0.1)
+_raw = subprocess.run(
+    [FFMPEG, "-v", "error", "-ss", f"{_tail_from}", "-t",
+     f"{edit.OUTRO_PORTRAIT - 0.1}", "-i", out,
+     "-vf", f"fps={_fps},scale=96:170", "-f", "rawvideo",
+     "-pix_fmt", "gray", "-"], capture_output=True).stdout
+_fr = np.frombuffer(_raw, dtype=np.uint8).astype(np.float32).reshape(-1, 170, 96)
+for _i in range(len(_fr) - 1):
+    _tailmv.append(float(np.abs(_fr[_i + 1] - _fr[_i]).mean()))
+assert _tailmv, "no frames sampled across the portrait"
+assert max(_tailmv) > 2.0, (
+    "the portrait has to MOVE — peak frame difference %.3f across the tail. "
+    "A held photograph measures ~0.2." % max(_tailmv))
 
-print("_v66: no beat window reaches into the portrait (ends by %.2fs)"
-      % _shake_end)
+# The spin must not expose the canvas. A rotated 9:16 frame needs
+# (W*|cos a| + H*|sin a|) / W coverage, peaking at 45 degrees — scaling by
+# progress instead of by angle leaves black wedges mid-spin.
+#
+# Measuring this by sampling corner luminance is WRONG and cost a round of
+# false positives: a dark corner can simply be dark picture. Controls settled
+# it — a 45-degree rotation of the real portrait with no fill gives corners of
+# exactly 0.0, with the fill 18.7, and the portrait's own darkest corner is
+# 46.6. So the test uses a source with NO black in it at all (every pixel
+# >= 150), where any black pixel can only be exposed canvas.
+_bright = os.path.join(TMP, "bright.mp4")
+_spun = os.path.join(TMP, "spun.mp4")
+subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+                f"testsrc2=size=1080x1920:rate={edit.FPS}:duration=1.2",
+                "-vf", "eq=brightness=0.35:contrast=0.5",
+                "-pix_fmt", "yuv420p", _bright], check=True)
+_ss = edit.OUTRO_PORTRAIT_SPIN_SECS
+_ang = (f"{edit.OUTRO_PORTRAIT_SPIN * np.pi / 180.0:.5f}"
+        f"*between(t,0,{_ss:.3f})*(1-t/{_ss:.4f})")
+_ar = edit.CANVAS_H / float(edit.CANVAS_W)
+_fill = f"(abs(cos({_ang}))+{_ar:.4f}*abs(sin({_ang})))"
+subprocess.run([FFMPEG, "-v", "error", "-y", "-i", _bright, "-vf",
+                f"scale=w='iw*{_fill}':h=-1:eval=frame,"
+                f"rotate='{_ang}':c=black:ow=iw:oh=ih,"
+                f"crop={edit.CANVAS_W}:{edit.CANVAS_H}",
+                "-pix_fmt", "yuv420p", _spun], check=True)
+_worst = 0.0
+for _t in (0.02, 0.10, 0.18, 0.26, 0.34, 0.42):
+    _raw = subprocess.run(
+        [FFMPEG, "-v", "error", "-ss", f"{_t}", "-i", _spun, "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        capture_output=True).stdout
+    if not _raw:
+        continue
+    _a = np.frombuffer(_raw, dtype=np.uint8)
+    _worst = max(_worst, 100.0 * float((_a < 16).mean()))
+assert _worst < 1.0, (
+    "the spin exposed the canvas: %.1f%% black pixels on a source whose "
+    "darkest pixel is 150. The fill has to follow the ANGLE, not the spin's "
+    "progress." % _worst)
+
+# Negative control: without the fill the SAME rotation must expose plenty, or
+# the assertion above proves nothing.
+_bare = os.path.join(TMP, "bare.mp4")
+subprocess.run([FFMPEG, "-v", "error", "-y", "-i", _bright, "-vf",
+                f"rotate='{_ang}':c=black:ow=iw:oh=ih",
+                "-pix_fmt", "yuv420p", _bare], check=True)
+_raw = subprocess.run(
+    [FFMPEG, "-v", "error", "-ss", "0.18", "-i", _bare, "-frames:v", "1",
+     "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+_bare_pct = 100.0 * float((np.frombuffer(_raw, dtype=np.uint8) < 16).mean())
+assert _bare_pct > 10.0, (
+    "control failed: an unfilled rotation should expose the canvas, measured "
+    "only %.1f%% — the black-pixel probe is not detecting exposure"
+    % _bare_pct)
+
+print("_v66: portrait moves (peak %.1f), spin exposes %.2f%% vs %.1f%% "
+      "unfilled control" % (max(_tailmv), _worst, _bare_pct))
 print("_v66 ok")
