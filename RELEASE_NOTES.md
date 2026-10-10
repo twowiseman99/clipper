@@ -1,3 +1,105 @@
+## The ending fired while he was still talking, and the rattle marked nothing
+
+Operator, on a clip he had already approved: "sebab itu yang dimasak ibu,
+selesai baru getar jangan pas ngomong lansung" and "efek jedag jedugnya jangan
+rusuh doang gajelas beatnya ikutin musik".
+
+### Measuring first said the shake was innocent
+
+Frame-difference per 0.05s on the delivered file, around the end of the payoff
+line (last word "ikut" ends at 31.00s):
+
+    t=30.70s   4.75
+    t=30.75s  28.99      <- hard cut, 0.25s before he stops
+    t=30.80s   0.00
+
+A 28.99 spike reads like a throw, so the shake was the obvious suspect. It was
+not the shake. Reading the emitted graph.txt, three separate windows opened in
+that range, and the loudest belonged to the still overlay:
+
+    _arm = max(0.0, _freeze_at - 0.2)
+
+The still is armed 0.2s early for a real reason: `loop` clones the frame AT the
+freeze point, and an overlay enabled exactly there is evaluated on the frame
+boundary, so the clone comes from the frame just before the switch and the still
+never appears — a byte-identical render (md5 fd1ad1a1 twice) is how that was
+originally caught. But arming early also CUTS: the overlay replaces live video,
+and every frame after _arm is identical. The "shake during speech" was a picture
+cut, not motion.
+
+The other two were real floors in the wrong place: the slam window was floored
+at `_freeze_at` and the flicker at `_outro_start`, both of which can precede the
+end of the last word because the snap puts the freeze in the gap AFTER the
+sentence while the still is composited slightly ahead of the clone point.
+
+### The margin has to come out of the freeze, not the sentence
+
+First attempt pulled _arm back by two frames and reasoned that 0.067s is below
+what the eye reads. Measured: the first hit moved to 30.90s, still 0.1s inside
+the sentence. The budget was being taken from the wrong side.
+
+The fix moves the CLONE POINT two frames later instead. The still then arms
+exactly at the end of speech: the sentence keeps every frame, the overlay is on
+in time for the clone, and the freeze gives up 0.067s of its 5.0s.
+
+That shift has to happen in ONE place. Putting it next to the overlay left the
+slam window reading the old `_freeze_at` and the first hit landed at 30.90s
+again; putting it in `_outro_filters` alone left `_outro_start` — which the arm
+point and the caption chain both call — two frames behind the graph. Both the
+filter builder and `_outro_start` now apply it, and a direct check confirms they
+agree: `_outro_start` returns 3.067 and `loop`'s start= resolves to 3.067.
+
+### A fixed period is not a beat
+
+The shake ran on `OUTRO_SHAKE_HZ * OUTRO_PUNCH_PER_BEAT` = 5.77 Hz. SHAKE_HZ is
+the measured onset rate of ONE supplied song (1.923 Hz) and PUNCH_PER_BEAT then
+multiplied it for rowdiness, so the hits sat 0.173s apart while the music's own
+onsets were 0.528-0.781s apart. Two out of every three punches marked nothing.
+
+`_window_beats` already existed and the flicker and the slam already used it;
+the outro shake simply was never handed the track. It is now built as a sum of
+per-onset decays, gated to each onset's own interval, rather than mod()
+arithmetic — a modulo assumes even spacing, which is the assumption that was
+wrong.
+
+Two further things had to be undone, both mine:
+
+  * `FLASH_BURST=3` sub-divides every onset into three flickers 0.10s apart.
+    That density is right in the BODY of a clip (the reference tutorial sits at
+    0.10s) and wrong on a held still, where it becomes a 5 Hz rattle. per=1
+    inside the freeze: one flicker per onset, 6 hits from 6 onsets.
+  * `OUTRO_PUNCH_PER_BEAT` default 3 was shipped for rowdiness and broke _v41
+    and _v46, which pin the density to the reference the operator measured
+    himself (AGv6G13TPUc, 8 hits in 4.0s = 2.00/s). Both tests were right and
+    the default is back to 1. Rowdiness lives in the travel, not the count.
+
+### Measured on the delivered file
+
+    first hit            31.25s          (speech ends 31.00s)
+    hits vs onsets       12 against 9    mean offset 0.085s
+    spacing              0.15-0.75s      spread 0.60s   (fixed grid = 0.00)
+    dip to black         113 -> 3.0 luminance
+    freeze vs body       19.30 vs 39.79
+    1080x1920, 36.07s, 8.3 MB
+
+The spacing spread is the real check: a fixed period produces a spread of zero
+no matter what rate it runs at, so `max(gap) - min(gap) >= 0.10` is what
+separates "follows the music" from "runs on a grid". _v65 asserts that, plus the
+floor on every beat-driven effect, plus a negative control — with no track the
+shake falls back to the fixed period rather than disappearing.
+
+### Three tests failed, and all three were right
+
+`_v60` caught _arm landing exactly on the clone point — the byte-identical case
+it was written for. `_v41` and `_v46` caught the density regression. `_v43`
+pinned the freeze point to exactly 20.0 and now reads 20.067; that one was
+loosened to assert the property (at or just after speech ends, within the
+overlay margin) rather than the exact value, since the margin is deliberate.
+
+Suite 66 green. `_v9`/`_v10` remain red on a missing fixture, red on clean HEAD.
+
+    -- Dalmislave
+
 ## The ending: who picks the music, and the dip that was never wired up
 
 ### A guard that reverses a human choice is the same bug with the sign flipped

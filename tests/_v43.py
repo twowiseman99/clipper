@@ -65,9 +65,18 @@ assert "_outro_start(" in src and "outro_at" in src, (
 assert edit._outro_start(30.0, mood="hype") is not None
 _spoken = [{"word": "x", "start": 0.0, "end": 20.0}]
 _snapped = edit._outro_start(30.0, mood="hype", words=_spoken, clip_start=0.0)
-assert _snapped is not None and abs(_snapped - 20.0) < 0.01, (
-    "with a transcript the ending must start where speech stops, got %s"
-    % _snapped)
+# The freeze point is the end of speech plus a two-frame margin: the still
+# overlay has to be armed BEFORE the frame `loop` clones, and arming it early
+# instead cut the picture 0.2s before the last word ended (measured as a 28.99
+# frame-difference throw at 30.75s on a delivered file). The margin comes out of
+# the freeze, never out of the sentence — so the assertion is "at or just after
+# speech ends, within one frame of slack", not an exact equality that pins the
+# margin itself.
+_lead = max(2.0 / float(edit.FPS), 0.05)
+assert _snapped is not None, "the ending must have a start with a transcript"
+assert 20.0 <= _snapped <= 20.0 + _lead + 1.0 / float(edit.FPS), (
+    "with a transcript the ending must start at the end of speech (20.0) plus "
+    "at most the still-overlay margin (%.3fs), got %s" % (_lead, _snapped))
 
 # --- 2. the end lands on the subject's sentence, not the first silence ------
 # Shape of the real transcript: an apology passage, the lunch-box sentence,

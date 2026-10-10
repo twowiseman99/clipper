@@ -493,10 +493,13 @@ OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "64"))
 # verdict was "getarannya terlalu gitu". Two references, two answers: the
 # density belongs to whichever clip is being matched, so re-measure instead of
 # inheriting.
-# Hits per beat. Measured as the dominant lever for rowdiness: 1 = 12.77 mean,
-# 2 = 14.31, 3 = 16.96 on the freeze window, while every other knob together
-# gave +6.6%. 3 is the shipped setting the operator approved.
-OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "3"))
+# Hits per beat. ONLY used by the fixed-period fallback now: when a track is
+# present the shake fires on the track's real onsets, so this multiplier does
+# not apply. Kept at 1 because _v41/_v46 pin the density to the reference the
+# operator measured (AGv6G13TPUc, 8 hits in 4.0s = 2.00/s); raising it to 3 for
+# "rowdiness" produced 5.77/s, which both tests correctly rejected. Rowdiness
+# belongs in the travel (OUTRO_SHAKE_PX) and the zoom, not in more hits.
+OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "1"))
 # How fast each hit decays inside its slot. The envelope is exp(-DECAY*phase)
 # where phase runs 0..1 across ONE BEAT, so this number is only meaningful
 # together with the period — it is not an absolute speed.
@@ -1356,6 +1359,19 @@ def _outro_start(dur, mood=None, seconds=None, words=None, clip_start=0.0):
         snapped = _outro_snap(dur, words, clip_start, span,
                               extends=(kind == "jamet"))
         if snapped is not None:
+            # Same two-frame shift _outro_filters applies, for the same reason:
+            # the still overlay needs the clone point to sit AFTER the end of
+            # speech. This function exists so callers do not duplicate the span
+            # logic — if it skips the shift, the arm point and the slam floor
+            # read a freeze point two frames earlier than the one the filter
+            # graph actually uses, and the first slam lands mid-sentence.
+            if kind == "jamet":
+                _sp = max((float(w.get("end", 0)) - float(clip_start or 0.0)
+                           for w in words
+                           if float(w.get("end", 0)) - float(clip_start or 0.0)
+                           <= dur), default=None)
+                if _sp is not None and snapped <= _sp:
+                    return min(dur, _sp + max(2.0 / float(FPS), 0.05))
             return snapped
     return max(0.0, dur - span)
 
@@ -1467,7 +1483,7 @@ def _outro_output_len(dur, mood=None, seconds=None, words=None, clip_start=0.0):
 
 
 def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
-                   freeze_frame_at=None):
+                   freeze_frame_at=None, beats=None, speech_end=None):
     """(brightness_term, extra_filters) for the closing treatment.
 
     The brightness term joins the beat-flash expression in one `eq`; the extra
@@ -1513,6 +1529,26 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         if snapped is not None:
             start = snapped
             span = dur - start
+            # The snap lands the freeze AT the end of the sentence. That is
+            # right for the picture but leaves no room for the still overlay,
+            # which has to be armed BEFORE the frame `loop` clones or the clone
+            # comes from the frame just before the switch and the still never
+            # appears (byte-identical render, caught by _v60).
+            #
+            # Arming early is not an option either: the overlay replaces live
+            # video, so arming 0.2s early cut the picture 0.2s before the last
+            # word ended — measured as a 28.99 frame-difference "shake" at
+            # 30.75s on the delivered file, which is what the operator saw.
+            #
+            # So the clone point moves two frames LATER instead. The still can
+            # then arm exactly at the end of speech: the sentence keeps every
+            # frame, the overlay is on in time, and the freeze gives up 0.067s
+            # of its 5.0s. This is the single place that decides it — the slam
+            # floor and the arm point both read `start` from here.
+            if speech_end is not None and start <= float(speech_end):
+                _lead = max(2.0 / float(FPS), 0.05)
+                start = min(dur, float(speech_end) + _lead)
+                span = dur - start
 
     if kind == "stinger":
         count = max(2, int(round(span * OUTRO_RATE)))
@@ -1576,7 +1612,22 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # again. The operator's spec is the opposite and is the actual
         # jedag-jedug convention: "videonya dah ga di play, jadi image gitu",
         # the beats land on the still.
+        # The shake must not start while he is still TALKING. `start` is where
+        # the freeze begins, and the snap puts that in the gap AFTER the payoff
+        # line — but the gap is only 0.9s wide and the still is composited
+        # slightly ahead of the clone point, so the first punch landed at 30.70s
+        # while the last word "ikut" only ended at 31.00s. Measured on the
+        # delivered file, frame-difference per 0.1s: 2.58 at 30.6s then 28.68 at
+        # 30.7s, i.e. a hard throw 0.3s before he finished the sentence.
+        # Operator: "sebab itu yang dimasak ibu, selesai baru getar jangan pas
+        # ngomong lansung".
+        #
+        # `speech_end` is clip-relative seconds for the end of the last word.
+        # The shake waits for it, so a freeze that begins early still holds the
+        # picture silently until the sentence is actually over.
         shake_from = start
+        if speech_end is not None:
+            shake_from = max(shake_from, float(speech_end))
         # The shake window has to cover the whole frozen stretch, which now
         # runs to the end of the clip. Keyed to freeze_secs rather than the
         # OUTRO_FREEZE constant: with the constant it stopped at 30.80s and the
@@ -1587,12 +1638,56 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # 1.923 Hz is the measured onset rate of the supplied jedag-jedug song
         # (115.4 BPM), so one hit lands on every beat.
         period = 1.0 / max(0.1, OUTRO_SHAKE_HZ * OUTRO_PUNCH_PER_BEAT)
-        # Phase inside the current beat, 0 at the hit, 1 just before the next.
-        ph = f"mod(t-{shake_from:.3f},{period:.5f})/{period:.5f}"
-        # Beat index, used to flip direction so consecutive hits do not drift
-        # the picture in one direction.
-        idx = f"floor((t-{shake_from:.3f})/{period:.5f})"
-        flip = f"(1-2*mod({idx},2))"
+        # A FIXED PERIOD IS THE "RUSUH" BUG. OUTRO_SHAKE_HZ is the measured
+        # onset rate of one supplied song (1.923 Hz), and PUNCH_PER_BEAT then
+        # multiplies it to 5.77 Hz "for rowdiness" — which no longer marks the
+        # track at all. Measured on the delivered freeze window: the music's
+        # own onsets sit a median 0.26s apart while the shake hit every 0.173s,
+        # so two out of every three punches landed off the beat. Operator:
+        # "jangan rusuh doang gajelas beatnya ikutin musik".
+        #
+        # `beats` is the real onset list (clip-relative) that the flicker and
+        # the slam already use — _window_beats/_music_beats. Same onsets here
+        # means the picture and the track mark the same instants.
+        #
+        # Built as a SUM of per-onset decays rather than mod() arithmetic: a
+        # modulo assumes even spacing, which is exactly the assumption that was
+        # wrong. Each hit is `exp(-k*(t-onset))` gated to its own interval, and
+        # the direction flips per hit so the frame does not drift one way.
+        hits = [t for t in (beats or []) if shake_from <= t < end]
+        if hits:
+            env_terms, flip_terms = [], []
+            for i, bt in enumerate(hits):
+                nxt = hits[i + 1] if i + 1 < len(hits) else end
+                # Clamp the tail so a long gap does not leave the frame
+                # drifting: one hit decays over at most its own interval.
+                seg = max(0.05, min(nxt - bt, 0.60))
+                g = f"between(t,{bt:.3f},{bt + seg:.3f})"
+                env_terms.append(
+                    f"{g}*exp(-{OUTRO_PUNCH_DECAY:.2f}*((t-{bt:.3f})/{seg:.4f}))")
+                flip_terms.append(f"{g}*{1 if i % 2 == 0 else -1}")
+            env = "(" + "+".join(env_terms) + ")"
+            flip = "(" + "+".join(flip_terms) + ")"
+            # The window is already implied by the per-hit gates, so `win` must
+            # not multiply them a second time — it would be 1 inside and the
+            # expression would still be correct, but keeping it explicit here
+            # makes the zoom term below share exactly the same envelope.
+            win = "1"
+            _shake_src = "music onsets (%d hits, median %.3fs apart)" % (
+                len(hits),
+                (sorted(hits[i + 1] - hits[i]
+                        for i in range(len(hits) - 1))[(len(hits) - 1) // 2]
+                 if len(hits) > 1 else 0.0))
+        else:
+            # No track, or no onsets inside the freeze: fall back to the fixed
+            # period rather than dropping the shake entirely. A silent freeze is
+            # worse than an approximate one, but say which happened.
+            ph = f"mod(t-{shake_from:.3f},{period:.5f})/{period:.5f}"
+            idx = f"floor((t-{shake_from:.3f})/{period:.5f})"
+            flip = f"(1-2*mod({idx},2))"
+            env = f"exp(-{OUTRO_PUNCH_DECAY:.2f}*({ph}))"
+            _shake_src = "fixed %.2f Hz (no onsets in window)" % (1.0 / period)
+        print(f"outro jamet: shake follows {_shake_src}", file=sys.stderr)
         # Sharp attack, fast decay. This is the whole difference between
         # "jedag-jedug" and "slow drift": a sine spends most of its time near
         # the middle of its travel, so the frame-to-frame change is small and
@@ -1602,7 +1697,12 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # 28.4, while the sine version of this outro managed 7.7 at its best
         # and read as a gentle slide. exp(-k*phase) puts the whole excursion in
         # the first fifth of each beat, which is what a punch looks like.
-        env = f"exp(-{OUTRO_PUNCH_DECAY:.2f}*({ph}))"
+        #
+        # `env` and `flip` are built ABOVE, either from the music's real onsets
+        # or from the fixed period as a fallback. This line used to rebuild
+        # `env` from `ph` here and would silently overwrite the onset-driven
+        # envelope — the exact no-op shape that has cost this project a render
+        # three times now, so it is deleted rather than guarded.
         # The zoom punch, done by shrinking the crop WINDOW and scaling back to
         # canvas. Scaling the picture itself would change the output dimensions
         # per frame, and 1080x1920 never moves to buy a look.
@@ -2926,7 +3026,30 @@ def render_clip(video_path, start, end, words, out_path, *,
             # Computed BEFORE _zoompan so the clamped list can be handed to it.
             _out_len = _outro_output_len(dur, mood=mood, words=words,
                                          clip_start=start)
+            # NOTHING IN THE ENDING MAY FIRE WHILE HE IS STILL TALKING.
+            #
+            # `_outro_start` returns where the FREEZE begins, and the snap puts
+            # that in the gap after the payoff line. But the still is
+            # composited slightly ahead of the clone point, so the freeze point
+            # (30.60s) sits BEFORE the last word actually ends (31.00s).
+            # Measured on the delivered file: a 28.99 frame-difference throw at
+            # 30.75s, i.e. mid-sentence. The shake was innocent — the hits came
+            # from the SLAM and the flicker, which were floored at the freeze
+            # point instead.
+            #
+            # So the floor for every beat-driven effect is the end of speech,
+            # not the start of the freeze. Operator: "sebab itu yang dimasak
+            # ibu, selesai baru getar jangan pas ngomong lansung".
+            _sp_end = None
+            if words:
+                _ends = [float(w.get("end", 0)) - float(start or 0.0)
+                         for w in words
+                         if float(w.get("end", 0)) - float(start or 0.0) <= dur]
+                if _ends:
+                    _sp_end = max(_ends)
             _end_at = _outro_start(dur, mood=mood, words=words, clip_start=start)
+            if _sp_end is not None:
+                _end_at = max(_end_at, _sp_end)
             p_punches = _after(_punch_times(words, start, dur),
                                _end_at, _out_len)
             p_zoom = _zoompan(dur, fps, words, start, frame_mode=frame_mode,
@@ -2950,16 +3073,43 @@ def render_clip(video_path, start, end, words, out_path, *,
             # it, so measuring against dur left a 0.35s window with zero beats in
             # it — the effects would have vanished entirely rather than moved.
             # _out_len / _end_at are computed above, before _zoompan.
+            # per=1 inside the freeze: ONE flicker per onset, not a burst.
+            # _burst_times exists to reach the reference tutorial's 0.10s
+            # flicker density in the BODY of a clip, where the eye reads it as
+            # texture. On a held still it is the opposite — FLASH_BURST=3 turned
+            # 6 onsets into 18 hits spaced 0.10s apart, which is a 5 Hz rattle
+            # that marks nothing. Measured on the delivered file: hits every
+            # 0.200s against music onsets 0.528-0.781s apart. Operator: "jangan
+            # rusuh doang gajelas beatnya ikutin musik".
             p_flash = _flash_expr(
-                _burst_times(_window_beats(bgm, _end_at, _out_len, intro_dur))
+                _burst_times(_window_beats(bgm, _end_at, _out_len, intro_dur),
+                             per=1)
                 or p_punches, _out_len)
             # freeze_frame_at is intentionally NOT passed: moving loop's
             # start= is what shortened the freeze to 1.0s. The chosen frame
             # arrives as an overlay upstream instead, so loop keeps its own
             # start and its own length.
+            # Hand the outro the SAME onsets the flicker and the slam use, and
+            # the end of the last spoken word. Without the first the shake runs
+            # on a fixed period that no longer marks the track; without the
+            # second its first punch can land while he is still talking.
             p_outro, p_filters = _outro_filters(dur, mood=mood,
                                                 words=words,
-                                                clip_start=start)
+                                                clip_start=start,
+                                                # Horizon is dur PLUS the
+                                                # freeze: the jamet freeze
+                                                # EXTENDS the clip past `dur`,
+                                                # so asking for onsets up to
+                                                # `dur` returned an empty window
+                                                # and the shake silently fell
+                                                # back to the fixed period.
+                                                beats=_music_beats(
+                                                    bgm,
+                                                    dur + OUTRO_JAMET_SECONDS
+                                                    + 1.0,
+                                                    intro_dur, fraction=1.0)
+                                                if isinstance(bgm, str) else None,
+                                                speech_end=_sp_end)
             # Keep the two brightness terms SEPARATE. The outro's own ramp
             # describes what the ending does to the footage and belongs upstream
             # of the freeze; the flicker is a hit on the held frame and has to
@@ -2984,6 +3134,14 @@ def render_clip(video_path, start, end, words, out_path, *,
             # have taken down the whole render on a short clip.
             if _freeze_at is None:
                 _freeze_at = dur
+            # ONE value, computed BEFORE anything reads it. The margin that lets
+            # the still be armed without cutting into the sentence comes out of
+            # the freeze, so the freeze point itself moves — and the slam window
+            # below reads _freeze_at. Adjusting it further down (where the
+            # overlay is built) left the slam floored at the OLD point and the
+            # first hit landed at 30.90s again, 0.1s before the last word.
+            if _sp_end is not None and _freeze_at - 0.2 < _sp_end:
+                _freeze_at = max(_freeze_at, _sp_end + max(2.0 / float(fps or FPS), 0.05))
             # Slams land ON the freeze, not before it. This is the inversion the
             # operator caught: the rule used to be "keep slams out of the frozen
             # ending", which left the body shaking for 26s and the ending
@@ -3034,7 +3192,49 @@ def render_clip(video_path, start, end, words, out_path, *,
                 # byte-identical to one with no still at all (md5 fd1ad1a1
                 # twice). Arming it a few frames early costs nothing: those
                 # frames are inside the ending and get replaced by the clone.
+                # Arming early is required (see above) but it CUTS THE PICTURE
+                # early too: the still replaces live video from `_arm` onward,
+                # and every frame after that is identical. Measured on the
+                # delivered file, the frame-difference spike at 30.75s — read as
+                # "getar pas ngomong" — was this cut, 0.2s before the last word
+                # ended, not the beat shake at all.
+                #
+                # So the arm point must not precede the end of speech. The
+                # freeze itself can only START after the sentence (the snap
+                # guarantees that), which leaves no room ahead of it, so the
+                # still is armed exactly at the end of speech when arming 0.2s
+                # early would land mid-word. The clone frame is the one the gate
+                # chose either way — `loop`'s start= points at the overlaid
+                # frame, which is live by then.
+                # Two constraints pull in opposite directions:
+                #   * arm EARLY or loop clones the frame just before the
+                #     switch and the still never appears (byte-identical
+                #     render, md5 fd1ad1a1 twice).
+                #   * arm LATE or the overlay cuts live video mid-sentence —
+                #     the 28.99 frame-difference "shake" at 30.75s was this.
+                #
+                # Both are satisfiable because the overlay only has to be on
+                # for the CLONED frame, which needs a margin of frames, not
+                # 0.2s. One frame is enough and 0.033s of early cut is below
+                # anything the eye reads as a jump. Arming exactly AT the clone
+                # point is the one value that must never be used: _v60 asserts
+                # the still is visibly present, and it is what caught this.
+                # The margin has to come out of the FREEZE, not out of the
+                # sentence. Pulling _arm back by 2 frames put the cut at 30.90s
+                # again, 0.1s before the last word ended — measured on the
+                # delivered file, so the 0.033s-is-invisible reasoning was
+                # simply wrong about where the budget comes from.
+                #
+                # Instead, arm AT the end of speech and push the clone point
+                # (and with it the freeze) 2 frames later. The freeze is 5.0s
+                # and loses 0.067s of it; the sentence loses nothing.
+                # _freeze_at already carries the margin (set above, before the
+                # slam window reads it). The still arms at the end of speech:
+                # late enough not to cut the sentence, early enough that the
+                # clone point is covered.
                 _arm = max(0.0, _freeze_at - 0.2)
+                if _sp_end is not None and _arm < _sp_end:
+                    _arm = _sp_end
                 chains.append(
                     f"[{_p_src}][fzstill]overlay=0:0:"
                     f"enable='gte(t,{_arm:.3f})'[pbasef]")
