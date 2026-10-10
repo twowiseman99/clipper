@@ -475,7 +475,12 @@ OUTRO_FREEZE = float(os.environ.get("CLIPPER_OUTRO_FREEZE", "2.0"))
 OUTRO_SHAKE_HZ = float(os.environ.get("CLIPPER_OUTRO_SHAKE_HZ", "1.923"))
 # Shake amplitude in pixels on a 1080-wide canvas. 28 is visible without
 # tearing the subject off-frame; past ~60 the face leaves the safe area.
-OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "28"))
+# Travel of the beat shake, in pixels of crop-window offset. 28 read as polite
+# once the rest of the ending was right ("getrarannya lebih jauh"): at 64 the
+# freeze window measures 17.41 mean frame-difference against 12.76 at 28, with
+# the body unchanged at 2.5. Paired with OUTRO_PUNCH_ZOOM 0.14 — the throw and
+# the punch-in have to grow together or the move reads as a slide.
+OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "64"))
 # Hits per beat. MEASURED against the reference, not chosen: the operator's
 # CapCut tutorial (youtube AGv6G13TPUc, 30-34s) runs 8 hits in 4.0s — 2.00 per
 # second, one hit every 0.500s. At 1.923 Hz the track's own beat gives 1.92/s,
@@ -488,7 +493,10 @@ OUTRO_SHAKE_PX = float(os.environ.get("CLIPPER_OUTRO_SHAKE_PX", "28"))
 # verdict was "getarannya terlalu gitu". Two references, two answers: the
 # density belongs to whichever clip is being matched, so re-measure instead of
 # inheriting.
-OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "1"))
+# Hits per beat. Measured as the dominant lever for rowdiness: 1 = 12.77 mean,
+# 2 = 14.31, 3 = 16.96 on the freeze window, while every other knob together
+# gave +6.6%. 3 is the shipped setting the operator approved.
+OUTRO_PUNCH_PER_BEAT = float(os.environ.get("CLIPPER_OUTRO_PUNCH_PER_BEAT", "3"))
 # How fast each hit decays inside its slot. The envelope is exp(-DECAY*phase)
 # where phase runs 0..1 across ONE BEAT, so this number is only meaningful
 # together with the period — it is not an absolute speed.
@@ -504,7 +512,7 @@ OUTRO_PUNCH_DECAY = float(os.environ.get("CLIPPER_OUTRO_PUNCH_DECAY", "6"))
 # Zoom punch depth as a scale factor on top of the positional kick. The
 # reference short pairs every hit with a scale pop; position alone looked like
 # a camera bump rather than an edit. 0.08 = an 8% snap in on each beat.
-OUTRO_PUNCH_ZOOM = float(os.environ.get("CLIPPER_OUTRO_PUNCH_ZOOM", "0.08"))
+OUTRO_PUNCH_ZOOM = float(os.environ.get("CLIPPER_OUTRO_PUNCH_ZOOM", "0.14"))
 # Every mood the pipeline is known to produce (bgm.py's buckets plus the sad
 # list). A mood outside this set means the caller and this module disagree, so
 # the stinger default is a guess rather than a decision — worth a warning.
@@ -1621,6 +1629,23 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
         # back to canvas afterwards keeps 1080x1920 exactly, which is the rule
         # that never bends.
         zoom = (f"1+{OUTRO_PUNCH_ZOOM:.3f}*{env}*{win}")
+        # Dip to black at the very end, on the jamet ending too. The constant
+        # already existed but only the melancholy branch used it, so the loud
+        # ending cut mid-shake on the last frame — the operator asked for
+        # "selesainya dip to black".
+        #
+        # Placed AFTER the trim that fixes the clip length: `fade` works on the
+        # timeline it is given, and the stream here has already been cut back
+        # to start+freeze_secs with setpts rebasing time to zero. So the fade
+        # start is relative to the TRIMMED stream, not to the original `dur`.
+        # Finishing FADE_LEAD before the final frame leaves held black instead
+        # of stopping at dark grey, which was measured at Y=21 on the quiet
+        # ending for exactly this reason.
+        _out_len = start + freeze_secs
+        _fade_d = min(OUTRO_FADE, max(0.1, freeze_secs - 0.2))
+        _fade_st = max(0.0, _out_len - _fade_d - OUTRO_FADE_LEAD)
+        _fade = [f"fade=t=out:st={_fade_st:.3f}:d={_fade_d:.3f}:color=black"] \
+            if OUTRO_FADE > 0 else []
         return "", [
             # fps FIRST, before loop. `loop` counts FRAMES, and `start` here is
             # computed as start*FPS — so the two have to agree on what a frame
@@ -1664,7 +1689,7 @@ def _outro_filters(dur, mood=None, seconds=None, words=None, clip_start=0.0,
             f"crop={CANVAS_W}:{CANVAS_H}",
             "setsar=1",
             f"fps={FPS}",
-        ]
+        ] + _fade
 
     # melancholy: colour drains and the image dims, both ramping across the
     # window. `hue` evaluates its expressions per frame already — it is marked

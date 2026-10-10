@@ -1009,21 +1009,35 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                              style=copy_style)
     meta["hook"] = _hook_for(hook, opening, topic_hook, meta["hook"])
 
-    # A preset's mood must never silence the transcript. The clip itself knows
-    # whether it is grief or hype; the preset only knows which LOOK was asked
-    # for. So when the two disagree and the pair is a forbidden one, the
-    # transcript wins the MUSIC while the preset keeps the ending.
+    # WHO DECIDES THE MUSIC, and the correction that overshot.
+    #
+    # First this read `mood or meta["mood"]`, so a preset default beat the
+    # transcript and a grief clip got a jedag-jedug anthem. The fix made the
+    # transcript win every clash — and overshot: `--clip-type jamet` is a
+    # register the OPERATOR TYPED. Forcing a sad track under a preset whose
+    # whole point is the beat is the same failure with the sign flipped
+    # ("kenapa musik sedih? kan ini preset jedag jedug").
+    #
+    # So the ladder is by AUTHORSHIP, not by confidence:
+    #   1. --mood                -> explicit, wins outright, no warning
+    #   2. --clip-type           -> explicit register, wins, but a clash with
+    #                               the transcript is WARNED so the operator
+    #                               sees it and can pass --mood
+    #   3. nothing               -> transcript decides
+    # A guard whose job is to catch a register mismatch must SURFACE it, not
+    # silently reverse a choice a human made. The operator asked for blockers
+    # as explicit choices, and this is one.
     _mood = mood or meta.get("mood")
     if mood_from_preset and meta.get("mood") and meta["mood"] != mood:
         if bgm._clashes(mood, meta["mood"]):
             warnings.append(
-                f"music mood: the clip-type preset asks for {mood!r} "
-                f"but the transcript reads {meta['mood']!r}, which clash — "
-                f"used {meta['mood']!r} for the music")
+                f"music mood: --clip-type asks for {mood!r} but the "
+                f"transcript reads {meta['mood']!r}, which clash — kept "
+                f"{mood!r} because the clip type was requested explicitly; "
+                f"pass --mood {meta['mood']} to use the transcript's")
             audit.warned("sound", "mood clash",
                          f"preset {mood!r} vs transcript {meta['mood']!r}",
-                         f"used {meta['mood']!r}")
-            _mood = meta["mood"]
+                         f"kept {mood!r} (explicit --clip-type)")
     track, why = bgm.pick(_mood, key=f"job:{int(seg_start)}")
     audit.briefed("sound", f"mood = {_mood!r}",
                   "operator override" if (mood and not mood_from_preset)

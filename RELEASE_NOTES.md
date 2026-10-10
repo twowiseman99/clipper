@@ -1,3 +1,75 @@
+## The ending: who picks the music, and the dip that was never wired up
+
+### A guard that reverses a human choice is the same bug with the sign flipped
+
+Yesterday's fix made the transcript win every mood clash. That was wrong in the
+other direction: `--clip-type jamet` is a register the OPERATOR TYPED, so a
+grief-reading transcript forced a sad track under a preset whose entire point is
+the beat ("kenapa musik sedih? kan ini preset jedag jedug").
+
+The ladder is by AUTHORSHIP, not by confidence:
+
+```
+--mood        explicit, wins outright, no warning
+--clip-type   explicit register, wins, but a clash is WARNED
+nothing       transcript decides
+```
+
+So both failures are now impossible for different reasons: an unasked-for
+preset default no longer beats the transcript, and an asked-for register is no
+longer silently reversed. The warning names the override:
+
+```
+music mood: --clip-type asks for 'hype' but the transcript reads 'emotional',
+which clash — kept 'hype' because the clip type was requested explicitly;
+pass --mood emotional to use the transcript's
+```
+
+A guard whose job is to catch a register mismatch must SURFACE it, not decide
+for the operator. `_v62` was rewritten: it had been asserting the overshoot, and
+passing green while doing it. A test written in the same breath as a fix inherits
+its blind spot — the test now encodes the ladder, with each past failure as its
+own case.
+
+### OUTRO_FADE existed and the jamet branch never used it
+
+`OUTRO_FADE` has been in the file since the register work. Only the melancholy
+branch read it, so the loud ending stopped mid-shake on its last frame. Same
+class as `bgm._CLASH` and `FLASH_BEAT_FRACTION`: the constant is right, the
+code path never reaches it. Third instance in this project, so it is worth
+stating as a rule — **grep for who READS a constant, not just where it is
+defined.**
+
+The fade goes AFTER `trim`+`setpts`, so its timing is relative to the trimmed
+stream rather than the original `dur`. Measured on the delivered file, last 3s:
+
+```
+t=33.0s  121.8      t=34.8s  85.6
+t=34.0s  116.5      t=35.2s  43.1
+t=34.4s  121.4      t=35.6s   3.1
+                    t=35.8s   0.0   held black
+```
+
+`_v64` asserts this by running ffmpeg and reading luminance out of the output,
+never by inspecting the filter string — `hue=...:eval=frame` already proved a
+string can look right while ffmpeg rejects the whole graph. It also carries a
+negative control: the start of the window must still be BRIGHT (>=60), or what
+was built is a long fade rather than a dip at the end, which the operator
+rejected before as "aneh".
+
+### Shake, measured
+
+`OUTRO_SHAKE_PX` 28 -> 64 and `OUTRO_PUNCH_ZOOM` 0.08 -> 0.14, both now
+defaults along with `OUTRO_PUNCH_PER_BEAT` 3. Freeze-window mean frame
+difference 17.41 against 12.76 before, body unchanged at 2.51 — the ending got
+louder without the body moving.
+
+Delivered: freeze matches the chosen still at 0.375 median over 34 frames
+(body 0.802), hook spectrum hype 0.946 / emotional 0.489, freeze frame 149.20s
+confirmed by eye, 1080x1920, 36.01s. Suite 64 green; `_v9`/`_v10` unchanged.
+
+Signed: Dalmislave
+
 ## The stop point has a two-sided bound, and the search grid moved with it
 
 Operator: "harusnya stop di setelah bilang suruh anak bawa bekal ... langsung

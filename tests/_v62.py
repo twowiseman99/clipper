@@ -1,4 +1,28 @@
-"""Preset tidak boleh membungkam transkrip soal MUSIK.
+"""Siapa yang memutuskan MUSIK: tangga berdasarkan SIAPA YANG MEMILIH.
+
+Dua kegagalan berlawanan, keduanya pernah terkirim:
+
+1. Klip Gibran minta maaf ke ibu korban keracunan dapat lagu jedag-jedug.
+   Sebabnya `--clip-type jamet` mengisi a.mood="hype" di parser, jadi tidak
+   bisa dibedakan dari `--mood hype` yang diketik tangan, dan `mood or
+   meta["mood"]` di hilir membuat default preset mengalahkan transkrip.
+   bgm._CLASH sudah melarang pasangan itu tapi tidak pernah dipanggil.
+
+2. Perbaikannya KEBABLASAN: transkrip dibuat menang di setiap clash, jadi
+   preset jedag-jedug dapat lagu sedih ("kenapa musik sedih? kan ini preset
+   jedag jedug"). Penjaga yang tugasnya menangkap salah register malah
+   membalik pilihan yang dibuat manusia, diam-diam.
+
+Tangga yang benar berdasarkan KEPENGARANGAN, bukan keyakinan:
+   --mood       -> eksplisit, menang, tanpa warning
+   --clip-type  -> register eksplisit, menang, TAPI clash di-WARNING
+   tidak ada    -> transkrip memutuskan
+
+Yang dijaga: tangga itu, dan bahwa akhiran (freeze jamet) tidak ikut berubah
+ketika musiknya berubah. Dua hal itu pernah tercampur dalam satu nilai.
+"""
+
+_DOC_LAMA = """Preset tidak boleh membungkam transkrip soal MUSIK.
 
 Klip Gibran minta maaf ke ibu korban keracunan terkirim dengan lagu
 "hype_dj_nansuya_gang_jedag_jedug" di bawahnya. Aturannya sudah ada di kode:
@@ -82,5 +106,26 @@ assert "bgm._clashes(mood, meta[\"mood\"])" in src, \
     "job.py tidak memeriksa clash antara preset dan transkrip"
 print("jalur kode     : preset ditandai, clash diperiksa sebelum bgm.pick")
 
-print("\n_v62 ok — preset memberi default, transkrip memutuskan musik, "
-      "akhiran tidak terpengaruh")
+# --- 6. clash dari --clip-type: DIPERTAHANKAN, bukan dibalik --------------
+# Ini kegagalan kedua. `--clip-type jamet` adalah register yang diketik
+# operator, jadi lagu hype harus tetap dipakai dan clashnya hanya dilaporkan.
+# Potongan kodenya diperiksa karena menjalankan run() butuh unduhan penuh.
+i_clash = src.index('if bgm._clashes(mood, meta["mood"]):')
+blok = src[i_clash:i_clash + 1400]
+assert "_mood = meta[\"mood\"]" not in blok, (
+    "job.py masih MEMBALIK pilihan operator: --clip-type jamet harus tetap "
+    "memakai moodnya sendiri, clashnya cukup di-warning")
+assert "kept" in blok and "--mood" in blok, (
+    "warning harus menyebut mood mana yang dipakai DAN cara menimpanya, "
+    "supaya blokirnya jadi pilihan eksplisit bukan keputusan diam-diam")
+print("tangga mood    : --clip-type dipertahankan, clash hanya di-warning")
+
+# --- 7. jalur --mood eksplisit tidak pernah menyentuh cabang clash --------
+# mood_from_preset=False berarti operator mengetik moodnya; tidak boleh ada
+# warning dan tidak boleh ada penggantian.
+i_guard = src.index("if mood_from_preset and meta.get(\"mood\")")
+assert i_guard < i_clash, "pemeriksaan clash harus di dalam cabang preset"
+print("mood eksplisit : --mood melewati cabang clash sepenuhnya")
+
+print("\n_v62 ok — tangga mood ikut SIAPA YANG MEMILIH, akhiran tidak "
+      "terpengaruh")
