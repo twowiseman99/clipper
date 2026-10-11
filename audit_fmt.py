@@ -378,7 +378,7 @@ def issue_block(data):
     return out
 
 
-def format_ledger(data, checkers=(), limit=None):
+def format_ledger(data, checkers=(), limit=None, narrate=None):
     """The whole message: header, agent narrative, then the issues.
 
     `limit` caps the result in characters. When it is exceeded the NARRATIVE
@@ -386,6 +386,11 @@ def format_ledger(data, checkers=(), limit=None):
     read and the error fields are the reason the message exists. One render
     used to produce 179 messages and 328,206 truncated characters, which is
     exactly the content a reader needed being thrown away last.
+
+    `narrate` is an optional callable(data, sections) -> str for the Phase 2
+    human summary. Injected rather than imported so this formatter keeps
+    working with no router, and so tests can drive it without a live model.
+    It is called with section verdicts only; it never sees this text.
     """
     entries = data.get("entries", [])
     title = data.get("title") or (data.get("clip", "").rsplit("/", 1)[-1])
@@ -450,6 +455,27 @@ def format_ledger(data, checkers=(), limit=None):
         out.append("")
         out.append("⏸️ ga jalan di render ini: " + ", ".join(skipped))
 
+    # Phase 2. The narration goes directly under the header, where someone
+    # reading on a phone sees it first -- and it is built from the SECTION
+    # VERDICTS gathered above, never from the rendered text, so it cannot
+    # restate a path or an error string it was never shown. Entirely
+    # optional: audit_narrate returns "" on any doubt and the message below
+    # is already complete.
+    narasi = ""
+    if narrate:
+        try:
+            pairs = [(str(SECTIONS.get(n, n)),
+                      [e["verdict"] for e in entries if e["checker"] == n])
+                     for n in names]
+            narasi = narrate(data, [p for p in pairs if p[1]]) or ""
+        except Exception as exc:
+            print(f"audit_fmt: narasi dilewati ({type(exc).__name__}: "
+                  f"{str(exc)[:80]})", file=sys.stderr)
+            narasi = ""
+    if narasi:
+        out.insert(2, "")
+        out.insert(3, f"_{narasi}_")
+
     gone = audit.missing_agents()
     if gone:
         out.append(f"‼️ file agent hilang: {', '.join(sorted(gone))}")
@@ -457,6 +483,9 @@ def format_ledger(data, checkers=(), limit=None):
     body = "\n".join(out + issues)
     if limit is None or len(body) <= limit:
         return body
+    # Over budget. `head` deliberately excludes the narration: rule 4/6 says
+    # what gets cut is the PROSE, never the error fields, and the Phase 2
+    # narration is the most prose in the message.
 
     # Over budget. Drop the narrative, keep the header and every issue field,
     # and say so — a message that silently lost its middle is indistinguishable

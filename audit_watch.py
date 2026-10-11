@@ -42,6 +42,23 @@ DISCORD_LIMIT = 1900
 MAX_MESSAGES = int(os.environ.get("AUDIT_WATCH_MAX_MESSAGES", "3"))
 
 
+def _narrator():
+    """The Phase 2 narration callable, or None when it cannot be had.
+
+    Imported lazily and inside a try: this watcher runs from cron every 15
+    minutes and its job is to deliver the log. A missing module, a missing
+    router or a missing key must cost the narration only -- never the
+    message. Returns None, which format_ledger treats as "no narration".
+    """
+    try:
+        import audit_narrate
+    except Exception as exc:
+        print(f"audit_watch: narasi ga dipasang ({type(exc).__name__}: "
+              f"{str(exc)[:80]})", file=sys.stderr)
+        return None
+    return audit_narrate.narrate if audit_narrate.ENABLED else None
+
+
 def load_state():
     try:
         return json.loads(STATE.read_text())
@@ -106,7 +123,8 @@ def format_ledger(data):
     if data.get("entries"):
         return audit_fmt.format_ledger(
             data, checkers=tuple(audit_fmt.ORDER),
-            limit=DISCORD_LIMIT * MAX_MESSAGES)
+            limit=DISCORD_LIMIT * MAX_MESSAGES,
+            narrate=_narrator())
     # A ledger saved before entries were recorded still has its report text.
     # Shipping that beats shipping an empty message.
     title = data.get("title") or os.path.basename(data.get("clip", ""))
