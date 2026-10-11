@@ -134,7 +134,14 @@ def run_once(webhook):
             print(text)
         state.setdefault("sent", []).append(path.name)
         sent += 1
-    save_state(state)
+        # Persist after EACH ledger, not once at the end. `save_state` used to
+        # sit after the loop, so a webhook error mid-batch skipped it entirely
+        # and the next run re-posted everything already delivered. Measured:
+        # ledger 1 posted, HTTP 500 on ledger 2, and the following run sent 2.
+        # Marking a ledger sent is the record that it WAS sent, so it has to
+        # be durable at that moment rather than at the end of a batch that may
+        # not finish.
+        save_state(state)
     return sent
 
 
