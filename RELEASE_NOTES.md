@@ -1,3 +1,34 @@
+## Nge-print itu bukan ngirim
+
+Operator: *"Kok gajalan lognya?"* — setelah sehari cron lapor `ok` tiap 15 menit ke channel yang kosong. Dua-duanya bug gw, dua-duanya fail-silent.
+
+### 1. Nge-print tetap ditandai "terkirim"
+
+`/home/ubuntu/.hermes/audit-watch/webhook` ga pernah ada, jadi `audit_watch.py` cuma `print()` ke stdout. Tapi `run_once()` nandain ledger `sent` **baik dia ke-POST maupun cuma dicetak**. Jadi run cron pertama nyetak 70 ledger ke stdout yang ga ada yang baca, lalu nyatet ketujuh-puluhnya sebagai delivered. `sent` itu permanen, jadi bikin webhook-nya belakangan bakal ngirim **nol** — backlog-nya udah dianggap kelar.
+
+Diukur, bukan ditebak:
+
+    tanpa webhook, run 1 -> nyetak 3.211 huruf, state: {"sent": ["render5.audit.json"]}
+    PAKAI webhook, run 2 -> 0 terkirim
+
+### 2. Dan cron-nya lapor sukses
+
+Webhook hilang cuma jadi catatan di stderr + `exit 0`, jadi scheduler nunjukin ok. **Watchdog yang ga bisa gagal lebih buruk daripada ga ada watchdog** — dia aktif bilang "sepi itu normal". Sekarang `exit 1`, nyebut variabel + path file yang harus dibuat, dan wrapper-nya nolak jalan sama sekali kalau file webhook kosong/ga ada.
+
+Ini keluarga yang sama dengan fail-silent traps yang udah kecatat di repo ini (fallback senyap itu bug walaupun command-nya sukses), dan bentuk yang sama dengan aturan `DID NOT RUN` di ledger — yang ada justru karena gate yang ga nyatet apa-apa kebaca seperti lolos. Gw bikin aturan itu buat gate-gate, terus ship jalur delivery-nya tanpa aturan itu.
+
+### Tes
+
+`tests/_v76.py`, dibuktikan merah **3 cara**: balikin perilaku print-marks-sent, balikin `exit 0` waktu webhook hilang, dan ga pernah nyatet ledger terkirim. Yang ketiga penting — "ya udah jangan pernah nandain terkirim" bakal lolos dua tes pertama **dan bikin flood 1.461 pesan itu balik**.
+
+### Backlog: dibiarin, atas keputusan operator
+
+70 ledger ditandai delivered padahal belum. Gw tanya mau direplay atau ga, jawabannya *"Biarin aja"* — ngosongin list itu = 70 pesan (~84 ribu huruf) masuk sekaligus dan ga bisa di-undo. Jadi entry-nya tetap, tapi `state.json` sekarang punya key `_note` yang jelasin kenapa: nama-nama itu artinya **"skip"**, bukan "udah dibaca manusia". Tanpa catatan itu, sesi berikutnya baca `{"sent": [70 file]}` dan nyimpulin log-nya jalan mulus dari awal.
+
+Cron `agency-agent-log` **dipause** — sesudah fix ini dia gagal dengan benar tiap 15 menit, dan tiap gagal ngirim alert. Nunggu webhook, blocker ketulis di `~/.hermes/audit-watch/BLOCKED-webhook.md`.
+
+— Dalmislave
+
 ## Fase 2: narasi manusia yang ga bisa ngarang fakta
 
 Operator: *"Gas fase 2 dan fix smua anomali"* — lalu, soal model: *"Pake combo1, harusnya dia isinya claude lu cek dl"*.
