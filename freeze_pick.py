@@ -257,6 +257,22 @@ def summarise(rows, freeze_at, debug_path=""):
     }
 
 
+def _clip_words(value, limit):
+    """`value` shortened to `limit` chars on a word boundary, with an ellipsis.
+
+    A hard slice cut mid-word and mid-bracket, so a debug row read
+    "Prabowo Subianto (older man at podium in (turned toward camera, well)" --
+    two opening brackets, one close, and a sentence that stops mid-phrase.
+    These rows are the only record of WHY a frame was rejected, so they have
+    to survive readable.
+    """
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-(")
+    return (cut or text[:limit]) + "…"
+
+
 def pick(video, freeze_at, subject, audit=None, clip_end=None, meta=None):
     """(source timestamp or None, summary dict).
 
@@ -302,8 +318,13 @@ def pick(video, freeze_at, subject, audit=None, clip_end=None, meta=None):
             # enough for this class of error — the same lesson as the flag
             # emoji on the Palestine clip.
             ok = bool(r.get("ok")) and not bool(r.get("blurred"))
-            who = "%s (%s)" % (str(r.get("most_readable") or "")[:40],
-                               str(r.get("why") or "")[:26])
+            # Truncating these at 40 and 26 characters cut mid-word and left
+            # an unbalanced bracket: "Prabowo Subianto (older man at podium
+            # in (turned toward camera, well)". The reason a frame was
+            # rejected is the whole value of this row, so cut on a word
+            # boundary and keep the brackets matched.
+            who = "%s (%s)" % (_clip_words(r.get("most_readable"), 60),
+                               _clip_words(r.get("why"), 40))
             return (t, ok, float(r.get("confidence") or 0.0), who)
         except Exception as e:
             # One frame failing must not abandon the rest: a `break` on a

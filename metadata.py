@@ -224,7 +224,19 @@ _GRIEF = ("dibantai", "dibom", "diserang", "korban", "tewas", "meninggal",
           "penderitaan", "menderita", "kelaparan", "pengungsi")
 
 
-def _fix_emoji(text, transcript, context=""):
+def _emoji_target(kind, field):
+    """"flag emoji" -> "flag emoji (judul)".
+
+    _fix_emoji runs once per field — hook, title, description — and each call
+    recorded under the same target, so the ledger carried
+    "✅ flag emoji — kept 🇵🇸" twice in a row with no way to tell which text
+    each verdict was about. Two identical lines read like a repeat bug; they
+    were two real checks with no name.
+    """
+    return f"{kind} ({field})" if field else kind
+
+
+def _fix_emoji(text, transcript, context="", field=""):
     """Drop flags the clip does not support and cheer emoji on a grief clip.
 
     The copy model was told to use 🇮🇩 by the pr-politik preset and did so on a
@@ -255,11 +267,12 @@ def _fix_emoji(text, transcript, context=""):
         for f in dropped:
             text = text.replace(f, "")
         if dropped:
-            audit.rejected("copy", "flag emoji",
+            audit.rejected("copy", _emoji_target("flag emoji", field),
                            f"{len(dropped)} removed",
                            "country not named in the clip")
         elif keep:
-            audit.passed("copy", "flag emoji", f"kept {keep[0]}",
+            audit.passed("copy", _emoji_target("flag emoji", field),
+                         f"kept {keep[0]}",
                          "country named in the clip")
 
     if grief:
@@ -267,8 +280,8 @@ def _fix_emoji(text, transcript, context=""):
         for ch in _CHEER:
             text = text.replace(ch, "")
         if text != before:
-            audit.rejected("copy", "cheer emoji", "removed",
-                           "grief clip")
+            audit.rejected("copy", _emoji_target("cheer emoji", field),
+                           "removed", "grief clip")
 
     # Tidy the gaps the removals leave behind.
     text = re.sub(r"\s{2,}", " ", text)
@@ -409,9 +422,9 @@ def generate(transcript, requirements, platform="youtube", context=None,
     # Flags and cheer emoji last, after masking, so the check sees the final
     # text. A wrong flag is not a tone problem — it misreads whose story this
     # is, and the preset actively encourages it.
-    hook = _fix_emoji(hook, transcript, context or "")
-    title = _fix_emoji(title, transcript, context or "")
-    desc = _fix_emoji(desc, transcript, context or "")
+    hook = _fix_emoji(hook, transcript, context or "", "hook")
+    title = _fix_emoji(title, transcript, context or "", "judul")
+    desc = _fix_emoji(desc, transcript, context or "", "deskripsi")
 
     return {"hook": hook, "title": title, "description": desc,
             "youtube_tags": tags[:15], "punchline_words": punchline, "mood": mood,

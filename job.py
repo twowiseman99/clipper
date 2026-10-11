@@ -1049,9 +1049,21 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                          f"preset {mood!r} vs transcript {meta['mood']!r}",
                          f"kept {mood!r} (explicit --clip-type)")
     track, why = bgm.pick(_mood, key=f"job:{int(seg_start)}")
-    audit.briefed("sound", f"mood = {_mood!r}",
-                  "operator override" if (mood and not mood_from_preset)
-                  else "read from transcript",
+    # Where _mood CAME FROM, which is not always the transcript. The brief
+    # said "mood = 'hype', dibaca dari transkrip" on a render whose transcript
+    # read 'emotional' and whose own next line was a clash warning -- the
+    # brief contradicted the verdict directly underneath it. Three sources are
+    # possible and only one of them is the transcript.
+    if mood and not mood_from_preset:
+        _origin = "dipaksa operator (--mood)"
+    elif mood_from_preset and meta.get("mood") and meta["mood"] != mood:
+        _origin = (f"dari preset --clip-type, transkripnya kebaca "
+                   f"{meta['mood']!r}")
+    elif mood_from_preset:
+        _origin = "dari preset --clip-type"
+    else:
+        _origin = "dibaca dari transkrip"
+    audit.briefed("sound", f"mood = {_mood!r}", _origin,
                   f"{len(bgm.load_tracks())} track(s) on this box")
     if track:
         audit.passed("sound", track.get("file", "?"),
@@ -1330,7 +1342,15 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         "hook": meta["hook"],
         "title": meta["title"],
         "description": meta["description"],
+        # DO NOT change this to _mood. `mood` is the clip's own reading and is
+        # part of the render contract, not a logging field: pipeline.py picks
+        # BGM from it and the operator reads it as "what is this clip". The
+        # ledger header disagreeing with the music line is a LOG defect and is
+        # fixed in the log, by passing the used mood as its own meta key.
         "mood": meta.get("mood"),
+        # The mood the render actually scored with, for the ledger header
+        # only. Separate key so nothing downstream changes meaning.
+        "mood_used": _mood,
         "music": track["file"] if track else None,
         "attribution": (track or {}).get("attribution") or None,
         # Anything that degraded the clip without failing the job. An empty
@@ -1361,6 +1381,7 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                     "file": out,
                     "title": result.get("title", ""),
                     "mood": result.get("mood", ""),
+                    "mood_used": result.get("mood_used", ""),
                     "music": result.get("music", ""),
                     "duration_sec": result.get("duration_sec", 0),
                     "warnings": result.get("warnings", []),

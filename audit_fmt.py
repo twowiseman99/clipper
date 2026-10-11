@@ -336,8 +336,15 @@ def headline(data):
     facts = [f"{checks} cek · {verdict}"]
     if data.get("duration_sec"):
         facts.insert(0, f"{data['duration_sec']:.0f} detik")
-    if data.get("mood"):
-        facts.insert(-1, f"mood {data['mood']}")
+    # The header said "mood emotional" on a render scored with a 'hype' track,
+    # contradicting the music line three lines below it. Both are true: the
+    # clip READS emotional and was SCORED hype because --clip-type said so.
+    # The header has to show that, not pick one and look wrong.
+    used, read = data.get("mood_used"), data.get("mood")
+    if used and read and used != read:
+        facts.insert(-1, f"mood {used} (transkrip baca {read})")
+    elif read or used:
+        facts.insert(-1, f"mood {read or used}")
     return facts
 
 
