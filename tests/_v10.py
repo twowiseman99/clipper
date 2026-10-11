@@ -19,7 +19,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 import edit
 import segments
 
-WORDS = "media/uf9833efdc72b/PPOKdwOCMLA.words.json"
+# Committed fixture first, media cache as fallback. See the note in _v9.py:
+# `.gitignore` excluded this transcript twice over, so both tests sat red for a
+# missing file rather than a real regression.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+WORDS = next(
+    (p for p in (os.path.join(_HERE, "fixtures", "PPOKdwOCMLA.words.json"),
+                 "media/uf9833efdc72b/PPOKdwOCMLA.words.json")
+     if os.path.exists(p)),
+    None)
+assert WORDS, (
+    "PPOKdwOCMLA.words.json is missing from tests/fixtures/ and from the media "
+    "cache. It is a committed fixture; restore it from git rather than "
+    "re-downloading the source.")
 raw = json.load(open(WORDS))
 raw = raw["words"] if isinstance(raw, dict) else raw
 

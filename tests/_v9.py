@@ -20,7 +20,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import broll
 
-WORDS = "media/uf9833efdc72b/PPOKdwOCMLA.words.json"
+# The committed fixture comes first. This used to point only at
+# media/uf9833efdc72b/, which `.gitignore` excludes twice over (`media/` and
+# `*.words.json`), so the transcript could never be committed and this test died
+# every time the media cache was cleared — red across several releases for a
+# missing file rather than a real regression. The media path stays as a fallback
+# so a box that still has the cache keeps working.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+WORDS = next(
+    (p for p in (os.path.join(_HERE, "fixtures", "PPOKdwOCMLA.words.json"),
+                 "media/uf9833efdc72b/PPOKdwOCMLA.words.json")
+     if os.path.exists(p)),
+    None)
+assert WORDS, (
+    "PPOKdwOCMLA.words.json is missing from tests/fixtures/ and from the media "
+    "cache. It is a committed fixture; restore it from git rather than "
+    "re-downloading the source.")
 CTX = "Prabowo membela Palestina di depan banyak pemimpin negara, di Gontor"
 
 raw = json.load(open(WORDS))

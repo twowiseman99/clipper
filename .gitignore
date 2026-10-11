@@ -10,8 +10,18 @@ clippo_session.json
 media/
 *.words.json
 *.heatmap.json
+# ...but test fixtures are source, not runtime state. `media/` plus the global
+# `*.words.json` rule meant the transcripts _v9/_v10 assert against could never
+# be committed, so both tests died whenever the media cache was cleared and sat
+# red for releases. 28K of JSON is cheaper than re-downloading a 79MB video and
+# re-running whisper to recover a known-good fixture.
+!tests/fixtures/
+!tests/fixtures/*.words.json
 jobs/
 reports/
+# Reference clips downloaded to compare a look against. Inputs to a judgement,
+# not fixtures any test reads, so they stay out of the repo.
+refs/
 # render scratch — removed in a finally, but a killed render leaves it behind
 temp_subs_*/
 .job.lock
