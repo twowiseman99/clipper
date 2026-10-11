@@ -60,7 +60,12 @@ def test_summary_matches_rows():
     # the gate was close or nowhere near.
     s = freeze_pick.summarise(rows(31), 149.0)
     assert s["picked"] is None and s["qualified"] == 0, s
-    assert abs(s["best_conf"] - 0.72) < 1e-9, s
+    # `confidence` on a REJECTED frame is confidence that it is somebody
+    # else, so it is not comparable to MIN_CONF. With nothing qualifying,
+    # best_conf must be 0.0 -- reporting 0.72 as "best, below the 0.55 floor"
+    # described a number above the floor as below it.
+    assert s["best_conf"] == 0.0, s
+    assert abs(s["best_conf_rejected"] - 0.72) < 1e-9, s
     assert s["min_conf"] == freeze_pick.MIN_CONF, s
 
 
@@ -189,10 +194,14 @@ def test_check_count_matches_the_sections():
 
     assert f"{len(decided)} cek" in body, \
         f"header disagrees with {len(decided)} decisions:\n{body}"
-    # Every decision shows up as exactly one marked line, so the count in the
-    # header can be checked against the body by eye.
-    marked = [ln for ln in body.split("\n")
-              if ln[:1] in ("✅", "❌", "⚠️") or ln.startswith("⚠️")]
+    # Every decision shows up as exactly one marked line in the NARRATIVE, so
+    # the count in the header can be checked against the sections by eye.
+    # "Perlu dicek sebelum upload" deliberately repeats the ⚠️/❌ with their
+    # error fields, per the agreed message format, so it is excluded here
+    # rather than counted twice.
+    narrative = body.split("**Perlu dicek sebelum upload:**")[0]
+    marked = [ln for ln in narrative.split("\n")
+              if ln[:1] in ("✅", "❌") or ln.startswith("⚠️")]
     assert len(marked) == len(decided), f"{len(marked)} marked lines:\n{body}"
     # And the reject keeps its aggregate, which is what replaced the 31 rows.
     assert "31 frame dicek" in body, body

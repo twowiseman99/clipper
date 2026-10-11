@@ -239,8 +239,17 @@ def summarise(rows, freeze_at, debug_path=""):
         "window": (times[0], times[-1]) if times else (None, None),
         "freeze_at": freeze_at,
         "top_reason": reasons.most_common(1)[0] if reasons else ("", 0),
-        "best_conf": max((r[2] for r in rows), default=0.0),
-        "best_conf_ok": max((r[2] for r in rows if r[1]), default=0.0),
+        # `confidence` is the model's confidence IN ITS OWN READING, not a
+        # score for the subject: on a rejected frame 0.95 means "certain this
+        # is somebody else". Reporting max() over all rows produced
+        # "conf terbaik 0.95 < ambang 0.55" -- a bigger number described as
+        # below the floor, drawn from the frame the gate was most sure to
+        # throw away. Only confidences on frames that READ AS THE SUBJECT are
+        # comparable to MIN_CONF, so that is what `best_conf` now is; the
+        # other figure is kept separately and named for what it is.
+        "best_conf": max((r[2] for r in rows if r[1]), default=0.0),
+        "best_conf_rejected": max((r[2] for r in rows if not r[1]),
+                                  default=0.0),
         "min_conf": MIN_CONF,
         "picked": (min(good, key=lambda r: abs(r[0] - freeze_at))[0]
                    if good else None),

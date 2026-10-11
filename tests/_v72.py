@@ -195,10 +195,59 @@ def test_one_render_fits_three_messages():
     assert len(text) <= audit_watch.DISCORD_LIMIT * audit_watch.MAX_MESSAGES
 
 
+def test_decimal_comma_never_touches_a_path():
+    """`_num` applies to measurements, not to the stamp inside a file name.
+
+    The pattern was `(\\d)\\.(\\d)` -> `\\1,\\2`, described as "only a bare
+    number". It rewrote the debug path a real render printed into
+    `.../render3,20261011-185702.freeze.json` -- a file that does not exist,
+    in the one field whose whole purpose is to be openable.
+    """
+    measurements = {
+        "28.4": "28,4",
+        "conf 0.48 < ambang 0.55": "conf 0,48 < ambang 0,55",
+        "144.27s-150.27s (31 frame)": "144,27s-150,27s (31 frame)",
+        "clip 27.29s": "clip 27,29s",
+        "lantai gerakan 0.00": "lantai gerakan 0,00",
+    }
+    for src, want in measurements.items():
+        got = audit_fmt._num(src)
+        assert got == want, f"{src!r} -> {got!r}, wanted {want!r}"
+
+    verbatim = [
+        "/home/ubuntu/clipper/jobs/freeze-debug/render3.20261011-185702"
+        ".freeze.json",
+        "jobs/freeze-debug/render3.20261011-185702.freeze.json",
+        "5s terakhir dari clip_1791642180_122.mp4",
+        "hype_dj_nansuya_gang.mp3",
+        "media/f9833efdc72b/PPOKdwOCMLA.mp4",
+        "v1.2.3",
+    ]
+    for src in verbatim:
+        got = audit_fmt._num(src)
+        assert got == src, f"rewrote {src!r} -> {got!r}"
+
+    # And end to end: the debug path in a rendered message must be a path
+    # that exists on disk, character for character.
+    body = audit_fmt.format_ledger(
+        ledger_with([WARN], [REJECT], {"pass": 7, "reject": 1, "warn": 1}))
+    path = split_debug_path(REJECT["detail"])
+    assert path and path in body, \
+        f"debug path mangled in the message:\n{body}"
+
+
+def split_debug_path(detail):
+    for part in detail.split():
+        if part.endswith(".freeze.json"):
+            return part
+    return ""
+
+
 def main():
     test_no_mid_sentence_substitution()
     test_corrupted_forms_cannot_be_produced()
     test_filenames_survive_both_paths()
+    test_decimal_comma_never_touches_a_path()
     test_detail_fields_are_structured_and_untranslated()
     test_narrative_is_cut_before_the_error_fields()
     test_one_render_fits_three_messages()

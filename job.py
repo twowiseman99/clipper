@@ -1199,9 +1199,13 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                     f" | video: {_fsum['window'][0] or 0:.2f}s-"
                     f"{_fsum['window'][1] or 0:.2f}s"
                     f" ({_fsum['frames']} frame, {_fsum['qualified']} lolos)"
-                    f" | trigger: conf terbaik {_fsum['best_conf']:.2f} vs "
-                    f"ambang {_fsum['min_conf']:.2f}"
-                    f" | error: no qualifying frame"
+                    + (f" | trigger: conf terbaik {_fsum['best_conf']:.2f} "
+                       f"vs ambang {_fsum['min_conf']:.2f}"
+                       if _fsum["best_conf"] else
+                       " | trigger: ga ada frame yang kebaca sebagai "
+                       f"{_subject} sama sekali (ambang "
+                       f"{_fsum['min_conf']:.2f} ga pernah diuji)")
+                    + " | error: no qualifying frame"
                     + (f" ({_why}, {_n}x)" if _why else "")
                     + " | fallback: mechanical frame"
                     + f" | debug: {_fsum['debug'] or '(gagal ditulis)'}")
@@ -1210,11 +1214,16 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                 # pass/reject/warn.
                 audit.rejected(
                     "freeze", "pick", "no qualifying frame",
-                    "%d frame dicek, 0 lolos · conf terbaik %.2f < ambang "
-                    "%.2f · alasan tersering: %s (%dx) · fallback frame "
-                    "mekanis · debug %s"
-                    % (_fsum["frames"], _fsum["best_conf"],
-                       _fsum["min_conf"], _why or "—", _n,
+                    "%d frame dicek, 0 lolos · %s · alasan tersering: %s "
+                    "(%dx) · fallback frame mekanis · debug %s"
+                    % (_fsum["frames"],
+                       ("conf terbaik %.2f < ambang %.2f"
+                        % (_fsum["best_conf"], _fsum["min_conf"]))
+                       if _fsum["best_conf"] else
+                       ("ga ada frame yang kebaca sebagai %s, jadi ambang "
+                        "%.2f ga pernah diuji" % (_subject,
+                                                  _fsum["min_conf"])),
+                       _why or "—", _n,
                        _fsum["debug"] or "(gagal ditulis)"))
             else:
                 freeze_at = max(0.0, _picked - seg_start)
@@ -1243,7 +1252,7 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                              "clip %.2fs · %d frame dicek, %d lolos · conf "
                              "%.2f (ambang %.2f) · debug %s"
                              % (freeze_at, _fsum["frames"],
-                                _fsum["qualified"], _fsum["best_conf_ok"],
+                                _fsum["qualified"], _fsum["best_conf"],
                                 _fsum["min_conf"],
                                 _fsum["debug"] or "(gagal ditulis)"))
                 _log(f"freeze frame picked at {_picked:.2f}s")

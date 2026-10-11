@@ -217,8 +217,28 @@ def _trim_detail(target, reason, detail):
 
 
 def _num(value):
-    """Indonesian decimal comma, applied only to a bare number."""
-    return re.sub(r"(\d)\.(\d)", r"\1,\2", str(value))
+    """Indonesian decimal comma, applied only to a MEASUREMENT.
+
+    "Only a bare number" was not what the pattern did: it rewrote any digit
+    pair around a dot, which includes the stamp inside a path. A real render
+    printed the debug file as
+    `jobs/freeze-debug/render3,20261011-185702.freeze.json` -- a path that
+    does not exist, in the field whose whole job is to be openable.
+
+    Literals are masked out first, by the same rule that protects a file name
+    from translation, so a decimal point only becomes a comma in prose.
+    """
+    # Not preceded by a word character, slash or dot, and not followed by a
+    # digit, slash, dot or underscore -- those would make it part of an
+    # identifier, a version or a path. A dash is allowed on BOTH sides: a
+    # range reads "144.27s-150.27s" and both halves are measurements. Paths
+    # are already masked above, which is what keeps a dash inside a file
+    # stamp out of reach.
+    masked, literals = _protect(str(value))
+    out = re.sub(r"(?<![\w/.])(\d+)\.(\d+)(?![\d/._])", r"\1,\2", masked)
+    for i, lit in enumerate(literals):
+        out = out.replace("\x00%d\x00" % i, lit)
+    return out
 
 
 def line(entry):
