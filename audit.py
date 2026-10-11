@@ -55,6 +55,13 @@ DIVISIONS = {
     "sound": ("specialized", "specialized-focus-music-architect"),
     # Render-level facts: cutaway placement, outro, pacing.
     "edit": ("marketing", "marketing-short-video-editing-coach"),
+    # Which single frame the clip freezes on at the end. A different question
+    # from "footage": not "is this footage of the event" but "is this frame a
+    # readable picture of the person the clip is about", which fails on
+    # entirely correct footage whenever the subject is in profile or a
+    # bystander's head is larger. Unregistered until now, so the ledger
+    # printed "freeze" as both its own section label and its reviewer.
+    "freeze": ("testing", "pemilih-gambar"),
 }
 
 # Where the agent files live. Overridable so a checkout elsewhere still

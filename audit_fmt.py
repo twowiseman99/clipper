@@ -31,11 +31,16 @@ SECTIONS = {
     "language": "Transkrip",
     "sound": "Musik",
     "edit": "Editing",
+    # Which frame the clip freezes on at the end. Registered late: until it
+    # was in this table and in audit.DIVISIONS, the section header read
+    # "**freeze** · freeze" — the internal name standing in for both the
+    # subject and the reviewer.
+    "freeze": "Gambar penutup",
 }
 
 # Order the reader cares about: what was said, how it was written, how it
 # sounds, how it was cut, then the b-roll gates that reject most often.
-ORDER = ["language", "copy", "sound", "edit", "sourcing", "footage"]
+ORDER = ["language", "copy", "sound", "edit", "freeze", "sourcing", "footage"]
 
 MARK = {audit.PASS: "✅", audit.REJECT: "❌", audit.WARN: "⚠️"}
 
