@@ -14,6 +14,14 @@ cd "$(dirname "$0")/.." || exit 1
 PY=.venv/bin/python
 fail=0
 
+# Drop stale bytecode before anything imports. Python decides a .pyc is valid by
+# comparing the source's mtime, and a file restored with `cp` (reverting an
+# experiment, checking out a branch) can land with a timestamp the cache already
+# matches -- measured here as edit.py and edit.cpython-311.pyc sharing mtime
+# 1791700879 exactly. The symptom is a test reading a constant the source file
+# does not contain, which looks like a plumbing bug and is not one.
+find . -maxdepth 2 -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null
+
 echo "== module self-checks =="
 # audit/audit_fmt/audit_watch were missing from this list while all three had
 # self-checks, so the ledger's own tests only ran when someone remembered to

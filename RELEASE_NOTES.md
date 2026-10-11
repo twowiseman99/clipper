@@ -1,3 +1,77 @@
+## The jamet preset is settled, and a decision-lock is not a quality gate
+
+Operator, after watching the delivered file: *"Cakep ni untuk preset jedag jedug
+sempurna! Simpen ya logicnya"*, and then naming the shape of it himself:
+*"Berarti bisa 3 field ini, hook, video utama, gambar untuk outro"*.
+
+Three inputs, each its own flag, verified against `job.py --help` rather than
+from memory:
+
+    --opening    hook footage shown first (local file or URL, --opening-start)
+    --content    the video the clip is cut from
+    --portrait   the still held at the END of the outro
+
+### Where the logic now lives
+
+`clipper-operations` gained `references/jamet-preset-settled.md`: the three
+inputs, the four movements of the ending, every approved constant with the
+reason it has that value, the delivered measurements a future render can be
+compared against, and the one defect deliberately left alone.
+
+I also wrote it into `tests/_v67.py` as a decision-lock, because a document can
+be ignored and a test cannot.
+
+That test deliberately breaks this repo's own rule — assert the property, never
+the number being tuned. The rule is right for numbers still being tuned. These
+are not: each one is approved, and two of them are places where I pushed in the
+wrong direction and the operator's measured reference overruled me. So its
+failure message does not say "this value is wrong", it says someone is changing
+an approved value, and points at the skill reference. The properties those
+values produce stay covered by `_v41`, `_v43`, `_v46`, `_v60`, `_v65`, `_v66`,
+which must pass on their own merits.
+
+It also asserts `portrait` is plumbed through `job.run` and read by
+`render_clip` — a flag that is accepted but never read is the exact
+config-plumbing failure this repo has hit before, where the test sets a global,
+passes, and the renderer stays broken.
+
+Verified the lock can fail: changed `OUTRO_PORTRAIT_SPIN` from 540 to 360 and it
+named the value, the approved number and the operator's words. A test that
+cannot fail is decoration.
+
+### A stale .pyc impersonated a plumbing bug
+
+Restoring `edit.py` from a backup copy after that negative control left the test
+still reading 360 while the source file plainly said 540, `git diff` was empty,
+and `.env` and the environment were both clean. One assignment in the file, one
+value in the module, and they disagreed.
+
+Python validates a `.pyc` by comparing the source's mtime, and `cp` had restored
+`edit.py` with a timestamp the cache already matched — measured as
+`edit.py` and `edit.cpython-311.pyc` sharing mtime `1791700879` exactly.
+
+`tests/run_all.sh` now clears `__pycache__` before anything imports. The symptom
+is worth recognising directly: a test reading a constant the source does not
+contain is a bytecode cache, not a bug, and chasing it through the call chain
+costs real time. It belongs next to the no-op detector — same family, where the
+file on disk and the thing being executed are not the same thing.
+
+### Documentation that had gone stale
+
+The tuned-settings table still listed `CLIPPER_PAN` as `0` with "camera movement
+was distracting", while `.env` has carried `1` since the two-slide decision was
+approved. A note that contradicts the box is worse than no note. Corrected with
+the measurement that settled it.
+
+`CLAUDE.md` could not be extended with the preset section — writes to
+agent-instruction files need the operator's approval and the prompt timed out —
+so the skill reference carries it, which is read automatically each session
+anyway.
+
+Suite 68 green. `_v9`/`_v10` still red on a missing fixture, red on clean HEAD.
+
+    -- Dalmislave
+
 ## The portrait gets hit too, and corner luminance is the wrong instrument
 
 Operator, reversing a call I had made on my own: "gambar formalnya juga harus

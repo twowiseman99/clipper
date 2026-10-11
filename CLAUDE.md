@@ -53,7 +53,7 @@ not defaults: each one is the result of watching a rendered clip and changing it
 
 | Setting | Value | Why |
 |---|---|---|
-| `CLIPPER_PAN` | `0` | Camera movement was distracting on talking-head footage. |
+| `CLIPPER_PAN` | `1` | Two slides per clip at `PAN_GAP=6.0`, approved after a frozen window left the subject out of frame 56% of the time. Do NOT drop to 0 or to one slide; move COUNT is the lever, not speed. |
 | `ZOOM_CYCLE` | `12` | One slow zoom per ~12s; faster reads as a wobble. |
 | `CLIPPER_CAPTION_STYLE` | `editorial` | Plate alpha 215 + 3px stroke for legibility. Karaoke kept. |
 | hook font | `64` | Larger wrapped to three lines and hit the UI band. |
