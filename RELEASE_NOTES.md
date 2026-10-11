@@ -1,3 +1,170 @@
+## Fase 1: the agency log stops flooding, and its numbers stop lying
+
+Operator: *"Satu render menghasilkan 179 pesan Discord dan 328.206 karakter kena truncate."*
+
+Six fixes, one commit each, every one verified against a real run. The
+headline number: **2.629.535 karakter → 84.197 across all 70 ledgers, 1.461
+pesan → 70.** No render takes more than one message now; the worst one took 67.
+
+Baseline before any change: `6f3dff7`.
+
+### What was actually wrong
+
+My diagnosis of a duplicated ledger was wrong, and the operator's instinct that
+something was being stored repeatedly was wrong too. `clip_1791642180_122.audit.json`
+holds 45 entries, 33 of them `freeze`, **all unique**. The repetition was mine,
+in `audit_fmt.py`:
+
+```python
+names = ORDER + [c for c in checkers if c not in ORDER]
+names += [c for c in seen if c not in names]
+```
+
+The second line reads like a dedupe and is not one. The comprehension is fully
+evaluated before `+=` appends anything, so `c not in names` tests the list as
+it was *before* the statement — every one of the 33 `freeze` entries passes.
+`names` ended up holding `freeze` 33 times, and the section printed 33 times.
+Two lines, 120.920 characters.
+
+Underneath that sat a second defect that made each repetition expensive: the
+gate recorded **one ledger entry per judged frame**, 31 of them, under a fourth
+verdict `"info"` that `audit.counts()` does not count and `format_ledger` printed
+anyway. So the header said "8 cek" while the body ran to 1.023 lines of
+`beku-pick`. And `freeze` was in neither `DIVISIONS` nor `SECTIONS`, so the
+header leaked the internal name: `**freeze** · freeze`.
+
+### The six fixes
+
+**1 · One section per checker** (`dfae985`). Explicit loop, order preserved.
+`_v68` builds a ledger with 33 entries under an unregistered checker and
+asserts the header appears exactly once — red against the restored bug.
+
+**2 · A ledger is marked sent when it is sent** (`a229743`). The operator asked
+me to prove re-sending happened before adding a `(render_id, section)` marker.
+The happy path was already idempotent — ten consecutive runs, one message. But
+`save_state()` was called once after the loop, so a webhook failure mid-batch
+meant the state was never written and everything already posted went out again.
+Measured: 1 ledger posted, HTTP 500 on the second, next run sent **2**. The
+marker was the wrong granularity for the real bug; the fix is *when* state is
+saved, not *what* it keys on. `_v69` fails a post mid-batch and asserts the
+survivor is never re-sent.
+
+**3 · Per-frame diagnostics leave the ledger** (`da432a7`). `freeze_pick.pick`
+returns `(timestamp, summary)` and writes every judged frame to
+`jobs/freeze-debug/<render>.<stamp>.freeze.json`, 60 kept. The ledger gets one
+verdict carrying frames checked, qualified, window, commonest rejection, best
+comparable confidence, threshold and decision. A diagnostics file that cannot
+be written returns `""` and never fails a render. `format_ledger` now skips
+unknown verdicts and prints a warning naming the checker and the count, so the
+next gate with a novel verdict is reported rather than printed 31 times.
+
+**4 · Whole-string translation only** (`c895c87`). The phrase table replaced any
+key found anywhere, so strings it did not describe came out half-translated:
+the model's own "right edge of frame" shipped as "right edge **dari** frame",
+the field name `subject` became `subjek` mid-English-clause, and `--clip-type`
+became `--klip-type` — a flag that does not exist, printed as if it could be
+pasted. A table of phrases is not a translator. Now: whole-string match, or
+`re.fullmatch` against a numeric pattern, or the English ships untouched.
+
+**5 · Mood clash written in Indonesian at the call site** (same commit). That
+sentence could never have matched a table entry and had been shipping in English
+for weeks. It is now written where the two moods and the flag name are in scope,
+with its detail fields. Flags, mood keywords, file names and function names stay
+verbatim.
+
+**6 · The cut takes the narrative, never the fields** (same commit). Warnings
+carry `narasi | stage: … | source: … | debug: …`, rendered as an aligned code
+block under **Perlu dicek sebelum upload**. Past `DISCORD_LIMIT * MAX_MESSAGES`
+the narrative is dropped, the header and every error field kept, and the cut is
+stated with the debug path. Previously a render was split across as many
+messages as it took and truncated anyway — losing exactly the part a reader
+needed.
+
+### Two defects the render found that the tests had not
+
+Both came out of reading the output of an actual render, not from the suite.
+
+**"conf terbaik 0,95 vs ambang 0,55"** on a reject. `confidence` is the model's
+confidence in its own *reading*, not a score for the subject — on a rejected
+frame 0.95 means "certain this is somebody else". Taking `max()` over all frames
+offered a number above the floor as the reason nothing cleared it, drawn from
+the frame the gate was most sure to discard. `best_conf` is now the best among
+frames that read as the subject; the rest is `best_conf_rejected`. When nothing
+read as the subject there is no comparable number, and the log says so rather
+than inventing one. `_v73` asserts the reported figure can never contradict the
+verdict.
+
+**A debug path rewritten into one that does not exist.** `_num` was documented
+as applying "only to a bare number" and was a bare digit-dot-digit substitution,
+so it turned `render4.20261011-190352.freeze.json` into
+`render4,20261011-190352.freeze.json` — in the one field whose purpose is to be
+openable. It now masks literals first, like the translator does.
+
+Both were in code that passed its tests. The lesson is the operator's rule
+restated: read the delivered artifact, not the assertion about it.
+
+### Verified
+
+Real `audit_watch.sh` runs, not simulations. Final render `render4`:
+
+```
+RUN 1 → 1 render, 2.935 karakter, 2 pesan, path debug valid on disk
+RUN 2 → silent
+RUN 3..10 → silent (0 karakter each)
+```
+
+Before vs after over all 70 ledgers:
+
+| | sebelum | sesudah |
+|---|---|---|
+| karakter | 2.629.535 | 84.197 |
+| pesan Discord | 1.461 | 70 |
+| baris `beku-pick` | 23.375 | 0 |
+| maks pesan / render | 67 | 1 |
+| maks karakter / render | 120.920 | 1.843 |
+| render > 3 pesan | 25 | 0 |
+| header `freeze` / render | 34 | 1 |
+
+Every fix has a test verified red against the restored bug: substring
+substitution restored → `_v72` red on "right edge dari frame"; naive tail
+truncation → red on the narrative surviving instead of the fields; `freeze`
+pulled from `DIVISIONS` → `_v70` red; `best_conf` back to `max()` over all rows
+→ `_v73` red; the old `_num` → red on `v1.2.3`.
+
+### Dua tabel lagi yang full-suite temukan
+
+Gw lapor "freeze satu-satunya yang belum terdaftar, 6 lainnya lengkap" setelah
+audit `audit.DIVISIONS` dan `audit_fmt.SECTIONS`. Ada tabel **ketiga**:
+`agent_skills.SKILLS`, yang nentuin skill apa yang dibaca reviewer gate itu.
+`freeze` ga ada di situ, dan `_v38` yang nangkep — bukan gw. `_v70` gw sendiri
+cuma nagih 2 dari 3 tabel, lalu bilang himpunannya lengkap: bentuk kesalahan
+yang sama persis dengan gate yang mau dia tangkep. Sekarang `_v70` nagih
+keempat tabel (`DIVISIONS`, `SECTIONS`, `ORDER`, `SKILLS`) dan bahwa semuanya
+mendeskripsikan himpunan yang sama.
+
+Dan satu repr Python bocor ke chat: gate musik ngirim list mood apa adanya,
+jadi reason-nya `mood ['hype']` — kurung dan kutip ikut. Ada entri `NUMERIC`
+lama yang match string itu lalu menggantinya **dengan dirinya sendiri** —
+keliatan seperti terjemahan, isinya no-op — dan dia duduk di ATAS pola yang
+seharusnya benerin, jadi aturan baru gw ga pernah kesampaian. Itu kelas
+no-op-detector: yang jalan bukan yang gw tulis.
+
+### Logged, deliberately not fixed
+
+`KNOWN_ISSUES.md` records the product defect behind all of this: the closing
+freeze can hold a bystander's face. The gate is reading the frames correctly —
+30 of 31 rejections say the frontal, well-lit face belongs to someone in the
+crowd while the subject is in profile — so the footage does not contain what the
+ending needs, and the defect is the fallback shipping the mechanical frame
+anyway. The issue names the evidence render, the window, the counts, and the
+four things that must be measured first. It also records what not to do:
+lowering `MIN_CONF` would ship the bystander with the log claiming it passed.
+
+Fase 2 (the LLM narration layer) is not started, per instruction.
+
+— Dalmislave
+
+
 ## Suite fully green for the first time: the fixture was gitignored, not missing
 
 Operator: *"gas perbaiki semua!"*
