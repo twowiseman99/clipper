@@ -1030,11 +1030,21 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
     _mood = mood or meta.get("mood")
     if mood_from_preset and meta.get("mood") and meta["mood"] != mood:
         if bgm._clashes(mood, meta["mood"]):
+            # Written in Indonesian HERE rather than translated downstream.
+            # audit_fmt's tables only match whole strings, and this sentence
+            # carries two moods and a flag name, so it would never match one
+            # -- it shipped to the channel in English for weeks. The flag,
+            # the mood keywords and the file/function names stay as they are:
+            # they are things the operator types, not prose.
             warnings.append(
-                f"music mood: --clip-type asks for {mood!r} but the "
-                f"transcript reads {meta['mood']!r}, which clash — kept "
-                f"{mood!r} because the clip type was requested explicitly; "
-                f"pass --mood {meta['mood']} to use the transcript's")
+                f"musik: --clip-type minta {mood!r} tapi transkripnya "
+                f"kebaca {meta['mood']!r}, dua-duanya tabrakan — tetep pakai "
+                f"{mood!r} karena clip type diminta eksplisit"
+                " | stage: music | source: job.py:run (bgm._clashes)"
+                f" | trigger: preset {mood!r} vs transcript {meta['mood']!r}"
+                f" | error: mood clash, kept {mood!r} (explicit --clip-type)"
+                f" | fix: pakai --mood {meta['mood']}"
+                f" | fallback: preset {mood!r} dipakai buat milih lagu")
             audit.warned("sound", "mood clash",
                          f"preset {mood!r} vs transcript {meta['mood']!r}",
                          f"kept {mood!r} (explicit --clip-type)")
@@ -1076,7 +1086,11 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         audit.warned("edit", "cutaways placed", "0",
                      "no footage passed the gates")
         if not any(w.startswith("b-roll:") for w in warnings):
-            warnings.append("b-roll: no cutaways were placed")
+            warnings.append(
+                "b-roll: ga ada cutaway yang kepasang"
+                " | stage: editing | source: job.py:_gather_inserts"
+                " | error: no cutaways were placed"
+                " | fallback: klip jalan tanpa b-roll")
 
     # The ending is this division's other output, and it was invisible. The
     # jamet render printed "edit DID NOT RUN" while the graph really did carry
@@ -1100,8 +1114,12 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         audit.warned("edit", "outro", _kind,
                      f"clip too short — {_span * 3:.0f}s needed")
         warnings.append(
-            f"outro {_kind}: clip is {seg_end - seg_start:.1f}s, needs "
-            f"{_span * 3:.0f}s — no closing treatment applied")
+            f"ending {_kind}: klipnya cuma {seg_end - seg_start:.1f}s, butuh "
+            f"{_span * 3:.0f}s — jadi ga ada ending sama sekali"
+            " | stage: editing | source: job.py:run"
+            f" | trigger: {seg_end - seg_start:.1f}s < {_span * 3:.0f}s"
+            f" | error: clip too short for a {_span:.0f}s ending"
+            " | fallback: no closing treatment")
     else:
         audit.passed("edit", "outro", _kind, f"last {_span:.0f}s")
 
@@ -1231,8 +1249,11 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                 _log(f"freeze frame picked at {_picked:.2f}s")
         else:
             warnings.append(
-                "freeze frame: no subject to check against — the frozen frame "
-                "was not verified")
+                "gambar penutup: ga ada subjek buat dicek — frame bekunya ga "
+                "diverifikasi sama sekali"
+                " | stage: freeze | source: job.py:run"
+                " | error: no subject to check against"
+                " | fallback: mechanical frame, ga ada gate")
 
     _log(f"rendering {seg_end - seg_start:.0f}s...")
     edit.render_clip(content, seg_start, seg_end, seg_words, out,
@@ -1266,13 +1287,22 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         if _still is None:
             audit.warned("edit", "freeze", "not measured",
                          "ffmpeg motion probe failed")
-            warnings.append("outro jamet: could not verify the freeze")
+            warnings.append(
+                "ending jamet: bekunya ga bisa diukur"
+                " | stage: editing | source: job.py:run (edit._still_floor)"
+                " | error: could not verify the freeze"
+                " | fallback: render tetep dikirim, beku ga terjamin")
         elif _still > 1.5:
             audit.rejected("edit", "freeze", f"floor {_still:.2f}",
                            "the picture is still moving inside the ending")
             warnings.append(
-                f"outro jamet: motion floor {_still:.2f} in the last "
-                f"{_span:.0f}s — the freeze is not holding")
+                f"ending jamet: gerakan masih {_still:.2f} di {_span:.0f}s "
+                "terakhir — bekunya ga nahan, gambarnya masih jalan"
+                " | stage: editing | source: job.py:run (edit._still_floor)"
+                f" | video: {_span:.0f}s terakhir"
+                f" | trigger: motion floor {_still:.2f} vs ambang 1.50"
+                " | error: the freeze is not holding"
+                " | fallback: render tetep dikirim apa adanya")
         else:
             audit.passed("edit", "freeze", f"floor {_still:.2f}",
                          f"frozen through the last {_span:.0f}s")

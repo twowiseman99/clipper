@@ -33,6 +33,13 @@ STATE = pathlib.Path(os.environ.get(
 # b-roll render runs past that, so it is split on line boundaries rather than
 # truncated — losing the tail would hide exactly the division that failed.
 DISCORD_LIMIT = 1900
+# How many messages ONE render may occupy. Splitting on line boundaries kept
+# every line, which is right for a message that is a few hundred lines over
+# and catastrophic for one that is a thousand: a single render took 179
+# messages and 328,206 characters were truncated anyway. Past this budget the
+# formatter drops its narrative and keeps the error fields, so the cut is a
+# decision rather than whatever fell off the end.
+MAX_MESSAGES = int(os.environ.get("AUDIT_WATCH_MAX_MESSAGES", "3"))
 
 
 def load_state():
@@ -98,7 +105,8 @@ def format_ledger(data):
     """
     if data.get("entries"):
         return audit_fmt.format_ledger(
-            data, checkers=tuple(audit_fmt.ORDER))
+            data, checkers=tuple(audit_fmt.ORDER),
+            limit=DISCORD_LIMIT * MAX_MESSAGES)
     # A ledger saved before entries were recorded still has its report text.
     # Shipping that beats shipping an empty message.
     title = data.get("title") or os.path.basename(data.get("clip", ""))

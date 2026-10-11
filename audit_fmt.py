@@ -45,9 +45,20 @@ ORDER = ["language", "copy", "sound", "edit", "freeze", "sourcing", "footage"]
 
 MARK = {audit.PASS: "✅", audit.REJECT: "❌", audit.WARN: "⚠️"}
 
-# Fragments written at the call sites, with the Indonesian the operator would
-# use. Matched whole-string first, then as a substring, so a reason carrying a
-# number ("floor 0.39") still gets its words translated.
+# Whole strings written at the call sites, with the Indonesian the operator
+# would use. Matched COMPLETE ONLY.
+#
+# This used to fall back to substring replacement so a reason carrying a
+# number still got its words translated, and that produced half-translated
+# nonsense wherever a string was not in the table: "right edge dari frame",
+# "--klip-type", "woman in red jacket at right dari fr". A table of phrases is
+# not a translator, and a word swapped inside an English sentence is worse
+# than the English sentence -- it reads as a decision the gate never made and
+# corrupts CLI flags and field names on the way through.
+#
+# Strings carrying a measurement are handled by NUMERIC below, which matches
+# the whole string with the number as a capture group. Anything in neither
+# table ships in English, deliberately.
 PHRASES = {
     "no mishearings found": "ga ada salah dengar",
     "b-roll: no cutaways were placed": "b-roll: ga ada cutaway yang kepasang",
@@ -68,28 +79,51 @@ PHRASES = {
     "not the action": "bukan kejadiannya",
     "verified channel": "channel terverifikasi",
     "freeze holds to the end": "beku nahan sampai habis",
-    "frozen through the last 5s": "beku terus sampai 5s terakhir",
     "a still reads ~0 between beats; video never does":
         "gambar diam bacanya ~0 antar beat, video ga pernah",
-    "last 5s": "5s terakhir",
-    "last 8s": "8s terakhir",
     "outro": "outro",
     "freeze": "beku",
-    "track(s) on this box": "lagu di box ini",
-    "word(s) of transcript": "kata transkrip",
-    "needs": "butuh",
-    "for a": "buat",
-    "ending": "ending",
-    "clip": "klip",
-    "mood": "mood",
-    "style": "gaya",
     "subject": "subjek",
-    "chars": "huruf",
-    "hook": "hook",
-    "title": "judul",
+    "window": "jendela",
+    "pick": "pilih",
+    "no qualifying frame": "ga ada frame yang lolos",
+    "the picture is still moving inside the ending":
+        "gambarnya masih gerak di dalam ending",
+    "clip too short": "klip kependekan",
+    "read from transcript": "dibaca dari transkrip",
+    "mood clash": "mood tabrakan",
 }
 
-_SORTED = sorted(PHRASES, key=len, reverse=True)
+# Strings that are a sentence with a number in them. Matched against the WHOLE
+# string with re.fullmatch, so the number is the only thing that varies and
+# nothing can be rewritten inside a string the table does not fully describe.
+# The number is carried across untouched; `_num` only swaps the decimal point
+# for the comma Indonesian uses.
+NUMERIC = [
+    (r"(\d+) word\(s\) of transcript", r"\1 kata transkrip"),
+    (r"(\d+) track\(s\) on this box", r"\1 lagu di box ini"),
+    (r"(\d+) fixed", r"\1 diperbaiki"),
+    (r"clip ([\d.]+)s", r"klip \1s"),
+    (r"source ([\d.]+)s", r"sumber \1s"),
+    (r"floor ([\d.]+)", r"lantai gerakan \1"),
+    (r"last (\d+)s", r"\1s terakhir"),
+    (r"last (\d+)s of (.+)", r"\1s terakhir dari \2"),
+    (r"frozen through the last (\d+)s", r"beku terus sampai \1s terakhir"),
+    (r"needs (\d+)s for a (\d+)s ending", r"butuh \1s buat ending \2s"),
+    (r"clip too short — (\d+)s needed", r"klip kependekan, butuh \1s"),
+    (r"hook (\d+) / title (\d+) chars", r"hook \1 / judul \2 huruf"),
+    (r"mood = '(\w+)'", r"mood = '\1'"),
+    (r"style = '([\w-]+)'", r"gaya = '\1'"),
+    (r"outro = '(\w+)'", r"outro = '\1'"),
+    (r"mood \['(\w+)'\]", r"mood ['\1']"),
+    (r"mood (\w+) -> (.+)", r"mood \1 -> \2"),
+    (r"used '(\w+)'", r"dipakai '\1'"),
+    (r"kept '(\w+)' \(explicit (--[\w-]+)\)", r"tetep '\1' (dipaksa \2)"),
+    (r"preset '(\w+)' vs transcript '(\w+)'",
+     r"preset '\1' vs transkrip '\2'"),
+]
+
+_NUMERIC = [(re.compile(src), repl) for src, repl in NUMERIC]
 
 # Warnings carry a measurement, so they cannot be table lookups: "motion floor
 # 3.05 in the last 5s" is a different string every render. These rewrite the
@@ -134,20 +168,32 @@ def _protect(text):
 
 
 def id_text(text):
-    """Indonesian for the known fragments, the original for everything else."""
+    """Indonesian for a string the tables describe WHOLE, else the original.
+
+    Whole-string only, in both tables. The previous version also replaced
+    every table key found anywhere inside the string, which rewrote words in
+    the middle of English sentences no table entry covered: the model's own
+    "right edge of frame" came out as "right edge dari frame", the field name
+    `subject` became `subjek` inside an English clause, and `--clip-type`
+    became `--klip-type` -- a CLI flag that does not exist, printed as if the
+    operator could paste it.
+
+    A phrase table can only honestly translate what it describes completely.
+    What it does not describe ships in English.
+    """
     if not text:
         return ""
     if text in PHRASES:
         return PHRASES[text]
-    out, literals = _protect(text)
-    for src in _SORTED:
-        if src in out:
-            out = out.replace(src, PHRASES[src])
-    # Residual English connectives that only appear inside a reason built at a
-    # call site, e.g. "last 5s of clip_x.mp4".
-    out = re.sub(r"\s+of\s+", " dari ", out)
-    # A mood arrives as the raw Python repr the gate carried: mood ['hype'].
-    out = re.sub(r"\[\s*'([^']*)'\s*\]", r"\1", out)
+    # Literals are masked even on the no-match path, so a file name can never
+    # be touched by a pattern that happens to span it.
+    masked, literals = _protect(text)
+    out = masked
+    for rx, repl in _NUMERIC:
+        m = rx.fullmatch(masked)
+        if m:
+            out = m.expand(repl)
+            break
     for i, lit in enumerate(literals):
         out = out.replace("\x00%d\x00" % i, lit)
     return out
@@ -198,6 +244,57 @@ def brief_line(entry):
     return "↳ dikasih: " + _num(", ".join(p for p in parts if p))
 
 
+# The detail fields a warning carries after its narrative sentence, written at
+# the call site as "narasi | stage: x | source: y.py:fn | ...". Rendered as an
+# aligned code block rather than a paragraph: these are a file name, a flag, a
+# timestamp and a path, and a reader needs to copy them, not read them.
+#
+# Order is fixed here rather than taken from the string, so every error block
+# in the channel has its fields in the same places.
+DETAIL_ORDER = ["stage", "source", "video", "trigger", "error", "fix",
+                "fallback", "debug"]
+
+
+def split_detail(text):
+    """("narrative", {field: value}) from a pipe-separated warning."""
+    parts = [p.strip() for p in text.split(" | ")]
+    narrative = parts[0] if parts else ""
+    fields = {}
+    for part in parts[1:]:
+        if ": " not in part:
+            continue
+        key, _, value = part.partition(": ")
+        key = key.strip()
+        # A later field of the same name would silently win, which for
+        # `error` would mean showing the wrong one. First wins.
+        fields.setdefault(key.strip(), value.strip())
+    return narrative, fields
+
+
+def detail_block(fields):
+    """The fields as an aligned code block, in DETAIL_ORDER, nothing invented.
+
+    Only keys actually present are shown. An absent field means the call site
+    did not record it; printing an empty row would read as a measured blank.
+    """
+    keys = [k for k in DETAIL_ORDER if fields.get(k)]
+    keys += [k for k in fields if k not in DETAIL_ORDER and fields.get(k)]
+    if not keys:
+        return []
+    width = max(len(k) for k in keys)
+    rows = ["```"]
+    for k in keys:
+        # Values are never translated: file names, functions, CLI flags, raw
+        # error text and paths. _num is applied to the measured ones only,
+        # where a decimal comma is the operator's own notation.
+        value = fields[k]
+        if k in ("video", "trigger"):
+            value = _num(value)
+        rows.append(f"{k.ljust(width)} : {value}")
+    rows.append("```")
+    return rows
+
+
 def headline(data):
     totals = data.get("totals", {})
     ok = totals.get("pass", 0)
@@ -218,15 +315,52 @@ def headline(data):
     return facts
 
 
-def format_ledger(data, checkers=()):
-    """The whole message. Sections in reading order, briefs above verdicts."""
+def issue_block(data):
+    """The "check this before upload" section: every ⚠️ and ❌ with its fields.
+
+    Built separately from the narrative because it is the part that must
+    survive truncation. A render that produced no warning and no reject gets
+    an empty list, and the caller prints nothing.
+    """
+    out = []
+    for w in data.get("warnings", []):
+        narrative, fields = split_detail(w)
+        out.append(f"⚠️ {id_warning(narrative)}")
+        out.extend(detail_block(fields))
+    for e in data.get("entries", []):
+        if e.get("verdict") != audit.REJECT:
+            continue
+        who = audit.agent_name(e["checker"])
+        narrative, fields = split_detail(e.get("detail", ""))
+        fields.setdefault("stage", e["checker"])
+        fields.setdefault("error", e.get("reason", ""))
+        out.append("❌ %s (%s) — %s" % (who, e["checker"],
+                                        id_text(e.get("reason", ""))))
+        if narrative:
+            out.append("   " + _num(id_text(narrative)))
+        out.extend(detail_block(fields))
+    if out:
+        out.insert(0, "**Perlu dicek sebelum upload:**")
+        out.insert(0, "")
+    return out
+
+
+def format_ledger(data, checkers=(), limit=None):
+    """The whole message: header, agent narrative, then the issues.
+
+    `limit` caps the result in characters. When it is exceeded the NARRATIVE
+    is dropped, never the issue block: the per-agent commentary is nice to
+    read and the error fields are the reason the message exists. One render
+    used to produce 179 messages and 328,206 truncated characters, which is
+    exactly the content a reader needed being thrown away last.
+    """
     entries = data.get("entries", [])
     title = data.get("title") or (data.get("clip", "").rsplit("/", 1)[-1])
-    out = [f"🎬 **{title}**", " · ".join(headline(data))]
-
-    for w in data.get("warnings", []):
-        out.append(f"⚠️ {id_warning(w)}")
-
+    render_id = data.get("clip", "").rsplit("/", 1)[-1].replace(".mp4", "")
+    head = [f"🎬 **{title}**",
+            " · ".join(headline(data) + ([render_id] if render_id else []))]
+    out = list(head)
+    issues = issue_block(data)
     seen = [e["checker"] for e in entries]
     names = ORDER + [c for c in checkers if c not in ORDER]
     # Append one name per checker, checking against the list AS IT GROWS.
@@ -287,7 +421,31 @@ def format_ledger(data, checkers=()):
     if gone:
         out.append(f"‼️ file agent hilang: {', '.join(sorted(gone))}")
 
-    return "\n".join(out)
+    body = "\n".join(out + issues)
+    if limit is None or len(body) <= limit:
+        return body
+
+    # Over budget. Drop the narrative, keep the header and every issue field,
+    # and say so — a message that silently lost its middle is indistinguishable
+    # from a render that had nothing to report.
+    debug = [f for f in (split_detail(w)[1].get("debug")
+                         for w in data.get("warnings", [])) if f]
+    note = ["", "_(obrolan per-agent dipotong, ga masuk batas Discord"
+            + (f" — lengkapnya: {debug[0]}" if debug else "") + ")_"]
+    trimmed = "\n".join(head + note + issues)
+    if len(trimmed) <= limit:
+        return trimmed
+    # Even the issues do not fit. Keep whole lines from the front rather than
+    # cutting mid-field, and name the debug file so nothing is lost silently.
+    kept, used = [], 0
+    for ln in head + note + issues:
+        if used + len(ln) + 1 > limit - 80:
+            break
+        kept.append(ln)
+        used += len(ln) + 1
+    kept.append("_(kepotong — detail lengkap di %s)_"
+                % (debug[0] if debug else "jobs/freeze-debug/"))
+    return "\n".join(kept)
 
 
 def _selftest():
