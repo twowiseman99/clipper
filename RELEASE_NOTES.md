@@ -1,3 +1,67 @@
+## Suite fully green for the first time: the fixture was gitignored, not missing
+
+Operator: *"gas perbaiki semua!"*
+
+`_v9` and `_v10` had been red for several releases on a `FileNotFoundError`, and
+every release note said "pre-existing, fails on clean HEAD". That framing was
+accurate and useless — it never asked WHY a test could lose its data.
+
+The answer: `.gitignore` excluded the fixture twice over, with `media/` and a
+global `*.words.json`. The transcript those two tests assert against could never
+be committed, so both died the moment the media cache was cleared. Not a broken
+test. A test whose data the repo was configured to throw away.
+
+Recovered it the honest way: re-downloaded the source (79MB) and re-ran whisper.
+523 words, 61 inside the 245.34-329.96 segment — exactly the numbers both
+docstrings cite ("522 words of a one-hour source", "the 61 that reach the
+screen"), so the fixture is the right one rather than a plausible substitute.
+
+Fixed the cause, not the symptom:
+
+- `tests/fixtures/PPOKdwOCMLA.words.json` is now committed, 28K. A negated
+  `.gitignore` rule carries the reason, because the next person to add a
+  `*.words.json` exclusion needs to know this is here.
+- Both tests prefer the committed fixture and fall back to the media cache, so a
+  box that still has the cache keeps working.
+- The missing-file assertion now says what to do: restore from git rather than
+  re-download 79MB and re-run whisper.
+
+Two controls, because a fallback that silently reads the old path proves
+nothing: hid the media cache and both tests stayed green (so the committed
+fixture is what runs); hid the fixture as well and the message named both paths.
+
+What these two tests actually guard is worth saying, since they were dark for so
+long: `_v9` holds the b-roll subject to the clip's topic rather than
+`sorted(names)[0]` — the bug where "gontor" beat "palestina" alphabetically.
+`_v10` holds the emotional register: this clip is an apology for people being
+killed, and it must end quiet and drained of colour, not with a flash stinger.
+Those are the two rules most expensive to get wrong, and their tests were not
+running.
+
+### Oden's "musik nya terlalu kencang gak ni", measured
+
+Isolated the windows instead of trusting a mix level, since the question is a
+RATIO:
+
+    music only, hook      mean -25.2 dB   peak  -4.0 dB
+    music only, outro     mean -26.2 dB   peak  -9.5 dB
+    under speech          mean -16.8 dB   peak  -0.6 dB
+
+Speech sits 8 dB above the music, so the duck is working and nothing is being
+buried. The hook is where the impression comes from: there the music plays alone
+and peaks at -4.0 dB, close to clipping, which reads as loud without being
+mixed loud. Left at 0.8 rather than quietly lowered — the complaint is about one
+window with no voice in it, and that is a judgement call for the operator, not a
+value for me to change on a third party's impression.
+
+`scripts/bgm_level_probe.sh` is committed so the next version of this question
+gets numbers instead of opinions. `-v error` swallows `volumedetect`, which
+logs at info — the probe sets `-v info` and a note says why.
+
+Suite 70 green, 0 failures.
+
+    -- Dalmislave
+
 ## The jamet preset is settled, and a decision-lock is not a quality gate
 
 Operator, after watching the delivered file: *"Cakep ni untuk preset jedag jedug
