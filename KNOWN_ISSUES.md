@@ -13,7 +13,8 @@ fix.
 
 ## 1. The closing freeze can hold a bystander instead of the subject
 
-**Status:** open, not investigated. Logged 2026-10-11.
+**Status:** open, not investigated. Logged 2026-10-11. Sharpened 2026-10-11
+after fixing the debug-row truncation (see "What the gate actually says").
 **Severity:** the last thing a viewer sees is a stranger's face on a clip
 about someone else. On a grief clip that is a factual claim about whose story
 it is, the same class as the flag-emoji defect.
@@ -39,6 +40,27 @@ trigger   : best confidence 0,48 vs MIN_CONF 0,55
 error     : no qualifying frame
 fallback  : mechanical frame (freeze_at as computed, unverified)
 ledger    : /home/ubuntu/clipper/jobs/clip_1791642180_122.audit.json
+```
+
+**What the gate actually says.** Worth recording precisely, because the
+earlier wording here understated it. The per-frame debug rows were being
+sliced at 40/26 characters, which cut mid-word and left an unbalanced
+bracket, so the reason read as noise: `"Prabowo Subianto (older man at podium
+in (turned toward camera, well)"`. With the rows cut on a word boundary it is
+legible, and it is not "the gate could not find Gibran" — the gate is
+confidently naming a DIFFERENT IDENTIFIED PERSON, Prabowo, at confidence 0,95
+across the whole window. The ending is reaching into a stretch of footage
+where the subject is not the person on camera at all.
+
+That changes what a fix would be. It is not a threshold question and not a
+"pick a better frame in this window" question: the window itself is wrong for
+this clip. Measure the subject's actual on-screen spans before anything else.
+
+```
+render_id : render5
+frames    : 31 judged, 0 qualified, window 249,95s-255,95s
+reads     : "Prabowo Subianto (older man at podium…)" at conf 0,95, ok=false
+debug     : jobs/freeze-debug/render5.20261011-193007.freeze.json
 ```
 
 The gate was not wrong to reject those frames — it was reading them

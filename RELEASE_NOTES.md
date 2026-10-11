@@ -1,3 +1,48 @@
+## Fase 2: narasi manusia yang ga bisa ngarang fakta
+
+Operator: *"Gas fase 2 dan fix smua anomali"* — lalu, soal model: *"Pake combo1, harusnya dia isinya claude lu cek dl"*.
+
+### Modelnya dicek, bukan diasumsikan
+
+`ds/deepseek-v4-pro` yang diminta di instruksi 5/6 **ga ada di router ini** — 27 model, nol deepseek. Gw lapor daripada diam-diam ganti. Operator pilih `combo1`, dan minta gw cek isinya dulu. Dia benar:
+
+    combo1 = ["cc/claude-opus-5", "cc/claude-sonnet-5",
+              "ag/gemini-3.8-flash-high", "ag/gemini-pro-agent"]
+
+Dua panggilan nyata balik `"model":"claude-opus-5"`. Tapi combo itu daftar fallback berurutan, jadi "combo1 = Claude" cuma benar selama entry pertama sehat — itu sebabnya tesnya nagih model dibaca dari config, bukan nama yang dipaku. Key dibaca `ai.py` dari `clipper/.env`, ga pernah muncul di modul ini.
+
+### Guard-nya YANG jadi fiturnya
+
+Model bahasa yang dikasih halaman penuh angka lalu disuruh meringkas itu mesin penghasil angka salah yang kedengeran benar. Kelas error ini udah dua kali lolos di sini cuma karena ngandelin aturan di prompt. Jadi modelnya ga pernah lihat angka yang bisa dia parafrase:
+
+- Dia dikasih **brief terstruktur** — hitungan dan vonis per divisi. Tanpa path, flag, nama fungsi, atau string error.
+- Tiap angka di jawabannya dicek lawan brief itu. Satu angka asing → **seluruh narasi dibuang**.
+- Detail mesin di output → dibuang. Kepanjangan → dibuang.
+- Router mati, JSON rusak, guard gagal: semua return `""` dan pesan Fase 1 terkirim utuh. **Layer log ga boleh bisa bikin log-nya hilang.**
+- **OFF** kecuali `AUDIT_NARRATE` diset, biar Fase 1 tetap bisa dibuktikan sendirian.
+
+### Yang gw pelajari dari uji adversarial
+
+Gw tulis ulang prompt-nya buat **MEMAKSA** ngarang: wajib sebut jumlah frame, nilai confidence, nama file debug, nama fungsi yang nolak. Modelnya nolak:
+
+> "Jumlah frame yang dicek sama angka confidence-nya nggak ada di data yang gw terima, jadi gw nggak bisa sebutin angkanya."
+
+Tapi guard-nya **tetap buang** jawaban itu — gara-gara `"kena 10 pengecekan"`, yaitu 8+1+1, aritmatika yang **BENAR**. Guard yang nolak pernyataan benar itu guard yang bakal dimatiin orang. Jadi brief-nya sekarang nyebut total, bukan nyuruh diturunkan sendiri, dan guard tetap ketat ke ukuran yang memang ga pernah dia kasih.
+
+### Diukur, bukan diklaim
+
+Tiga render nyata lewat router sungguhan, semua angka di tiga narasi dicek lawan ledger masing-masing: **nol ngarang**. render6 lapor `9 cek / 7 lolos` sementara render2 dan render4 lapor `10 / 8` — jadi dia memang baca brief-nya, bukan niru bentuk. Jalur default-OFF kebukti output Fase 1 identik.
+
+`tests/_v75.py`, dibuktikan merah 3 cara: guard angka dicabut, default dibalik jadi ON, dan `total cek` dihapus dari brief.
+
+### Anomali yang ikut dibenerin
+
+Satu di antaranya **kelewat batas dan gw balikin** setelah operator nanya `"ini lu ga apa apain logic clipper kita kan?"` — detailnya di commit `05b2b35`. Yang tiga lainnya murni layer log: baris debug kepotong di tengah kata (`"Prabowo Subianto (older man at podium in (turned toward camera, well)"` — dua kurung buka, satu tutup), baris `flag emoji` kembar tanpa nama field, dan brief musik yang ngaku `"dibaca dari transkrip"` tepat di atas warning yang buktiin itu dari preset.
+
+Satu lagi hampir gw lapor sebagai bug: 🇵🇸 di klip Gibran/MBG. Gw cek transkrip segmennya dulu — *"Tadi saya ingat saudara-saudara kita di Palestina."* Gate-nya benar.
+
+— Dalmislave
+
 ## Fase 1: the agency log stops flooding, and its numbers stop lying
 
 Operator: *"Satu render menghasilkan 179 pesan Discord dan 328.206 karakter kena truncate."*
