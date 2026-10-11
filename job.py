@@ -1153,16 +1153,51 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         if _subject and _freeze_abs is not None:
             audit.briefed("freeze", "subject", _subject)
             import freeze_pick
-            _picked = freeze_pick.pick(
+            # No per-frame callback: the rows are diagnostics and go to
+            # freeze_pick's own debug file. Passing them to the ledger meant
+            # one entry per judged frame under a verdict ("info") that
+            # audit.counts ignored and audit_fmt printed — 31 rows a render,
+            # 113,657 characters in one Discord message.
+            _picked, _fsum = freeze_pick.pick(
                 content, seg_start + _freeze_abs, _subject,
-                audit=lambda k, m: audit.record("freeze", k, "info", m),
-                clip_end=seg_end)
+                clip_end=seg_end,
+                meta={"render_id": os.path.basename(out).replace(".mp4", ""),
+                      "title": meta.get("title", "")})
+            # What the gate was given AND what it had to clear, so a run of
+            # rejects can be read without the per-frame file.
+            audit.briefed(
+                "freeze", "window",
+                "%.2fs–%.2fs, %d frame, tiap %.1fs"
+                % (_fsum["window"][0] or 0.0, _fsum["window"][1] or 0.0,
+                   _fsum["frames"], freeze_pick.STEP),
+                "ambang conf %.2f" % _fsum["min_conf"])
             if _picked is None:
+                _why, _n = _fsum["top_reason"]
                 warnings.append(
-                    "freeze frame: no frame in the last "
-                    f"{freeze_pick.LOOKBACK:.0f}s clearly shows the subject — "
-                    "kept the mechanical frame, the still may show a bystander")
-                audit.rejected("freeze", "pick", "no qualifying frame")
+                    "gambar penutup: ga ada frame yang jelas nunjukin "
+                    f"{_subject} — tetep pakai frame mekanis, stillnya bisa "
+                    "jadi orang lain"
+                    f" | stage: freeze | source: freeze_pick.py:pick"
+                    f" | video: {_fsum['window'][0] or 0:.2f}s-"
+                    f"{_fsum['window'][1] or 0:.2f}s"
+                    f" ({_fsum['frames']} frame, {_fsum['qualified']} lolos)"
+                    f" | trigger: conf terbaik {_fsum['best_conf']:.2f} vs "
+                    f"ambang {_fsum['min_conf']:.2f}"
+                    f" | error: no qualifying frame"
+                    + (f" ({_why}, {_n}x)" if _why else "")
+                    + " | fallback: mechanical frame"
+                    + f" | debug: {_fsum['debug'] or '(gagal ditulis)'}")
+                # One verdict, with the aggregate in it. The counts have to
+                # agree with the header's check count, which only counts
+                # pass/reject/warn.
+                audit.rejected(
+                    "freeze", "pick", "no qualifying frame",
+                    "%d frame dicek, 0 lolos · conf terbaik %.2f < ambang "
+                    "%.2f · alasan tersering: %s (%dx) · fallback frame "
+                    "mekanis · debug %s"
+                    % (_fsum["frames"], _fsum["best_conf"],
+                       _fsum["min_conf"], _why or "—", _n,
+                       _fsum["debug"] or "(gagal ditulis)"))
             else:
                 freeze_at = max(0.0, _picked - seg_start)
                 # Hand the renderer the COMPOSED still, not a timestamp. The
@@ -1177,11 +1212,22 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                                                 freeze_still):
                     freeze_still = None
                     warnings.append(
-                        "freeze frame: the chosen still could not be rendered "
-                        "— kept the mechanical frame")
+                        "gambar penutup: still yang kepilih gagal dirender — "
+                        "tetep pakai frame mekanis"
+                        " | stage: freeze | source: "
+                        "freeze_pick.py:render_still"
+                        f" | video: {_picked:.2f}s"
+                        " | error: render_still returned False"
+                        " | fallback: mechanical frame"
+                        f" | debug: {_fsum['debug'] or '(gagal ditulis)'}")
                 audit.passed("freeze", "pick",
                              f"source {_picked:.2f}s",
-                             f"clip {freeze_at:.2f}s")
+                             "clip %.2fs · %d frame dicek, %d lolos · conf "
+                             "%.2f (ambang %.2f) · debug %s"
+                             % (freeze_at, _fsum["frames"],
+                                _fsum["qualified"], _fsum["best_conf_ok"],
+                                _fsum["min_conf"],
+                                _fsum["debug"] or "(gagal ditulis)"))
                 _log(f"freeze frame picked at {_picked:.2f}s")
         else:
             warnings.append(

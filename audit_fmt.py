@@ -18,6 +18,7 @@ the table ships as written.
 """
 
 import re
+import sys
 
 import audit
 
@@ -254,6 +255,19 @@ def format_ledger(data, checkers=()):
             continue
         briefs = [e for e in rows if e["verdict"] == audit.BRIEF]
         verdicts = [e for e in rows if e["verdict"] != audit.BRIEF]
+        # A verdict this formatter does not know is a diagnostic stream, not a
+        # decision — and printing it one line per entry is how the freeze
+        # gate's "info" rows became 1,023 lines. Skipped, counted, and named
+        # on stderr so the gate gets fixed instead of the channel flooded.
+        unknown = [e for e in verdicts if e["verdict"] not in MARK]
+        if unknown:
+            verdicts = [e for e in verdicts if e["verdict"] in MARK]
+            kinds = sorted({e["verdict"] for e in unknown})
+            print("audit_fmt: %s recorded %d entries with unknown verdict(s) "
+                  "%s — skipped. A gate must report pass/warn/reject; "
+                  "per-item diagnostics belong in a debug file."
+                  % (name, len(unknown), ", ".join(repr(k) for k in kinds)),
+                  file=sys.stderr)
         out.append("")
         out.append(f"**{label}** · {who}")
         for e in briefs:

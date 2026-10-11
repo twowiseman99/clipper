@@ -17,6 +17,9 @@ warning — the house rule is that a veto has no fallback, so over-strictness ha
 to show up as a warning rather than as a wrong still.
 """
 import concurrent.futures as cf
+import collections
+import datetime
+import json
 import os
 import subprocess
 import tempfile
@@ -36,6 +39,17 @@ STEP = float(os.environ.get("CLIPPER_FREEZE_STEP", "0.2"))
 # than an edit.
 LOOKBACK = float(os.environ.get("CLIPPER_FREEZE_LOOKBACK", "6.0"))
 MIN_CONF = float(os.environ.get("CLIPPER_FREEZE_MIN_CONF", "0.55"))
+
+# Where the per-frame rows go. One file per render, holding every frame this
+# gate judged — which is diagnostics, not a verdict. They used to go into the
+# ledger itself as one entry per frame under a fourth verdict ("info") that
+# nothing counted and everything printed: 31 rows per render, 1,023 lines and
+# 113,657 characters in a single Discord message.
+DEBUG_DIR = os.environ.get(
+    "CLIPPER_FREEZE_DEBUG", os.path.expanduser("~/clipper/jobs/freeze-debug"))
+# Keep the newest N debug files. Unbounded per-render diagnostics is how a
+# disk fills quietly.
+DEBUG_KEEP = int(os.environ.get("CLIPPER_FREEZE_DEBUG_KEEP", "60"))
 
 _SYS = ("You identify people in frames from Indonesian news footage. "
         "Answer with JSON only, no prose.")
@@ -168,8 +182,74 @@ def render_still(video, t, out_path):
         return False
 
 
-def pick(video, freeze_at, subject, audit=None, clip_end=None):
-    """Source timestamp of the best frame to freeze, or None.
+def write_debug(rows, meta, directory=None, keep=None):
+    """Write every judged frame to one file per render, newest `keep` kept.
+
+    Returns the path, or "" when it could not be written — a diagnostics file
+    failing must never fail a render.
+    """
+    directory = directory or DEBUG_DIR
+    keep = DEBUG_KEEP if keep is None else keep
+    try:
+        os.makedirs(directory, exist_ok=True)
+        stem = str(meta.get("render_id") or "render")
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(directory, f"{stem}.{stamp}.freeze.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "meta": meta,
+                "threshold": {"min_conf": MIN_CONF, "step": STEP,
+                              "lookback": LOOKBACK},
+                "frames": [{"t": t, "ok": bool(ok), "confidence": conf,
+                            "read": who} for t, ok, conf, who in rows],
+            }, fh, ensure_ascii=False, indent=2)
+        # Rotate by name, which sorts chronologically because the stamp is
+        # fixed-width. Mtime would reorder on a restore.
+        files = sorted(f for f in os.listdir(directory)
+                       if f.endswith(".freeze.json"))
+        for stale in files[:max(0, len(files) - keep)]:
+            try:
+                os.unlink(os.path.join(directory, stale))
+            except OSError:
+                pass
+        return path
+    except Exception:
+        return ""
+
+
+def summarise(rows, freeze_at, debug_path=""):
+    """One verdict's worth of facts about a whole window of judged frames.
+
+    The numbers a reader needs to tell "the gate worked and the footage had
+    nothing" apart from "the gate was asked an impossible question": how many
+    frames, how many qualified, the window, the commonest rejection, and the
+    best confidence seen against the threshold it had to clear.
+    """
+    good = [r for r in rows if r[1] and r[2] >= MIN_CONF]
+    times = sorted(r[0] for r in rows)
+    # Why frames failed, by the model's own `why` — the parenthesised tail of
+    # the row. Counted over rejects only; a pass explains nothing.
+    reasons = collections.Counter(
+        (who.split("(", 1)[1].rstrip(")").strip() if "(" in who else who)
+        or "no reason given"
+        for _, ok, _, who in rows if not ok)
+    return {
+        "frames": len(rows),
+        "qualified": len(good),
+        "window": (times[0], times[-1]) if times else (None, None),
+        "freeze_at": freeze_at,
+        "top_reason": reasons.most_common(1)[0] if reasons else ("", 0),
+        "best_conf": max((r[2] for r in rows), default=0.0),
+        "best_conf_ok": max((r[2] for r in rows if r[1]), default=0.0),
+        "min_conf": MIN_CONF,
+        "picked": (min(good, key=lambda r: abs(r[0] - freeze_at))[0]
+                   if good else None),
+        "debug": debug_path,
+    }
+
+
+def pick(video, freeze_at, subject, audit=None, clip_end=None, meta=None):
+    """(source timestamp or None, summary dict).
 
     `freeze_at` is the absolute position in `video` where the ending begins.
     Candidates run BOTH WAYS from it, because `loop` inserts its clones and the
@@ -182,11 +262,16 @@ def pick(video, freeze_at, subject, audit=None, clip_end=None):
     The frame nearest the freeze point wins among qualifiers, not the most
     confident one — the still should look like the picture stopping, not like a
     cut to somewhere else.
+
+    The per-frame rows go to a debug file, never to the caller's ledger: they
+    are diagnostics, and shipping one ledger entry per judged frame is what
+    turned a single render into 179 Discord messages. The summary carries the
+    counts a reader needs instead.
     """
     import ai
 
     if not subject or freeze_at is None:
-        return None
+        return None, summarise([], freeze_at)
     n = max(1, int(round(LOOKBACK / STEP)))
     spots = [freeze_at - i * STEP for i in range(n + 1)]
     if clip_end is not None:
@@ -220,12 +305,18 @@ def pick(video, freeze_at, subject, audit=None, clip_end=None):
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
         rows = list(pool.map(judge, spots))
 
-    good = [r for r in rows if r[1] and r[2] >= MIN_CONF]
+    rows = sorted(rows)
+    # Per-frame rows to the debug file. The caller gets counts, not 31 lines:
+    # the ledger used to take one entry per judged frame under a verdict
+    # nothing counted, and the formatter printed every one of them.
+    debug = write_debug(rows, dict(meta or {}, subject=subject, video=video,
+                                   freeze_at=freeze_at))
+    summary = summarise(rows, freeze_at, debug)
     if audit is not None:
-        for t, ok, conf, who in sorted(rows):
+        # Kept for callers that want the rows anyway (a probe, a test). Nothing
+        # in the render path passes this now.
+        for t, ok, conf, who in rows:
             audit("freeze-pick", "%.2fs %s conf %.2f — %s"
                   % (t, "OK" if ok else "no", conf, who))
-    if not good:
-        return None
     # Nearest to the freeze point, not the most confident and not the latest.
-    return min(good, key=lambda r: abs(r[0] - freeze_at))[0]
+    return summary["picked"], summary

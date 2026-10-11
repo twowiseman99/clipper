@@ -12,10 +12,15 @@ terstruktur model, bukan dipercayakan ke kalimat perintah. Tes ini memalsukan
 jawaban model supaya tidak perlu jaringan.
 """
 import sys
+import tempfile
 import types
 
 sys.path.insert(0, "/home/ubuntu/clipper")
 import freeze_pick
+
+# pick() writes its per-frame rows to a debug file now. Point it at a scratch
+# directory so a test run does not rotate the real render diagnostics.
+freeze_pick.DEBUG_DIR = tempfile.mkdtemp(prefix="v61-freeze-")
 
 # --- pertanyaannya menanyakan hal yang benar ---
 q = freeze_pick._question(freeze_pick.describe("Gibran"))
@@ -39,7 +44,17 @@ def verdicts(answer):
     fake_ai.vision_json = lambda *a, **k: answer
     sys.modules["ai"] = fake_ai
     freeze_pick._grab = lambda v, t: b"x" * 2000
-    return freeze_pick.pick("dummy.mp4", 10.0, "Gibran")
+    # pick() returns (timestamp, summary): the per-frame rows went to a debug
+    # file so the ledger stopped taking one entry per judged frame. Only the
+    # verdict is asserted here, but the summary has to agree with it — a
+    # picked timestamp with qualified=0 would mean the counts shown to a
+    # reader contradict the decision.
+    picked, summary = freeze_pick.pick("dummy.mp4", 10.0, "Gibran")
+    assert (picked is None) == (summary["qualified"] == 0), (
+        "summary disagrees with the verdict: picked=%r qualified=%d"
+        % (picked, summary["qualified"]))
+    assert summary["frames"] >= 1, summary
+    return picked
 
 
 base = {"ok": True, "confidence": 0.9, "most_readable": "Gibran",
