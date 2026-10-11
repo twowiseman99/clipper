@@ -223,7 +223,16 @@ def format_ledger(data, checkers=()):
 
     seen = [e["checker"] for e in entries]
     names = ORDER + [c for c in checkers if c not in ORDER]
-    names += [c for c in seen if c not in names]
+    # Append one name per checker, checking against the list AS IT GROWS.
+    # `names += [c for c in seen if c not in names]` reads like a dedupe and is
+    # not one: the comprehension is fully evaluated against the OLD `names`
+    # before `+=` extends it, so every occurrence of an unregistered checker
+    # passed the test. A ledger with 33 freeze entries printed the freeze
+    # section 33 times — 113,657 characters and 179 Discord messages for one
+    # render.
+    for c in seen:
+        if c not in names:
+            names.append(c)
 
     skipped = []
     for name in names:
