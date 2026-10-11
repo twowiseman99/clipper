@@ -68,6 +68,21 @@ def main():
         "ORDER is missing a section: "
         f"{set(audit_fmt.SECTIONS) - set(audit_fmt.ORDER)}")
 
+    # THE THIRD TABLE. Registering `freeze` in DIVISIONS and SECTIONS left it
+    # absent from agent_skills.SKILLS, which decides which skills the gate's
+    # reviewer loads. This test asserted two of the three tables and reported
+    # the gate as fully registered; tests/_v38.py caught the third. Asserting
+    # a set is complete means naming every table that has to contain it.
+    import agent_skills
+    unskilled = {n: w for n, w in found.items()
+                 if n not in agent_skills.SKILLS}
+    assert not unskilled, (
+        "checker recorded but missing from agent_skills.SKILLS, so no skills "
+        f"decision exists for it: {unskilled}")
+    assert set(agent_skills.SKILLS) == set(audit.DIVISIONS), (
+        "SKILLS and DIVISIONS disagree: "
+        f"{set(agent_skills.SKILLS) ^ set(audit.DIVISIONS)}")
+
     # A registered reviewer must exist on disk and must have a real name.
     assert not audit.missing_agents(), (
         f"agent file missing for: {audit.missing_agents()} under "

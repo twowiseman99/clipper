@@ -115,12 +115,18 @@ NUMERIC = [
     (r"mood = '(\w+)'", r"mood = '\1'"),
     (r"style = '([\w-]+)'", r"gaya = '\1'"),
     (r"outro = '(\w+)'", r"outro = '\1'"),
-    (r"mood \['(\w+)'\]", r"mood ['\1']"),
+
     (r"mood (\w+) -> (.+)", r"mood \1 -> \2"),
     (r"used '(\w+)'", r"dipakai '\1'"),
     (r"kept '(\w+)' \(explicit (--[\w-]+)\)", r"tetep '\1' (dipaksa \2)"),
     (r"preset '(\w+)' vs transcript '(\w+)'",
      r"preset '\1' vs transkrip '\2'"),
+    # The music gate passes its mood list straight from Python, so the reason
+    # reads `mood ['hype']` -- a repr, brackets and quotes included, in a
+    # chat message. One mood is the normal case; several are joined with a
+    # comma rather than printed as a list.
+    (r"mood \['([\w-]+)'\]", r"mood \1"),
+    (r"mood \['([\w-]+)', '([\w-]+)'\]", r"mood \1 + \2"),
 ]
 
 _NUMERIC = [(re.compile(src), repl) for src, repl in NUMERIC]

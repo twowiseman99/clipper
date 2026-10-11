@@ -57,6 +57,18 @@ SKILLS = {
         ("superpowers", "verification-before-completion"),
         ("superpowers", "systematic-debugging"),
     ],
+    # Pemilih Gambar: judges whether one frame in the ending clearly shows the
+    # subject. Same question as the b-roll gate -- does this picture really
+    # show the thing it is being used to claim -- so the same two skills, for
+    # the same reason: a frame must be verified against the claim, and "no
+    # frame qualifies" must be said out loud instead of settling for a loose
+    # match. Registering freeze in DIVISIONS and SECTIONS was not enough;
+    # tests/_v38.py caught that a third table existed and this gate had no
+    # entry in it.
+    "freeze": [
+        ("superpowers", "verification-before-completion"),
+        ("superpowers", "systematic-debugging"),
+    ],
     # TikTok Strategist: "viral content creation, algorithm optimization".
     # brainstorming is the one superpowers skill about generating options
     # before committing, which is what hook/title writing is.
