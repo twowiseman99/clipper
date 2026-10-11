@@ -154,10 +154,16 @@ def run_once(webhook):
             print(f"audit_watch: skip {path.name} — {exc}", file=sys.stderr)
             continue
         text = format_ledger(data)
-        if webhook:
-            post(webhook, text)
-        else:
+        if not webhook:
+            # PRINTING IS NOT DELIVERING. This used to mark the ledger sent
+            # either way, so a cron run with no webhook configured silently
+            # consumed all 70 ledgers to a stdout nobody reads -- and because
+            # "sent" is permanent, configuring the webhook afterwards
+            # delivered NOTHING. The channel stayed empty while the job
+            # reported ok every 15 minutes.
             print(text)
+            continue
+        post(webhook, text)
         state.setdefault("sent", []).append(path.name)
         sent += 1
         # Persist after EACH ledger, not once at the end. `save_state` used to
@@ -224,10 +230,18 @@ def main():
         _selftest()
         return 0
     webhook = os.environ.get("AUDIT_WEBHOOK", "")
-    n = run_once(webhook)
-    if not webhook and n:
-        print(f"\n({n} ledger — AUDIT_WEBHOOK belum diset, jadi cuma dicetak)",
-              file=sys.stderr)
+    if not webhook:
+        # Exit non-zero so the scheduler shows a FAILURE. A delivery job that
+        # cannot deliver reported "ok" every 15 minutes for a day while the
+        # channel stayed empty; a watchdog that cannot fail is worse than no
+        # watchdog, because it actively tells you the silence is fine.
+        waiting = len(pending(load_state()))
+        print("audit_watch: AUDIT_WEBHOOK belum diset, ga ada yang dikirim. "
+              f"{waiting} ledger nunggu. Taro URL webhook di "
+              "/home/ubuntu/.hermes/audit-watch/webhook.", file=sys.stderr)
+        run_once("")  # still print them, for a human running this by hand
+        return 1
+    run_once(webhook)
     return 0
 
 
