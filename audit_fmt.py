@@ -524,7 +524,9 @@ def _selftest():
     assert "32 detik" in body and "mood emotional" in body, body
 
     # Decimal comma reaches a number inside a reason, and no number is minted.
-    assert "floor 0,39" in body, body
+    # The phrase itself is translated now ("floor" -> "lantai gerakan"), so
+    # assert on the measurement, which is the part this check is about.
+    assert "lantai gerakan 0,39" in body, body
     # Two call-site fields stay two clauses.
     assert "⚠️ cutaway kepasang — 0, ga ada footage yang lolos pagar" in body, body
 
