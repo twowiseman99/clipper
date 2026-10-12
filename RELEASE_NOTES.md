@@ -1,3 +1,60 @@
+## Re-rendering the approved clip to check the script still behaves
+
+Operator: *"Coba lu generate video persis kayak begini lagi, utk testing
+scriptnya masi sesuai apa engga"*.
+
+Ran the identical command on current HEAD (`af66bc2`, several commits past the
+one that produced the approved file) and compared measurements rather than
+impressions.
+
+    metric                   new        baseline
+    duration              38.667s      38.667s      1080x1920 both
+    body motion      3.26 / 12.57   3.26 / 12.59
+    freeze motion    3.24 / 28.33   3.24 / 28.32
+    portrait motion 10.47 / 73.05  10.50 / 73.07
+    hits in freeze           9            9
+    hit times        33.67 33.77 33.93 34.20 34.73 35.23 35.50 35.57 36.00
+                     identical to two decimals
+    gap spread            0.47s        0.47s
+    hit-spacing std       0.168        0.168
+    portrait @36.5        55.02        55.03
+    last frame             1.00         1.00
+
+**md5 differs** (`096597fb` vs `4f9ec284`), so this is a real re-render and not
+the old file being re-measured — the no-op check comes first, because identical
+numbers are exactly what a no-op produces too.
+
+Four frames of the new file confirm the shape independently: hook with its
+caption at 1.4s, the frame mid-spin visibly diagonal at 36.25s, the portrait
+landed upright and legible at 36.70s, full black at 38.60s.
+
+Warnings reproduced identically, including the mood clash (`--clip-type jamet`
+asks for hype, the transcript reads emotional, hype wins because it was asked
+for explicitly) and the freeze having no subject to verify against. Same track
+selected.
+
+### scripts/compare_to_baseline.py
+
+Committed, because "is the script still behaving" is a regression question and
+it kept being answered by re-measuring by hand. It prints both files side by
+side and fails on SHAPE rather than on tuning:
+
+- geometry and duration must match exactly (0 tolerance on 1080x1920)
+- the portrait must still MOVE — a peak under 2.0 means the shake on the
+  photograph regressed to a held still, which is the specific thing the operator
+  reversed
+- the last frame must be black, or the dip is being painted over again
+- fewer than 3 hits in the freeze means clustering collapsed
+
+Motion figures carry a few percent of tolerance because x264 is not
+deterministic frame-for-frame; geometry carries none. Different instruments,
+different tolerances — one global epsilon would either accept a broken ending or
+fail on encoder noise.
+
+Suite 70 green.
+
+    -- Dalmislave
+
 ## Nge-print itu bukan ngirim
 
 Operator: *"Kok gajalan lognya?"* — setelah sehari cron lapor `ok` tiap 15 menit ke channel yang kosong. Dua-duanya bug gw, dua-duanya fail-silent.
