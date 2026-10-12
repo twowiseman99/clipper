@@ -3,6 +3,10 @@
 *.pickle
 client_secrets.json
 clippo_session.json
+# session_import.py writes one storage_state per platform+account here. These
+# ARE login credentials — a committed sessions/ file hands anyone with repo
+# access the operator's TikTok/IG account.
+sessions/
 
 # runtime state & artifacts
 *.sqlite
