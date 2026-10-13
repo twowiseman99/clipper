@@ -1,0 +1,207 @@
+"""Antrean render buat console web.
+
+Kenapa ada: job.py cuma bisa satu render sekali jalan (fcntl.flock di
+.job.lock, attempt kedua ditolak). Diukur di kotak ini dari 257 render
+nyata: median 2,4 menit, p90 3,6 menit. Jadi request HTTP TIDAK BOLEH
+nungguin render -- lebih lama dari timeout browser mana pun.
+
+Bentuknya: satu proses pekerja ngambil job satu-satu dari daftar, halaman
+web cuma baca status. Operator milih "masuk antrean, dikasih nomor urut +
+perkiraan nunggu", jadi posisi dan perkiraan itu bagian dari kontrak, bukan
+hiasan.
+
+Keadaan sebuah job:
+    waiting  -> belum mulai, punya nomor urut
+    running  -> lagi dirender
+    done     -> ada file hasilnya
+    failed   -> ada pesan error
+    canceled -> dibatalin sebelum mulai
+
+State disimpen di SQLite, bukan di memori: kalau prosesnya mati, antrean
+ga ilang. Itu juga yang bikin halaman web dan pekerja bisa jadi dua proses.
+"""
+import json
+import os
+import sqlite3
+import time
+
+DB_PATH = os.environ.get(
+    "CLIPPER_QUEUE_DB",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "queue.db"),
+)
+
+# Perkiraan nunggu pakai angka hasil ukur, bukan tebakan. Dari 257 render:
+# median 2,4 menit. Dipakai buat ngali jumlah job di depan.
+MEDIAN_RENDER_SEC = 144.0
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner       TEXT NOT NULL,
+    preset      TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'waiting',
+    stage       TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    out_path    TEXT NOT NULL DEFAULT '',
+    warnings    TEXT NOT NULL DEFAULT '[]',
+    created_at  REAL NOT NULL,
+    started_at  REAL,
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, id);
+"""
+
+
+def connect(path=None):
+    conn = sqlite3.connect(path or DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(_SCHEMA)
+    return conn
+
+
+def submit(conn, owner, preset, params):
+    """Taro job baru di belakang antrean. Balik id-nya."""
+    cur = conn.execute(
+        "INSERT INTO jobs (owner, preset, params, created_at) VALUES (?,?,?,?)",
+        (owner, preset, json.dumps(params, ensure_ascii=False), time.time()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def claim(conn):
+    """Ambil job paling depan buat dikerjain. None kalau antrean kosong.
+
+    Dipanggil pekerja. Penandaan running dilakukan dalam satu transaksi
+    supaya dua pekerja ga bisa ngambil job yang sama.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE status='waiting' ORDER BY id LIMIT 1"
+    ).fetchone()
+    if row is None:
+        conn.rollback()
+        return None
+    conn.execute(
+        "UPDATE jobs SET status='running', started_at=?, stage=? WHERE id=?",
+        (time.time(), "mulai", row["id"]),
+    )
+    conn.commit()
+    return dict(row)
+
+
+def set_stage(conn, job_id, stage):
+    conn.execute("UPDATE jobs SET stage=? WHERE id=?", (stage, job_id))
+    conn.commit()
+
+
+def finish(conn, job_id, out_path, warnings=None):
+    conn.execute(
+        "UPDATE jobs SET status='done', out_path=?, warnings=?, finished_at=?, "
+        "stage='' WHERE id=?",
+        (out_path, json.dumps(warnings or [], ensure_ascii=False),
+         time.time(), job_id),
+    )
+    conn.commit()
+
+
+def fail(conn, job_id, message):
+    conn.execute(
+        "UPDATE jobs SET status='failed', error=?, finished_at=?, stage='' "
+        "WHERE id=?",
+        (str(message)[:2000], time.time(), job_id),
+    )
+    conn.commit()
+
+
+def cancel(conn, job_id, owner):
+    """Batalin job yang BELUM mulai. Balik True kalau beneran kebatalin.
+
+    Job yang lagi jalan ga bisa dibatalin dari sini: ffmpeg-nya udah
+    jalan, dan matiin di tengah ninggalin file setengah jadi. Jujur
+    nolak lebih baik daripada tombol yang kelihatan kerja tapi engga.
+    """
+    cur = conn.execute(
+        "UPDATE jobs SET status='canceled', finished_at=? "
+        "WHERE id=? AND owner=? AND status='waiting'",
+        (time.time(), job_id, owner),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def position(conn, job_id):
+    """Nomor urut job yang masih nunggu. 0 kalau udah ga nunggu.
+
+    1 = paling depan, bakal diambil pekerja berikutnya.
+    """
+    row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None or row["status"] != "waiting":
+        return 0
+    return conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='waiting' AND id <= ?", (job_id,)
+    ).fetchone()[0]
+
+
+def eta_seconds(conn, job_id):
+    """Perkiraan nunggu dalam detik. None kalau ga bisa diperkirakan.
+
+    Hitungannya: sisa job yang lagi jalan + jumlah job di depan dikali
+    median. Ini PERKIRAAN dan halamannya harus bilang begitu -- render
+    terlama yang keukur 6,6 menit, hampir 3x median.
+    """
+    pos = position(conn, job_id)
+    if pos == 0:
+        return None
+    ahead = pos - 1
+    total = ahead * MEDIAN_RENDER_SEC
+    running = conn.execute(
+        "SELECT started_at FROM jobs WHERE status='running' LIMIT 1"
+    ).fetchone()
+    if running and running["started_at"]:
+        sisa = MEDIAN_RENDER_SEC - (time.time() - running["started_at"])
+        total += max(sisa, 15.0)
+    return total
+
+
+def get(conn, job_id):
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def recent(conn, owner=None, limit=20):
+    if owner:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE owner=? ORDER BY id DESC LIMIT ?",
+            (owner, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def waiting_count(conn):
+    return conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='waiting'"
+    ).fetchone()[0]
+
+
+def reap_stale(conn, max_age_sec=3600):
+    """Job 'running' yang ketinggalan karena pekerjanya mati.
+
+    Render terlama yang keukur 6,6 menit, jadi apa pun yang running lebih
+    dari sejam itu sisa proses yang udah ga ada. Tanpa ini, satu crash
+    bikin antrean keliatan sibuk selamanya.
+    """
+    batas = time.time() - max_age_sec
+    cur = conn.execute(
+        "UPDATE jobs SET status='failed', error=? , finished_at=? "
+        "WHERE status='running' AND started_at < ?",
+        ("pekerja berhenti di tengah jalan (proses hilang)", time.time(), batas),
+    )
+    conn.commit()
+    return cur.rowcount
