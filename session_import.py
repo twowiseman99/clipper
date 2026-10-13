@@ -80,6 +80,35 @@ PLATFORMS = {
                            "confirm it's you", "Enter the code",
                            "We detected unusual"),
     },
+    # Konten.com is the campaign marketplace, not a posting target: the
+    # session is what lets us read our own clips/payout and (once the
+    # platform's submit_via_link_enabled flag is on) submit a clip URL.
+    #
+    # Verified by API, not by DOM. Thirteen dashboard-ish paths were probed
+    # (/dashboard, /creator, /klip, /saldo, /profile, ...) and every one of
+    # them returns 404 "Halaman Ini Tidak Tersedia" — so there is no known
+    # logged-in page to pattern-match, and inventing one would give a verifier
+    # that reports NEEDS_LOGIN forever. What IS known, measured
+    # unauthenticated in one minute:
+    #
+    #     gateway.konten.com/api/me                  401 Unauthorized
+    #     gateway.konten.com/api/feature-flags       200
+    #     gateway.konten.com/api/clips               404 unknown_route
+    #
+    # 401 means the route exists and wants a session; 404 means it is not a
+    # route. So /api/me is the probe: 200 with a session, 401 without. The
+    # fetch runs INSIDE the page (same trick clippo.py needed) because the
+    # SPA's same-origin headers are load-bearing.
+    "konten": {
+        "url": "https://konten.com/",
+        "api_probe": "https://gateway.konten.com/api/me",
+        "ok_url": None,
+        "login_url": re.compile(r"/login|/register|/daftar"),
+        "login_text": (),
+        "ok_text": (),
+        "challenge_text": ("Verifikasi", "Akun Anda ditangguhkan",
+                           "Terlalu banyak percobaan"),
+    },
 }
 
 NEEDS_LOGIN = "NEEDS_LOGIN"
@@ -190,6 +219,10 @@ def domain_filter(platform, cookies):
     wanted = {
         "tiktok": ("tiktok.com",),
         "instagram": ("instagram.com", "facebook.com"),
+        # gateway.konten.com is a different host on the same registrable
+        # domain and is where the authenticated API lives, so the suffix match
+        # must keep it.
+        "konten": ("konten.com",),
     }[platform]
     keep = []
     for c in cookies:
@@ -202,9 +235,69 @@ def domain_filter(platform, cookies):
 # Cookies without which the session is definitionally not a login. Checked so
 # `import` can fail loudly on a logged-OUT export rather than writing a file
 # that only fails later inside a browser run.
+def classify_api(status):
+    """Verdict from an authenticated-API probe status code.
+
+    Kept separate from classify() because the evidence is different in kind: a
+    status code, not page text. 401/403 is the platform itself saying "no
+    session", which is stronger evidence than any DOM heuristic. A 404 here
+    means the probe URL is wrong and must be reported as such — never as a
+    login verdict, or a typo in a route would read as a logged-out account
+    forever.
+    """
+    if status in (200, 204):
+        return LOGGED_IN, f"api probe {status}"
+    if status in (401, 403):
+        return NEEDS_LOGIN, f"api probe {status} (platform says no session)"
+    if status == 429:
+        return BLOCKED, "api probe 429 rate-limited"
+    if status == 404:
+        return "ERROR", "api probe 404 — probe URL is wrong, not a verdict"
+    return "ERROR", f"api probe {status}"
+
+
+# The probe runs through the CONTEXT's request client, not an in-page fetch().
+# clippo.py needs the in-page trick because its gateway rejects
+# context.request for missing SPA headers — konten's gateway is the opposite
+# case and the mirror-image trap: an in-page `fetch(..., {credentials:
+# 'include'})` dies with "TypeError: Failed to fetch (gateway.konten.com)" for
+# EVERY url, including the public feature-flags endpoint, because the gateway
+# is a cross-origin host and a credentialed request cannot be answered with a
+# wildcard CORS header. Measured side by side in one browser:
+#
+#   in-page fetch  gateway.konten.com/api/me             -1 Failed to fetch
+#   in-page fetch  gateway.konten.com/api/feature-flags  -1 Failed to fetch
+#   in-page fetch  konten.com/api/campaigns             200
+#   ctx.request    gateway.konten.com/api/me            401 Unauthorized
+#   ctx.request    gateway.konten.com/api/feature-flags 200
+#
+# A -1 was being reported as ERROR, which is honest but useless. The lesson is
+# that "copy the trick that worked for the other SPA" is not a measurement:
+# ctx.request carries the context's cookies and is not subject to CORS.
+def _probe_status(ctx, url):
+    r = ctx.request.get(url, headers={"Origin": "https://konten.com",
+                                      "Referer": "https://konten.com/"})
+    return r.status
+
+
 REQUIRED = {
     "tiktok": ({"sessionid"}, {"sessionid", "sessionid_ss", "sid_tt"}),
     "instagram": ({"sessionid"}, {"sessionid", "ds_user_id"}),
+    # Konten's auth cookie name is NOT known: a logged-out visit sets only
+    # analytics cookies (__cflb, _clck, MUID, _fbp, fr, ...) and nobody has
+    # handed over a logged-in export yet. Asserting a guessed name here would
+    # reject a perfectly good export, so the requirement is "at least one
+    # cookie that is not a known analytics cookie" and `verify` does the real
+    # proving against /api/me. Honest unknown beats a confident guess.
+    "konten": (None, set()),
+}
+
+# Analytics/CDN cookies a logged-OUT konten.com visit sets. Measured in a real
+# browser on this box. Used only to tell "you exported a logged-out session"
+# from "you exported something that might be a login".
+KONTEN_NOISE = {
+    "__cflb", "CLID", "_clck", "_clsk", "MUID", "MR", "SRM_B", "SM",
+    "ANONCHK", "_fbp", "fr", "_ga", "_gid", "_gcl_au",
 }
 
 
@@ -214,17 +307,31 @@ def do_import(platform, account, src):
     cookies = domain_filter(platform, cookies)
     names = {c["name"] for c in cookies}
     need, _hints = REQUIRED[platform]
-    missing = need - names
     out = {"shape": shape, "cookies_in_file": total,
            "cookies_kept": len(cookies), "platform": platform,
            "account": account.lstrip("@")}
-    if missing:
-        out["ok"] = False
-        out["error"] = ("export is not logged in: missing %s"
-                        % ", ".join(sorted(missing)))
-        out["hint"] = ("log into %s in your own browser, then export again"
-                       % platform)
-        return out
+    if need is None:
+        # Auth cookie name unknown (konten): the only honest check is that
+        # SOMETHING beyond analytics came through. verify does the real work.
+        real = names - KONTEN_NOISE
+        if not real:
+            out["ok"] = False
+            out["error"] = ("export looks logged out: only analytics cookies "
+                            "(%s)" % ", ".join(sorted(names))) if names else \
+                "export has no cookies for this platform"
+            out["hint"] = ("log into %s in your own browser, then export again"
+                           % platform)
+            return out
+        out["auth_candidates"] = sorted(real)
+    else:
+        missing = need - names
+        if missing:
+            out["ok"] = False
+            out["error"] = ("export is not logged in: missing %s"
+                            % ", ".join(sorted(missing)))
+            out["hint"] = ("log into %s in your own browser, then export again"
+                           % platform)
+            return out
     path = session_path(platform, account)
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"cookies": cookies, "origins": []}, f)
@@ -298,7 +405,15 @@ def do_verify(platform, account, keep_open=0):
             page.wait_for_timeout(5000)
             body = page.inner_text("body")
             out["webdriver"] = page.evaluate("navigator.webdriver")
-            verdict, why = classify(page.url, body, spec)
+            if spec.get("api_probe"):
+                # Platforms with no discoverable logged-in page are proved by
+                # asking their own API. The status code IS the verdict.
+                status = _probe_status(ctx, spec["api_probe"])
+                out["api_probe"] = spec["api_probe"]
+                out["api_status"] = status
+                verdict, why = classify_api(status)
+            else:
+                verdict, why = classify(page.url, body, spec)
             out["verdict"] = verdict
             out["why"] = why
             out["final_url"] = page.url
@@ -370,6 +485,45 @@ def _selfcheck():
     v, _ = classify("https://www.instagram.com/accounts/login",
                     "Help us confirm it's you", ig)
     assert v == BLOCKED, v
+    # classify_api: the status code IS the verdict, and 404 must NOT be one.
+    assert classify_api(200)[0] == LOGGED_IN
+    assert classify_api(401)[0] == NEEDS_LOGIN
+    assert classify_api(403)[0] == NEEDS_LOGIN
+    assert classify_api(429)[0] == BLOCKED
+    # A wrong probe URL must be reported as an error, never as "logged out",
+    # or a typo in a route reads as a dead account forever.
+    assert classify_api(404)[0] == "ERROR", classify_api(404)
+    assert classify_api(-1)[0] == "ERROR"
+
+    # konten: the auth cookie name is unknown, so an export carrying only the
+    # analytics cookies a logged-OUT visit sets must be refused, while one
+    # extra unknown cookie is accepted and left for verify to prove.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        real_dir = globals()["SESSION_DIR"]
+        globals()["SESSION_DIR"] = d
+        try:
+            noise = ("# Netscape HTTP Cookie File\n"
+                     ".konten.com\tTRUE\t/\tTRUE\t0\t_clck\tabc\n"
+                     ".konten.com\tTRUE\t/\tTRUE\t0\tMUID\tdef\n")
+            p = os.path.join(d, "noise.txt")
+            open(p, "w").write(noise)
+            r = do_import("konten", "x", p)
+            assert r["ok"] is False and "logged out" in r["error"], r
+            assert not os.path.exists(session_path("konten", "x")), r
+
+            p2 = os.path.join(d, "maybe.txt")
+            open(p2, "w").write(
+                noise + ".konten.com\tTRUE\t/\tTRUE\t1900000000\tkt_sess\tZZ\n"
+                "gateway.konten.com\tFALSE\t/\tTRUE\t1900000000\trefresh\tQQ\n")
+            r = do_import("konten", "x", p2)
+            assert r["ok"] is True, r
+            # gateway.konten.com is a different host on the same domain and
+            # carries the API session — it must survive the filter.
+            assert r["auth_candidates"] == ["kt_sess", "refresh"], r
+        finally:
+            globals()["SESSION_DIR"] = real_dir
+
     print("session_import self-check OK")
     return 0
 

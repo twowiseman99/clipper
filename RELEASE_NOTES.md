@@ -1,3 +1,249 @@
+## Correction: Submit Video is gated on Join Campaign, not on the feature flag
+
+Operator pushed back on my claim that auto-submit was blocked by
+`submit_via_link_enabled: false`. He was right and I was wrong, and the
+correction came out of the site's own bundle rather than another guess.
+
+### What the DOM actually shows
+
+The disabled control is not a `<button>` at all:
+
+    tag DIV   aria-disabled "true"   opacity 0.5   cursor not-allowed
+    data-walkthrough "submit-video-button"
+
+A `button:has-text("Submit Video")` selector finds NOTHING while the control
+is disabled, because the component swaps element type rather than setting the
+`disabled` attribute. Any future uploader must match on
+`[data-walkthrough="submit-video-button"]` and read `aria-disabled`.
+
+### The condition, from chunks/0qu920jnadnvu.js
+
+    H = !m || "active" !== e.status || !!I
+    Z = m ? ("active" !== e.status
+              ? `Campaign sedang ${e.status}, upload tidak tersedia`
+              : I || "")
+          : "Silahkan Join Campaign terlebih dahulu untuk mulai upload video kamu"
+    H && Z ? <div role="button" aria-disabled="true"> : <button onClick={F}>
+
+`m` is joined-state. So the gates on Submit Video are, in order:
+
+    login                          required
+    Join Campaign (m)              required   <- the gate I had missed entirely
+    campaign.status === "active"   required   (karomah: active)
+    I  (other ineligibility)       must be empty
+
+`submit_via_link_enabled` appears nowhere in this component. It governs
+submitting by PASTING A LINK, which is a different path from the in-site
+upload this button opens. Reporting it as "submit is switched off" was reading
+one public flag and extrapolating past the evidence.
+
+### What is still unknown, and honestly so
+
+Whether the normal path uploads a file to Konten or pastes a TikTok URL cannot
+be determined from outside the login wall — the component behind `onClick=F`
+only mounts for a joined session. That distinction decides the whole
+architecture (render -> TikTok upload -> submit link, versus render -> submit
+file directly), so it gets measured with a real session before any uploader is
+written, not guessed a second time.
+
+Note for whoever holds the session: clicking Join Campaign is an ACTION on the
+operator's account, not a read. Measuring the button's state is not.
+
+— Dalmislave
+
+## The rate field is named `rate_per_million` and means per thousand
+
+Found while answering a different question — operator asked which campaigns
+accept which platform, and two of the four reported no rate at all.
+
+`konten.py brief` was reading only `cpm_tiktok` / `cpm_instagram` /
+`cpm_youtube`. Checked against all 111 campaigns in the public list:
+
+    both rate_per_million and cpm_* present, equal   54
+    both present, DIFFERENT                           1   (cryptowave-news)
+    only rate_per_million, every cpm_* null          56
+    only cpm_*                                        0
+
+So half the marketplace carries the rate ONLY in `rate_per_million`, and
+reading the per-platform fields alone reported "no rate" for 56 campaigns —
+including ugc-konten-com-longform (Rp10.000) and suli-2 (Rp4.000), both of
+which the cron had already reported with a price.
+
+The single disagreeing row is what settles the semantics: `cryptowave-news`
+has rate_per_million 2000 with cpm_tiktok 2500 and the others 2000. That makes
+the per-platform fields an OVERRIDE, not a duplicate — so they win where
+present and the flat rate fills the rest. Measured result:
+
+    cryptowave-news  {'tiktok': 2500, 'instagram': 2000, 'youtube': 2000}
+
+### The unit in the field name is wrong
+
+`rate_per_million` reads as IDR per 1,000,000 views. The campaign page for the
+same campaign renders:
+
+    Rp10.000 / 1K views
+    CPM (Rate /1K Views)   Rp10...
+
+Per **thousand**. Trusting the field name is a 1000x pricing error, so
+`rules()` now publishes `cpm_unit: "IDR per 1000 views"` next to the numbers
+rather than leaving a caller to re-guess from the key. This is the same class
+as the ffprobe rule in this repo: the name of a thing is not a measurement of
+it.
+
+### Platform per campaign, which decides what a cookie is even for
+
+    karomah-insani-kerkun           tiktok                      Rp10.000/1K
+    terabas-daily-commute-clippers  tiktok                      Rp 4.000/1K
+    ugc-konten-com-longform         youtube                     Rp10.000/1K
+    suli-2                          tiktok, instagram, youtube  Rp 4.000/1K
+
+Relevant to the "is there a free API" question: Upload-Post's free tier
+($0/mo, 10 uploads/mo, no card) lists Instagram, LinkedIn, YouTube, Facebook,
+X, Threads, Pinterest, Bluesky — and **not TikTok**, which first appears on
+the $16/mo tier. Two of these four campaigns are TikTok-only, so the free tier
+earns nothing on them. Ayrshare's cheapest is $149/mo with no free tier;
+Blotato excludes API access from its 7-day trial.
+
+### _v79 pins it, with a control
+
+    control  revert to cpm_*-only reading  -> AssertionError: {}  exit 1
+    restored                                                      exit 0
+
+— Dalmislave
+
+## Reading a Konten.com brief without a login, and refusing to fake a submit
+
+Operator: *"nanti gw kasih cookie.txt buat lu login dan ambil, terus cek
+requirmeentnya"* and then *"Ya maunya auto submit jugaa"*.
+
+The first half turned out not to need the cookie at all, and the second half
+is blocked platform-side. Both were measured, not assumed.
+
+### Measurement 1 — the brief is public
+
+    konten.com/api/campaigns/karomah-insani-kerkun   200   full brief
+
+That one call returns budget, spent, min_views, min_video_duration and the
+entire `brief_detail`: elemenWajib, bolehDilakukan, dilarangDilakukan, and the
+13 materi links. No session, no browser, just a browser User-Agent. So a
+cookie was about to be handed over for something that needs no cookie.
+
+### Measurement 2 — 401 and 404 are different answers
+
+Unauthenticated, one minute, against the host the SPA actually calls:
+
+    gateway.konten.com/api/me                      401  Unauthorized
+    gateway.konten.com/api/campaigns/<slug>/submit  401  Unauthorized
+    gateway.konten.com/api/feature-flags           200
+    gateway.konten.com/api/clips                   404  unknown_route
+    gateway.konten.com/api/submissions             404  unknown_route
+    gateway.konten.com/api/creator/clips           404  unknown_route
+    gateway.konten.com/api/my-clips                404  unknown_route
+
+401 means the route exists and wants a session; 404 means it is not a route.
+That is the whole map, and four of the five plausible-sounding submit names are
+in the 404 column — a submitter guessed from the README shape would never have
+worked.
+
+### Measurement 3 — submit is switched off platform-side
+
+`gateway.konten.com/api/feature-flags` is public and says:
+
+    submit_via_link_enabled      false
+    tiktok_official_api_enabled  false
+    tiktok_login_kit_enabled     false
+    campaign_min_views_floor     1000
+    early_earning_rate_percent   50
+
+So auto-submit cannot be built today. `konten.py submit` therefore reports
+readiness and names its blockers instead of posting into the dark, and it
+reads the flag LIVE — if konten enables it, the gate opens with no code change.
+
+### New: konten.py
+
+    .venv/bin/python konten.py brief   <url-or-slug>
+    .venv/bin/python konten.py check   <slug> --clip F --hook-seconds N --caption T
+    .venv/bin/python konten.py submit  <slug> --account NAME
+    .venv/bin/python konten.py flags
+
+`brief` splits the requirements by whether a machine can check them, and that
+split is the point. From this campaign:
+
+    checkable: min_duration_s 10, hook_max_pct 20 (parsed out of free text,
+               not a field), link_in_caption + the tokopedia link,
+               min_views 10000, early_earn_views 1000
+    human:     "Clipping sesuai dengan materi dan narasi yang relevan"
+    forbidden: SARA, politik/agama/seksual/rasial, screenshot campaign,
+               "Dilarang menggunakan ads maupun bot"
+
+Judgement rules are carried through to a human instead of being silently
+treated as satisfied; a report that dropped them would read as full compliance.
+
+`check` measures the DELIVERED file with ffprobe. Verified on a real render,
+`jobs/clip_1791796522_122.mp4`:
+
+    min_duration    PASS  38.67s vs min 10s
+    hook_max_pct    PASS  hook 5.00s = 12.9% of 38.67s, max 20%
+    link_in_caption PASS  1/1 required link(s) present in caption
+
+and the negative controls, on real files rather than fixtures:
+
+    hook 9s, caption without the link  -> hook FAIL (23.3%), link FAIL, exit 1
+    an 8.07s clip cut with ffmpeg      -> min_duration FAIL, exit 1
+
+All-SKIP never reports ok — that is the shape of a gate that silently does
+nothing.
+
+### session_import: konten added, and the mirror-image CORS trap
+
+A `konten` platform was added, but guessing its logged-in page failed: thirteen
+paths (/dashboard, /creator, /klip, /saldo, /profile, ...) all return 404
+"Halaman Ini Tidak Tersedia". So the verdict comes from the API, not the DOM —
+and the first attempt copied clippo.py's in-page `fetch()` trick, which broke:
+
+    in-page fetch  gateway.konten.com/api/me             -1  Failed to fetch
+    in-page fetch  gateway.konten.com/api/feature-flags  -1  Failed to fetch
+    in-page fetch  konten.com/api/campaigns             200
+    ctx.request    gateway.konten.com/api/me            401  Unauthorized
+    ctx.request    gateway.konten.com/api/feature-flags 200
+
+clippo needs the in-page fetch because its gateway rejects `ctx.request`;
+konten is the exact opposite — a credentialed cross-origin fetch cannot be
+answered with a wildcard CORS header, so every URL fails, including the public
+one. "Copy the trick that worked on the other SPA" is not a measurement.
+
+Live result with no session, now honest and from the platform's own mouth:
+
+    api_status 401 -> NEEDS_LOGIN "api probe 401 (platform says no session)"
+
+`classify_api` also refuses to turn a 404 into a login verdict: a wrong probe
+URL is an ERROR, because otherwise a typo in a route reads as a dead account
+forever. Konten's auth cookie NAME is still unknown, so `import` does not
+assert one — it rejects an export carrying only the analytics cookies a
+logged-out visit sets (`__cflb`, `_clck`, `MUID`, `_fbp`, `fr`, ...) and lets
+`verify` do the real proving.
+
+### tests/_v79.py, with both controls
+
+Pins the extraction, the endpoint, the 20% boundary and the live-flag
+behaviour. Verified capable of failing:
+
+    control A  hardcode the refusal (ignore the live flag)  -> exit 1
+    control B  hook boundary < instead of <=                -> exit 1
+               ("hook 6.00s = 20.0% of 30.00s" must PASS)
+    restored                                                -> exit 0
+
+`konten.py selfcheck` is wired into tests/run_all.sh next to session_import.
+
+### Not done, and not pretended
+
+No auto-submit: the platform flag forbids it. No uploader and no view
+harvester yet. Also worth repeating once: this campaign's own brief says
+*"Dilarang menggunakan ads maupun bot"* — that is the operator's call, and the
+risk sits on his Konten.com account, not just the social one.
+
+— Dalmislave
+
 ## Session import: cookies from the operator's own browser, verified in a real browser
 
 Operator: *"Bsa klik otomatis ga pake headless browser"* and *"Iya boleh asal
@@ -1735,299 +1981,3 @@ and that failure looks identical to success if the only check is "the body is
 clean".
 
 **`FLASH_WINDOW_FRACTION`, separate from `FLASH_BEAT_FRACTION`.** 12% of a whole
-clip's 63 onsets is 8 hits; the 3s freeze holds 6 onsets and 12% of those is ONE.
-Measured on this track's window: 0.30 gives 2 bursts, 0.50 gives 3 evenly spread
-with a 1.11s longest gap.
-
-**The flicker and the slam moved BELOW the outro filters.** The freeze is a
-`loop`, and it clones whatever frame it is handed — including a flickering one.
-Probed in real ffmpeg on a synthetic clip: the same expression produced 0 events
-inside the freeze above the loop and 10 below it. The outro's own brightness ramp
-stays above, because it describes what the ending does to the footage rather than
-a hit on the held frame, so the two terms are no longer concatenated.
-
-### The slam rule was backwards
-
-It read "keep slams out of the frozen ending" — which is precisely what left the
-body shaking for 26s and the ending perfectly still. Throwing a held frame is the
-point: the picture stops, the framing keeps hitting the beat.
-
-### Delivered file, frame by frame
-
-```
-body (0 .. 28.20s)        0 flickers
-                          4 luminance steps, all b-roll cuts: they move and
-                          STAY, while a flicker returns within 0.08s
-freeze (28.20 .. 31.20)   9 flickers in 3 bursts + 2 slams
-first hit                 0.25s into the freeze
-longest gap               1.11s
-                          1080x1920, 31.20s
-```
-
-### Verification
-
-`_v53` is new. 51 ok, with `_v9`/`_v10` still failing on a deleted transcript.
-
-Negative control: selecting over the whole clip puts 21 flickers in the body;
-with the window, 0.
-
-Signed: Dalmislave
-
-## fab7671 — the freeze keeps the music, and the effects burst instead of drip
-
-Two operator reports on one delivered render: "frame freeze ga ada suara
-videonya lagi jedag jedug" and "kenapa editannya sepanjang ada lagu? sampah".
-
-### The ending had no sound
-
-Three walls stacked, each hiding the next:
-
-1. `total = dur + intro_dur` did not know the jamet freeze EXTENDS the clip, so
-   the audio fade was computed for 28.55s of a 31.20s file.
-2. amix ran `duration=first`, ending the mix when the speech track ended.
-3. the BGM input itself was cut with `-t dur + intro_dur`.
-
-Fixing only the filter graph left the file silent anyway — measured -99 dB from
-29.0s while the stream still reported 31.21s. `-t` on an input is a hard cut and
-no downstream `apad` brings back seconds that were never decoded.
-`_outro_output_len()` now reads the true output length out of the filter list
-the renderer actually uses, and the BGM input, pad, trim and fade all take it
-from there.
-
-### The effects ran under the whole song
-
-Picking the N loudest onsets spreads them by construction, because a track's
-loudest hits are spaced across it: 13 flickers every ~1.8s covering 84% of the
-clip.
-
-Measured on the reference tutorial (21 flickers over 19.9s):
-
-```
-median spacing    0.10s
-intervals <0.8s   16/20  (80%)
-longest quiet     4.45s
-```
-
-0.10s is tighter than the song's closest two onsets (0.252s). The reference is
-not flickering once per beat — it flickers several times inside one.
-`_burst_times()` does that now: the beats still come from the music, only the
-sub-division is ours.
-
-Three attempts that could not reach it, each measured rather than reasoned
-about: grabbing neighbouring onsets (0.53s median — the song's own spacing),
-widening the burst (second quarter empty for 15.7s while the song had 8 onsets
-in it), slicing the picked list (`[:keep+per]` cuts from the front of a
-time-ordered list and deleted the last burst outright).
-
-Delivered file, measured in pixels:
-
-```
-                  ours     reference
-events/s          1.28     1.05
-median spacing    0.05s    0.10s
-intervals <0.8s   79%      80%
-longest quiet     3.95s    4.45s
-bursts            8
-quarters          all populated
-```
-
-### Two knock-on effects
-
-The onset gate had to drop from 0.35s to 0.18s: at 0.35s the song's 63 onsets
-became 43 with a 0.53s median, so a burst was unexpressible before any selection
-ran. That raised every downstream fraction — slams went from the approved
-0.76/s to 1.02/s, 29 throws against 21 flickers, the heavy effect outnumbering
-the light one. `SLAM_BEAT_FRACTION` 0.60 -> 0.40 restores 0.74/s.
-
-`_v49` measured BPM on the SELECTED flickers. Bursts sit a sixteenth apart by
-design, so it reported 218 BPM — the reference tutorial would read 600 by the
-same arithmetic. It now measures the onset stream (116 BPM) and checks those
-onsets land on the track's own grid, which is the property it was standing in
-for.
-
-### Verification
-
-`_v52` is new; `_v49`, `_v50` and `_v43` were corrected. 50 ok, with `_v9`/`_v10`
-still failing on a deleted transcript file.
-
-Negative control: cutting the BGM input back to the segment length leaves 5 of 6
-half-second chunks of the freeze digitally silent; with the fix, 0 of 6.
-
-Signed: Dalmislave
-
-## Captions that hold, an ending that waits for the sentence
-
-Two operator reports on the same render: "kenapa masi ada subtitlenya
-dikit-dikit ya?" and "nanti selesai dari si gibran suruh bawa kotak makan,
-langsung jedag jedug ... jadi durasi videonya jg engga kependekan".
-
-Same shape behind both: a boundary computed from a count instead of from the
-speech.
-
-### Captions covered 64% of the clip
-
-Each phrase's last word ended on its own `end`, so every pause between phrases
-blanked the caption lane. Measured on the delivered file:
-
-```
-coverage          64.2%
-gaps > 0.3s          12, totalling 10.12s
-two biggest       2.84s and 1.80s -- with 13 words BEING SPOKEN inside them
-```
-
-The last word of a phrase now holds until the next phrase begins, capped by
-`CAPTION_HOLD_MAX` (1.2s) so a genuine silence still clears the lane.
-
-```
-coverage      64.2% -> 91.7%
-leftover gaps    12 -> 2, both verified silent in the transcript
-```
-
-### The clip carried 3.3s of someone else's sentence
-
-`snap_to_speech_end` only accepted silences of 1.2s or more. After the payoff
-("...yang dimasak ikut") the breath was 0.62s, and the next qualifying silence
-was 3.3s later — so "tapi dua perempuan rekomisasi apa itu?" rode along.
-
-A shorter pause now also ends the clip, but only when NOTHING AFTER IT matches
-the clip's own keywords. Punctuation cannot be the guard here: this transcript
-marks no full stop at "ikut", and gap size does not separate the cases either
-(0.62s after the payoff against 0.52s mid-sentence elsewhere).
-
-```
-31.81s -> 28.55s, ending on "...yang dimasak ikut"
-```
-
-### The freeze landed on the payoff line
-
-`_outro_start` computed `dur - span`, which put the freeze at 23.81s while
-"anaknya membawa kotak dari rumah ... yang dimasak" ran to 27.94s. The line the
-clip exists for played under a frozen frame with its captions suppressed.
-`_outro_snap()` moves the ending to where speech actually stops.
-
-### And then the freeze was 0.35s long
-
-Snapping leaves only 0.35s of clip behind the sentence, so `freeze_secs = dur -
-start` produced a 0.35s still and `trim=end=dur` cut it back to that. The jamet
-freeze now takes `OUTRO_JAMET_SECONDS` as a floor and trims to
-`start + freeze_secs`, so it EXTENDS the output instead of fitting inside the
-remainder.
-
-```
-body 28.55s -> file 31.20s, freeze 3.00s
-```
-
-### Two wrong turns, both caught by measuring
-
-Extending the segment by the outro span to "make room" pulled the aside back in
-(28.55s -> 31.55s) and played it UNDER the freeze. The freeze needs no source
-footage at all: `loop` clones the frame at the cut and the encoder's `-t` drops
-the real tail.
-
-Searching backwards for the last pause that leaves `span` of room picked 18.86s
-on a 28.55s clip — a pause in the middle of the dialogue, which is the opposite
-of the fix.
-
-### Verified
-
-`jobs/clip_1791296210_122.mp4`, 31.20s, 1080x1920, md5 differs from the
-previous render:
-
-```
-freeze starts     28.20s   (speech ends 28.20s)
-_freeze_floor       0.0    (moving video reads 2.09-2.70)
-captions          91.7%    (was 64.2)
-```
-
-`tests/_v51.py` pins all four properties and pushes the ending through real
-ffmpeg, because a test asserting on a filter string passes while ffmpeg refuses
-the graph.
-
-`_v43` asserted on a CALL STRING (`_outro_start(dur, mood=mood)`) and failed the
-moment the signature grew a `words=` argument, while the behaviour it guards was
-untouched. It now checks the behaviour. Suite: 49 ok; `_v9`/`_v10` still need
-the deleted `media/uf9833efdc72b/PPOKdwOCMLA.words.json`.
-
--- Dalmislave
-
-## v0.8.0 — the shake travelled further than the reference and still felt like a tremor
-
-Operator: "goyangnya jgn kayak geter" tapi goyang aga jauh gitu, kayak bantingan
-bantingan agak jauh sesuai beatnya."
-
-Measured with vidstabdetect, median local-motion vector per frame at 1080 wide:
-
-```
-                  moving >8px     peak
-reference            10.6%       81.1 px
-our outro shake      36.7%      144.5 px
-```
-
-The old shake travels **further** than the reference and still reads as a
-vibration. Amplitude was never the problem. `OUTRO_SHAKE_HZ` is a continuous
-sine, so the picture is never at rest — and "always moving a bit" is the
-definition of a tremor. A slam is rare, far, then still.
-
-`_slam_offsets()` throws the frame once per beat, sharp attack, fast decay,
-static in between. Direction rotates through eight vectors rather than
-alternating on one axis: left/right-only at beat spacing is exactly what a shake
-looks like.
-
-Probed through real ffmpeg + vidstabdetect:
-
-```
-30px/0.18s -> moving 15.3%, peak  77.5 px      frac 0.22 -> 0.25 slams/s, 2.5%
-50px/0.18s -> moving 18.7%, peak 130.2 px      frac 0.40 -> 0.42 slams/s, 3.9%
-70px/0.18s -> moving 20.0%, peak 185.4 px      frac 0.60 -> 0.58 slams/s, 6.4%
-```
-
-Four things that would have broken it silently:
-
-- **pad then crop back** by the same margin. The frame needs somewhere to travel
-  into, or a throw just exposes the canvas edge. Output stays 1080x1920 and
-  `_v50` asserts it.
-- **Slams are kept out of the frozen ending.** The freeze exists so the last
-  seconds hold still; animating it would undo last release's fix.
-- **Same onsets as the flicker**, so picture and track mark the same time.
-- **Wired into the `pillar` branch** — the one we actually render. Last release
-  the flicker went into `cover` only and shipped a byte-identical file.
-
-Delivered render (md5 `2e63de4bf10e`): 18 slams in a 23.8s body, 0.76/s.
-Measured at the slam timestamps against the frames between them: **16.3px mean
-inside vs 8.2px outside** — a throw travels 2.0x the clip's own motion. 31.81s,
-1080x1920, freeze still holding to the last frame.
-
-Tests: 48 ok. `_v50` pins travel (peak > 50px) **and** stillness (moving < 20%),
-the second being where the old shake failed at 36.7%. `CLIPPER_SLAM_PX=8` makes
-it fail with "20.6px, not a tremor", so it rejects a vibration rather than
-merely measuring one. `_v9`/`_v10` still fail on a missing fixture, unrelated.
-
-— Dalmislave
-
-## v0.7.9 — the flicker was measuring the wrong thing entirely
-
-Operator: "efeknya kurang rusuh, guide jedag jedug nya gimana sih? di bedain
-exposurenya di goyang goyangin ikutin beat lagu walau agak extream."
-
-Every measurement in this project so far looked at **motion**
-(frame-difference). Motion cannot see an exposure change. Measuring raw
-brightness on the reference showed what was actually missing:
-
-```
-                brightness sd   largest jump   flickers/s   bright/dark
-reference            30.6           38.2          0.50        11 / 10
-ours                 13.9           16.2          0.17         6 /  5
-```
-
-And 16 of the reference's 21 flickers sit within 0.3s of a musical onset. Ours
-fired on stressed **words**, so the picture and the track marked different time.
-
-Four fixes, each from a number:
-
-- `FLASH` defaulted to **0**. The mechanism was already correct — it was off,
-  and capped at 3, which cannot express 21 flickers in 13.5s.
-- **Bright-only -> alternating.** The dark half is what reads as exposure being
-  pushed around rather than a camera flash going off.
-- **Words -> the track.** `_music_beats()` reads RMS onsets from the BGM: rises
-  over 6 dB, 0.35s apart, median 0.528s = 113.6 BPM on the hype track. A 3 dB
-  gate catches half-beats and reports 237. It returns real measurements or

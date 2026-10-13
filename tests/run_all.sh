@@ -38,6 +38,9 @@ if $PY audit_watch.py --selftest >/dev/null 2>&1; then echo ok; else echo FAIL; 
 printf '%-14s ' "session_import"
 if $PY session_import.py selfcheck >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi
 
+printf '%-14s ' "konten"
+if $PY konten.py selfcheck >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi
+
 printf '%-14s ' "job --selftest"
 if $PY job.py --selftest >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi
 
