@@ -20,7 +20,7 @@ import sys
 import uuid
 from collections import namedtuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import broll_place
 import censor
@@ -99,6 +99,42 @@ PHRASE_MAX_WORDS = 3      # words per line
 # and a phrase that runs long is flushed and continued rather than truncated.
 PHRASE_MAX_LINES = 2      # lines per phrase before it is flushed
 PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
+
+# --- "bold" style: the operator's reference clip (14 Okt) -------------------
+# A fourth caption style, added ALONGSIDE phrase/karaoke/editorial rather than
+# replacing any of them -- the two shipped presets keep the look they were
+# approved with.
+#
+# What the reference actually does, measured off 17 frames of the recording:
+# every word is the SAME white, and emphasis comes from SIZE, not colour. No
+# karaoke highlight, no background box, thin stroke plus a soft shadow. The
+# operator picked this knowingly over keeping the per-word colour.
+#
+# Sizes come from the WIDTH of a known word, not from an eyeballed cap height:
+# "GIBRAN" measured 143px across a 480px-wide frame = 29.8% of the width, and
+# Anton at 120px puts it at 318px/1080 = 29.4%. The cap-height estimate said
+# 95px, which would have been 23% -- noticeably smaller than the reference.
+# Width is measurable with getlength(); cap height was a guess.
+BOLD_FONT_SIZE = 120          # the emphasised line
+BOLD_FONT_SIZE_SMALL = 86     # 0.72 of it, the ratio measured in the reference
+BOLD_COLOR = "#FFFFFF"        # every word, no exceptions
+BOLD_STROKE = 5
+BOLD_SHADOW = (4, 4)          # offset of the soft drop shadow
+BOLD_SHADOW_ALPHA = 150
+BOLD_LINE_GAP = 14
+BOLD_MAX_WORDS = 2            # the reference holds 2 words per line
+BOLD_Y_FRAC = 0.70            # block BOTTOM, ~2/3 down as in the reference
+# Anton (SIL Open Font License) ships in the repo: the house DejaVu Bold is a
+# wide face and set "GIBRAN" at 38% of the frame width against the reference's
+# 29.8%, so the look was never going to match by tuning the size alone.
+BOLD_FONT_PATH = os.environ.get(
+    "CLIPPER_BOLD_FONT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "assets", "fonts", "Anton-Regular.ttf"))
+# A line is emphasised when it carries a word the model flagged as the
+# punchline. With nothing flagged the whole caption sits at the small size and
+# the clip simply has no emphasis, which is the honest result -- not a reason
+# to pick a word at random.
 # How long a phrase's last caption may hold while waiting for the next phrase.
 # Captions used to end on their own last word, so every pause between phrases
 # blanked the lane: measured on a delivered render, coverage was 64.2% with
@@ -1007,6 +1043,98 @@ def _phrase_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=PHRASE_Y_F
         overlays.append(Overlay(path, x, int(y_frac * CANVAS_H - block_h),
                                 t_start, t_end))
     return overlays
+
+
+def _bold_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=BOLD_Y_FRAC,
+                centred=True, max_lines=2):
+    """Captions in the operator's reference style: all white, emphasis by SIZE.
+
+    Deliberately NOT karaoke. Every word is the same white; a line that carries
+    a flagged punchline word is simply set larger. The reference clip was
+    measured frame by frame and showed no colour highlight at all.
+
+    Nothing flagged means nothing is enlarged -- the caption reads at the small
+    size and that is the correct output, not a reason to emphasise a word the
+    model never chose.
+    """
+    try:
+        font_big = ImageFont.truetype(BOLD_FONT_PATH, BOLD_FONT_SIZE)
+        font_small = ImageFont.truetype(BOLD_FONT_PATH, BOLD_FONT_SIZE_SMALL)
+    except OSError:
+        # Anton missing: fall back to the house bold rather than failing the
+        # render, but say so in the ledger -- the look will be wider than the
+        # reference and that is a visible difference, not a detail.
+        import audit
+        audit.record("caption", "bold-font", "FALLBACK",
+                     "Anton not found at %s" % BOLD_FONT_PATH,
+                     "using %s, wider face than the reference" % FONT_PATH)
+        font_big = ImageFont.truetype(FONT_PATH, BOLD_FONT_SIZE)
+        font_small = ImageFont.truetype(FONT_PATH, BOLD_FONT_SIZE_SMALL)
+
+    accent = {a.lower().strip(".,!?") for a in accent_words if a}
+    max_w = CANVAS_W - 2 * PADDING
+    overlays = []
+
+    for ph in group_phrases(words, max_lines=max_lines,
+                            max_words=BOLD_MAX_WORDS):
+        tiles = []
+        for line in ph["lines"]:
+            plain = [re.sub(r"[.,!?]", "", w["word"].upper()) for w in line]
+            text = censor.mask(" ".join(plain))
+            # size is the ONLY emphasis channel in this style
+            hit = bool(accent) and any(p.lower() in accent for p in plain)
+            font = font_big if hit else font_small
+            img = _bold_text_image(text, font)
+            if img.width > max_w:
+                s = max_w / img.width
+                img = img.resize((max(1, int(img.width * s)),
+                                  max(1, int(img.height * s))))
+            tiles.append(img)
+
+        block_w = max(t.width for t in tiles)
+        block_h = sum(t.height for t in tiles) + BOLD_LINE_GAP * (len(tiles) - 1)
+        block = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
+        cy = 0
+        for t in tiles:
+            block.paste(t, ((block_w - t.width) // 2 if centred else 0, cy), t)
+            cy += t.height + BOLD_LINE_GAP
+        path = os.path.join(tmp_dir, _name("b"))
+        block.save(path)
+
+        t_start = max(0.0, ph["start"] - clip_start)
+        t_end = max(t_start + 0.3, ph["end"] - clip_start)
+        x = (CANVAS_W - block_w) // 2
+        overlays.append(Overlay(path, x, int(y_frac * CANVAS_H - block_h),
+                                t_start, t_end))
+    return overlays
+
+
+def _bold_text_image(text, font):
+    """One line, white with a thin stroke and a soft shadow underneath.
+
+    The shadow is drawn into its own layer and blurred: a hard offset copy of
+    the text reads as a printing error on footage, which is what the first
+    attempt looked like.
+    """
+    pad = BOLD_STROKE + max(BOLD_SHADOW) + 10
+    tmp = Image.new("RGBA", (10, 10))
+    box = ImageDraw.Draw(tmp).textbbox((0, 0), text, font=font,
+                                       stroke_width=BOLD_STROKE)
+    w = int(box[2] - box[0] + 2 * pad)
+    h = int(box[3] - box[1] + 2 * pad)
+
+    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).text(
+        (pad - box[0] + BOLD_SHADOW[0], pad - box[1] + BOLD_SHADOW[1]),
+        text, font=font, fill=(0, 0, 0, BOLD_SHADOW_ALPHA),
+        stroke_width=BOLD_STROKE, stroke_fill=(0, 0, 0, BOLD_SHADOW_ALPHA))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(5))
+
+    img = Image.alpha_composite(shadow, Image.new("RGBA", (w, h), (0, 0, 0, 0)))
+    ImageDraw.Draw(img).text((pad - box[0], pad - box[1]), text, font=font,
+                             fill=BOLD_COLOR, stroke_width=BOLD_STROKE,
+                             stroke_fill="black")
+    return img
 
 
 def _editorial_layer(words, clip_start, tmp_dir, accent_words=(),
@@ -2876,6 +3004,10 @@ def render_clip(video_path, start, end, words, out_path, *,
                 words, start, tmp_dir, accent_words=accent_words,
                 y_frac=(EDIT_Y_FRAC_PILLAR if frame_mode == "pillar"
                         else EDIT_Y_FRAC))
+        elif caption_style == "bold" and not split_screen:
+            overlays = _bold_layer(
+                words, start, tmp_dir, accent_words=accent_words,
+                y_frac=BELOW_CAPTION_BOTTOM if below else BOLD_Y_FRAC)
         elif caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,

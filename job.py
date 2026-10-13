@@ -153,6 +153,9 @@ def catalogue():
             {"id": "editorial", "label": "Editorial serif",
              "desc": "Thin serif beside the speaker, mixed roman/italic, "
                      "punchline word set large. No box, no stroke."},
+            {"id": "bold", "label": "Bold all-caps",
+             "desc": "Condensed all-caps in white, two words a line, "
+                     "emphasis by SIZE not colour. No karaoke highlight."},
         ],
         "hook_style": [
             {"id": "boxes", "label": "Pull quote",
@@ -1413,7 +1416,7 @@ def _selftest():
     cat = catalogue()
     parser_choices = {
         "frame_mode": ("cover", "fill", "fit"),
-        "caption_style": ("phrase", "karaoke", "editorial"),
+        "caption_style": ("phrase", "karaoke", "editorial", "bold"),
         "hook_style": ("boxes", "card"),
     }
     for key, allowed in parser_choices.items():
@@ -1473,7 +1476,7 @@ def main(argv=None):
     p.add_argument("--frame-mode", dest="frame_mode",
                    choices=("cover", "fill", "fit", "pillar"))
     p.add_argument("--caption-style", dest="caption_style",
-                   choices=("phrase", "karaoke", "editorial"))
+                   choices=("phrase", "karaoke", "editorial", "bold"))
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
     p.add_argument("--broll", dest="broll", action="store_true", default=None,
                    help="cut away to b-roll found on YouTube at phrases that "
