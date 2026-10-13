@@ -39,7 +39,12 @@ import edit  # noqa: E402
 
 NAME = "_v52"
 MP3 = "/home/ubuntu/background_music/hype_dj_nansuya_gang_jedag_jedug_ncs_copyrigh.mp3"
-WORDS = "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json"
+WORDS = next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "fixtures", "wyvzLKsUNF4.words.json"),
+                 "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json")
+     if os.path.exists(p)),
+    "")
 START = 122.0
 DUR = 28.55
 

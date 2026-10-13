@@ -36,7 +36,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import edit  # noqa: E402
 
 MP3 = "/home/ubuntu/background_music/hype_dj_nansuya_gang_jedag_jedug_ncs_copyrigh.mp3"
-WORDS = "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json"
+WORDS = next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "fixtures", "wyvzLKsUNF4.words.json"),
+                 "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json")
+     if os.path.exists(p)),
+    "")
 SRC = "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.mp4"
 START, DUR = 122.0, 28.55
 

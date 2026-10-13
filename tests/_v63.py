@@ -18,13 +18,19 @@ Jadi angka ini punya BATAS DUA SISI, dan tes yang hanya memeriksa "freeze ada"
 lolos di kedua kegagalan. Yang dijaga: titik freeze relatif terhadap kata
 TERAKHIR yang relevan, diukur dari transkrip asli.
 """
+import os
 import json
 import sys
 
 sys.path.insert(0, "/home/ubuntu/clipper")
 import edit
 
-WORDS = "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json"
+WORDS = next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "fixtures", "wyvzLKsUNF4.words.json"),
+                 "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json")
+     if os.path.exists(p)),
+    "")
 CLIP_START = 122.0
 # Akhir kalimat bayaran, dibaca dari transkrip asli (bukan fixture): kata
 # "dimasak"(149.6) "ikut"(149.9) — glossary memetakan ikut -> ibu.

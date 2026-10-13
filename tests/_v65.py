@@ -19,13 +19,19 @@ beat-driven, lantainya akhir bicara. Dites lewat perilaku fungsi, bukan
 dengan mencocokkan string filter - `hue=...:eval=frame` sudah membuktikan
 string bisa terlihat benar sementara ffmpeg menolak seluruh graph.
 """
+import os
 import json
 import sys
 
 sys.path.insert(0, "/home/ubuntu/clipper")
 import edit
 
-WORDS_JSON = "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json"
+WORDS_JSON = next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "fixtures", "wyvzLKsUNF4.words.json"),
+                 "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json")
+     if os.path.exists(p)),
+    "")
 BG = ("/home/ubuntu/background_music/"
       "hype_dj_nansuya_gang_jedag_jedug_ncs_copyrigh.mp3")
 

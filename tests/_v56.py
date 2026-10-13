@@ -131,7 +131,12 @@ try:
     # the last instead of ramping to grey: the sombre ending was effectively
     # absent, and no test noticed because none of them rendered this preset.
     import json
-    _w = "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json"
+    _w = next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "fixtures", "wyvzLKsUNF4.words.json"),
+                 "/home/ubuntu/clipper/media/uf0a29714d9fe/wyvzLKsUNF4.words.json")
+     if os.path.exists(p)),
+    "")
     if os.path.exists(_w):
         _d = json.load(open(_w))
         real_words = _d["words"] if isinstance(_d, dict) else _d
