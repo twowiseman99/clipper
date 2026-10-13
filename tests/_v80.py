@@ -49,15 +49,32 @@ assert q.position(conn, c) == 3
 print("urutan        : 3 job, nomor 1/2/3 sesuai masuknya")
 
 # --- dua pekerja ga boleh ngambil job yang sama ------------------------
+# Catatan: claim() sekarang nahan SATU render sekali jalan, jadi tick kedua
+# yang datang pas render pertama masih jalan dapet None -- itu yang bener
+# di kotak 2 vCPU. Buat nguji lock-nya sendiri, dua job running disiapin
+# pakai paksa=True, lalu dipastiin id-nya beda.
 w1 = same(1)
 w2 = same(1)
 j1 = q.claim(w1)
-j2 = q.claim(w2)
-assert j1 is not None and j2 is not None
+assert j1 is not None, "pekerja pertama ga dapet job"
+j2 = q.claim(w2, paksa=True)
+assert j2 is not None, "paksa=True harusnya tetep ngasih job"
 assert j1["id"] != j2["id"], (
     "dua pekerja ngambil job yang sama (%s) -- lock-nya ga kerja" % j1["id"])
 print("klaim ganda   : pekerja A ambil #%d, pekerja B ambil #%d, beda" %
       (j1["id"], j2["id"]))
+
+# --- dan tanpa paksa, tick kedua DITAHAN pas ada yang jalan ------------
+# Ini yang ketemu pas nyiapin cron: tick tiap 2 menit, render 2,4 menit,
+# jadi tick kedua selalu datang pas yang pertama masih jalan.
+conn_tahan = fresh()
+q.submit(conn_tahan, "dalmi", "jamet", {})
+q.submit(conn_tahan, "oden", "jamet", {})
+assert q.claim(conn_tahan) is not None, "job pertama harus keambil"
+assert q.claim(conn_tahan) is None, (
+    "tick kedua dapet job padahal render pertama masih jalan -- dua ffmpeg "
+    "di 2 vCPU, dan job.py bakal nolak yang kedua di level flock")
+print("tick numpuk   : tick kedua ditahan selama ada yang running")
 
 # --- job yang udah diambil ga nongol lagi di antrean -------------------
 assert q.position(conn, a) == 0, "job running masih dihitung nunggu"

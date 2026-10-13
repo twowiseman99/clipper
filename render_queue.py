@@ -71,13 +71,32 @@ def submit(conn, owner, preset, params):
     return cur.lastrowid
 
 
-def claim(conn):
-    """Ambil job paling depan buat dikerjain. None kalau antrean kosong.
+def claim(conn, paksa=False):
+    """Ambil job paling depan buat dikerjain. None kalau ga ada yang bisa.
 
     Dipanggil pekerja. Penandaan running dilakukan dalam satu transaksi
     supaya dua pekerja ga bisa ngambil job yang sama.
+
+    TAHAN SATU RENDER SEKALI JALAN: kalau masih ada job status running,
+    fungsi ini balik None walaupun antreannya panjang. Alasannya bukan
+    teori -- kotak ini 2 vCPU dan job.py punya flock sendiri, jadi render
+    kedua yang dipaksa jalan bikin dua-duanya lambat lalu yang kedua
+    ditolak di level file lock, padahal statusnya udah running, jadi
+    nyangkut sampai reap_stale.
+
+    Ketemu pas nyiapin cron per-tick: tick kedua datang beberapa menit
+    setelah yang pertama, render pertama masih jalan, dan claim() tetep
+    ngasih job kedua.
+
+    `paksa=True` cuma buat tes yang perlu nyiapin dua job running.
     """
     conn.execute("BEGIN IMMEDIATE")
+    if not paksa:
+        jalan = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status='running'").fetchone()[0]
+        if jalan:
+            conn.rollback()
+            return None
     row = conn.execute(
         "SELECT * FROM jobs WHERE status='waiting' ORDER BY id LIMIT 1"
     ).fetchone()
