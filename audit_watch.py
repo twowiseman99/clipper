@@ -33,6 +33,10 @@ STATE = pathlib.Path(os.environ.get(
 # b-roll render runs past that, so it is split on line boundaries rather than
 # truncated — losing the tail would hide exactly the division that failed.
 DISCORD_LIMIT = 1900
+
+# Discord's edge returns 403 to urllib's default User-Agent. Identify the
+# sender instead; see post() for the measured both-ways control.
+USER_AGENT = "clipper-audit-watch/1.0 (+https://github.com/twowiseman)"
 # How many messages ONE render may occupy. Splitting on line boundaries kept
 # every line, which is right for a message that is a few hundred lines over
 # and catastrophic for one that is a thousand: a single render took 179
@@ -134,8 +138,16 @@ def format_ledger(data):
 def post(webhook, text):
     for part in chunk(text):
         body = json.dumps({"content": part}).encode()
+        # Discord's edge rejects urllib's default User-Agent with 403 even
+        # though the webhook URL is valid. MEASURED both directions on one
+        # live webhook, same process, same minute: no UA header -> 403,
+        # with this header -> 204. curl worked all along because curl sends
+        # its own UA, which is exactly why a curl smoke test passing is not
+        # evidence that this function works.
         req = urllib.request.Request(
-            webhook, data=body, headers={"Content-Type": "application/json"})
+            webhook, data=body, headers={
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=30) as resp:
             if resp.status >= 300:
                 raise RuntimeError(f"webhook HTTP {resp.status}")

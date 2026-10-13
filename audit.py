@@ -286,6 +286,33 @@ class Ledger:
 _current = None
 
 
+# Which project a render belongs to. The operator runs more than one (Clipper
+# and YouTube Automation, each with its own note in the Obsidian vault), and a
+# ledger that only says which divisions ran does not say which product it ran
+# for.
+#
+# Read from the environment, never guessed. CLIPPER_PROJECT wins so a second
+# project can reuse this pipeline by setting one variable; otherwise the repo
+# directory name is used, because the directory is a fact about where the code
+# ran rather than an assumption about intent. If neither is available the field
+# is empty and the header omits it: an unlabelled ledger is honest, a ledger
+# labelled with a guessed project name is not. The same rule the gates follow,
+# applied to provenance.
+PROJECTS = {
+    "clipper": "Clipper",
+    "stockstory": "YouTube Automation",
+    "athena-clip": "Clippo.id",
+}
+
+
+def project_name():
+    env = os.environ.get("CLIPPER_PROJECT", "").strip()
+    if env:
+        return env
+    here = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+    return PROJECTS.get(here.lower(), here)
+
+
 def start():
     global _current
     _current = Ledger()

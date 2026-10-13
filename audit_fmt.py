@@ -395,8 +395,16 @@ def format_ledger(data, checkers=(), limit=None, narrate=None):
     entries = data.get("entries", [])
     title = data.get("title") or (data.get("clip", "").rsplit("/", 1)[-1])
     render_id = data.get("clip", "").rsplit("/", 1)[-1].replace(".mp4", "")
-    head = [f"🎬 **{title}**",
-            " · ".join(headline(data) + ([render_id] if render_id else []))]
+    # Project above the clip title: the operator runs several products through
+    # this pipeline, so "which product" is the first question a channel of
+    # ledgers has to answer. Omitted entirely when absent rather than filled
+    # with a placeholder, because a ledger from an older render genuinely does
+    # not know, and inventing the answer would make every future reader trust
+    # a field that is sometimes a guess.
+    project = (data.get("project") or "").strip()
+    head = [f"📁 `{project}`"] if project else []
+    head += [f"🎬 **{title}**",
+             " · ".join(headline(data) + ([render_id] if render_id else []))]
     out = list(head)
     issues = issue_block(data)
     seen = [e["checker"] for e in entries]

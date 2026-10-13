@@ -1379,6 +1379,7 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
                 path = os.path.splitext(out)[0] + ".audit.json"
                 led.save(path, checkers=checkers, meta={
                     "file": out,
+                    "project": audit.project_name(),
                     "title": result.get("title", ""),
                     "mood": result.get("mood", ""),
                     "mood_used": result.get("mood_used", ""),
