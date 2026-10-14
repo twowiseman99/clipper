@@ -115,13 +115,38 @@ PHRASE_GAP_SPLIT = 0.45   # a pause this long ends the phrase
 # Anton at 120px puts it at 318px/1080 = 29.4%. The cap-height estimate said
 # 95px, which would have been 23% -- noticeably smaller than the reference.
 # Width is measurable with getlength(); cap height was a guess.
-BOLD_FONT_SIZE = 120          # the emphasised line
-BOLD_FONT_SIZE_SMALL = 86     # 0.72 of it, the ratio measured in the reference
+# Measured against the reference by LETTER HEIGHT as a fraction of the video
+# area, which is the fair comparison -- line WIDTH depends on how long the
+# words happen to be, so a line of short words looks "smaller" at the same
+# font size. Reference letters run 9.5-10.1% of the video height; at size 120
+# ours measured 9.8-9.9%, i.e. already matching.
+#
+# The operator still called that too big, and that is a taste call, not a
+# miss: matching a reference is not the same as liking it. Dropped to 0.78x
+# (120 -> 94, 86 -> 68) which puts letters near 7.7% of frame height, keeping
+# the 0.72 small/big ratio the reference used. Overridable without a code
+# edit so the next taste pass is one render, not one commit.
+# ONE size for every line. Emphasis-by-size is gone on the operator's call:
+# "besar kecilnya gausah diubah lagi, konsisten aja 1 ukuran buat font nya".
+# That also removes the last reason the model's accent_words mattered to this
+# style, so a clip no longer looks different depending on whether the model
+# bothered to flag a word.
+BOLD_FONT_SIZE = int(os.environ.get("CLIPPER_BOLD_FONT_SIZE", "94"))
+BOLD_FONT_SIZE_SMALL = BOLD_FONT_SIZE   # kept so callers/tests keep working
 BOLD_COLOR = "#FFFFFF"        # every word, no exceptions
 BOLD_STROKE = 5
 BOLD_SHADOW = (4, 4)          # offset of the soft drop shadow
 BOLD_SHADOW_ALPHA = 150
-BOLD_LINE_GAP = 14
+# Transparent margin every tile carries so the stroke and the blurred shadow
+# are not clipped. Named because TWO places need the same number: the tile
+# builder that adds it, and the stacker that has to subtract it.
+BOLD_PAD = BOLD_STROKE + max(BOLD_SHADOW) + 10
+# Gap between lines measured in VISIBLE INK, not in tile boxes. Each tile
+# carries BOLD_STROKE + max(BOLD_SHADOW) + 10 = 19px of transparent padding
+# per side, so the old "gap 14" actually rendered 14 + 38 = 51px of air --
+# the spacing the operator called too loose. _bold_layer subtracts that
+# padding, so this number is what you can measure between letters.
+BOLD_LINE_GAP = 16
 BOLD_MAX_WORDS = 2            # the reference holds 2 words per line
 BOLD_Y_FRAC = 0.70            # block BOTTOM, ~2/3 down as in the reference
 # Anton (SIL Open Font License) ships in the repo: the house DejaVu Bold is a
@@ -1094,7 +1119,7 @@ def _bold_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=BOLD_Y_FRAC,
             probe = _bold_text_image(censor.mask(" ".join(plain)),
                                      font_big if hit else font_small)
             tinggi_penuh += probe.height
-        tinggi_penuh += BOLD_LINE_GAP * (len(ph["lines"]) - 1)
+        tinggi_penuh += (BOLD_LINE_GAP - 2 * BOLD_PAD) * (len(ph["lines"]) - 1)
         y_atas = int(y_frac * CANVAS_H - tinggi_penuh)
 
         # One overlay per word: the words said so far stay on screen and the
@@ -1123,14 +1148,19 @@ def _bold_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=BOLD_Y_FRAC,
                 tiles.append(img)
 
             block_w = max(t.width for t in tiles)
+            # Each tile is padded by BOLD_PAD per side (room for stroke and
+            # blurred shadow), so stacking tiles edge to edge already leaves
+            # 2*BOLD_PAD of air between the ink. Subtract it so BOLD_LINE_GAP
+            # means the distance you can measure between letters.
+            step_trim = 2 * BOLD_PAD
             block_h = (sum(t.height for t in tiles)
-                       + BOLD_LINE_GAP * (len(tiles) - 1))
+                       + (BOLD_LINE_GAP - step_trim) * (len(tiles) - 1))
             block = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
             cy = 0
             for t in tiles:
                 block.paste(t, ((block_w - t.width) // 2 if centred else 0,
                                 cy), t)
-                cy += t.height + BOLD_LINE_GAP
+                cy += t.height + BOLD_LINE_GAP - step_trim
             path = os.path.join(tmp_dir, _name("b"))
             block.save(path)
 
@@ -1158,7 +1188,7 @@ def _bold_text_image(text, font):
     the text reads as a printing error on footage, which is what the first
     attempt looked like.
     """
-    pad = BOLD_STROKE + max(BOLD_SHADOW) + 10
+    pad = BOLD_PAD
     tmp = Image.new("RGBA", (10, 10))
     box = ImageDraw.Draw(tmp).textbbox((0, 0), text, font=font,
                                        stroke_width=BOLD_STROKE)
