@@ -62,6 +62,13 @@ DIVISIONS = {
     # bystander's head is larger. Unregistered until now, so the ledger
     # printed "freeze" as both its own section label and its reviewer.
     "freeze": ("testing", "pemilih-gambar"),
+    # Whether a caption style got the typeface it was designed against. The
+    # "bold" style was measured against a reference clip by letter WIDTH
+    # (29.8% of frame), and Anton is the face that lands there -- DejaVu Bold
+    # is 38.1% wide at the same cap height, so a silent fallback changes the
+    # look the operator approved. Same division as "edit": this is a
+    # render-level typographic fact, not a sourcing question.
+    "caption": ("marketing", "marketing-short-video-editing-coach"),
 }
 
 # Where the agent files live. Overridable so a checkout elsewhere still

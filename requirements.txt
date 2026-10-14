@@ -30,3 +30,20 @@ python-multipart>=0.0.18
 # console's auth and queue behaviour is only testable through the client --
 # a route that returns 200 in isolation can still be wide open.
 httpx>=0.27.0
+
+# Face detection (YuNet) reads frames through cv2, and the AV1 decoder is
+# the part that breaks. PINNED TO 4.x ON PURPOSE, with an upper bound:
+# opencv-python 5.0.0.93 cannot decode AV1 at all, and the failure is
+# SILENT -- VideoCapture.read() returns False, the face sampler gets zero
+# points, the crop quietly falls back to centre '(iw-ow)/2', and the render
+# still exits 0 with empty warnings. Measured 14 Okt 2026: 5.0 read 0 frames
+# from an AV1 fixture, 4.14.0 read the same frame and YuNet found 3 faces.
+#
+# Use the HEADLESS build: the normal opencv-python drags in GUI libraries
+# this box has no display for, and having both installed is what caused the
+# incident -- the 5.0 wheel landed on top of headless 4.14 and won the
+# import.
+#
+# Do not relax this bound without re-running tests/_v44.py (pan accuracy
+# against hand-checked truth), which is the test that catches a dead decoder.
+opencv-python-headless>=4.9,<5.0

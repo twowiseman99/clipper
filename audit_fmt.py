@@ -37,11 +37,13 @@ SECTIONS = {
     # "**freeze** · freeze" — the internal name standing in for both the
     # subject and the reviewer.
     "freeze": "Gambar penutup",
+    "caption": "Huruf subtitle",
 }
 
 # Order the reader cares about: what was said, how it was written, how it
 # sounds, how it was cut, then the b-roll gates that reject most often.
-ORDER = ["language", "copy", "sound", "edit", "freeze", "sourcing", "footage"]
+ORDER = ["language", "caption", "copy", "sound", "edit", "freeze",
+         "sourcing", "footage"]
 
 MARK = {audit.PASS: "✅", audit.REJECT: "❌", audit.WARN: "⚠️"}
 

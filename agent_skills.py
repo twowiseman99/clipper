@@ -75,6 +75,16 @@ SKILLS = {
     "copy": [
         ("superpowers", "brainstorming"),
     ],
+    # The caption gate records which typeface a style actually got. The whole
+    # failure mode is a SILENT substitution: Anton missing means DejaVu Bold
+    # renders instead, the clip still ships, and the look the operator
+    # approved is gone with nothing in the warnings. That is the
+    # verification-before-completion question -- did the thing I claimed
+    # happen actually happen -- not a generation or debugging question, so it
+    # gets that one skill and not a second invented pairing.
+    "caption": [
+        ("superpowers", "verification-before-completion"),
+    ],
     # Indonesian Transcript Linguist: "Fixes ASR mishearings ... without
     # touching word timings". A mishearing is a bug with a wrong fix available
     # (plausible word, wrong word), so the debugging discipline applies.
