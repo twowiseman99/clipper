@@ -9,6 +9,32 @@ dibikin manual, ga ada halaman daftar.
 http://<ip-vps>:8001
 ```
 
+Itu dari dalam box. Dari HP / luar rumah, alamatnya **ganti-ganti** —
+tanya:
+
+```
+clipper-url
+```
+
+Dia nyetak alamat yang kepakai sekarang + ngecek dia beneran hidup (401 =
+minta sandi, itu yang bener).
+
+**Kenapa ganti-ganti:** tunnel-nya pakai jalur gratis tanpa akun
+Cloudflare, dan subdomainnya diundi tiap kali tunnel restart. Terukur:
+`kill -9` → alamat pindah dari `gtk-translation-...` ke
+`sat-riding-entity-...`, dan yang lama langsung mati (530). Kalau mau
+alamat tetap, butuh akun Cloudflare + domain.
+
+Port 80/443 di VPS ini **ketutup dari internet** dan ga perlu dibuka —
+tunnel keluar sendiri (outbound), jadi IP VPS ga pernah kelihatan dan
+HTTPS-nya dapet gratis. Jangan ganti `CLIPPER_CONSOLE_HOST` ke `0.0.0.0`:
+itu malah bikin sandi lu lewat HTTP telanjang.
+
+```
+systemctl --user status clipper-tunnel     # hidup?
+systemctl --user restart clipper-tunnel    # alamat bakal GANTI
+```
+
 Browser bakal nanya user + sandi. Akun ada di
 `~/.hermes/clipper-console.env` (mode 600, cuma kebaca pemilik box):
 
@@ -16,15 +42,26 @@ Browser bakal nanya user + sandi. Akun ada di
 cat ~/.hermes/clipper-console.env
 ```
 
-Nambah orang: edit file itu, pola `nama:sandi` dipisah koma, terus
+Nambah orang / ganti sandi: **jangan edit file itu pakai tangan.** Satu
+koma kelewat bikin semua akun ga kebaca — console tetep nyala, cuma nolak
+semua orang. Pakai:
 
 ```
-systemctl --user restart clipper-console
+cd ~/clipper
+.venv/bin/python scripts/console_passwd.py --list
+.venv/bin/python scripts/console_passwd.py --set oden              # diminta, ga keliatan
+.venv/bin/python scripts/console_passwd.py --set budi --generate   # acak 20 char
+.venv/bin/python scripts/console_passwd.py --remove budi
 ```
+
+Dia nulis file-nya atomik (mode 600), restart console, lalu **mbuktiin**
+lewat HTTP: sandi baru 200, tanpa sandi 401, sandi ngawur 401. Nolak
+daftar akun kosong dan nolak sandi di bawah 12 karakter.
 
 Sandi disimpen apa adanya di file itu — ini bukan sistem akun publik, cuma
 pintu buat tim yang udah saling kenal. Jangan pakai sandi yang lu pakai di
-tempat lain.
+tempat lain, dan jangan pernah naruh sandi di command line (`-u user:pass`
+masuk riwayat shell).
 
 ## Isi formnya
 

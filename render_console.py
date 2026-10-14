@@ -23,6 +23,7 @@ Jalanin:
         .venv/bin/python render_console.py
 """
 import base64
+import hmac
 import html
 import json
 import os
@@ -91,7 +92,13 @@ def _siapa(request: Request):
     if ":" not in isi:
         return None
     nama, sandi = isi.split(":", 1)
-    if USERS.get(nama) and USERS[nama] == sandi:
+    # `==` pada string itu short-circuit: dia balik False di karakter
+    # pertama yang beda, jadi lama bandinginnya bocorin berapa karakter
+    # depan yang udah bener. Di LAN itu teoretis; begitu console kebuka ke
+    # internet lewat tunnel, itu jadi jalan nebak sandi per karakter.
+    # compare_digest waktunya tetap.
+    benar = USERS.get(nama)
+    if benar and hmac.compare_digest(benar, sandi):
         return nama
     return None
 
@@ -933,9 +940,21 @@ def file(request: Request, job_id: int):
 
 
 @app.get("/sehat")
-def sehat():
-    conn = q.connect()
-    return {"nunggu": q.waiting_count(conn), "user_kepasang": len(USERS)}
+def sehat(request: Request):
+    """Health check. SENGAJA kebuka tanpa sandi -- systemd dan tunnel
+    butuh satu alamat yang bisa dicek tanpa kredensial.
+
+    Tapi yang dibocorin dibatasin. Dia dulu nyetak `user_kepasang`
+    (jumlah akun) dan `nunggu` (panjang antrean) ke siapa pun; di LAN itu
+    ga ada artinya, tapi console ini sekarang kebuka ke internet lewat
+    tunnel, dan jumlah akun itu kabar gratis buat yang mau nebak sandi.
+    Angka operasional cuma keluar kalau yang nanya udah login.
+    """
+    if _siapa(request):
+        conn = q.connect()
+        return {"ok": True, "nunggu": q.waiting_count(conn),
+                "user_kepasang": len(USERS)}
+    return {"ok": True}
 
 
 if __name__ == "__main__":
