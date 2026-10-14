@@ -28,9 +28,10 @@ import json
 import os
 import time
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
 
+import campaigns as camp
 import render_queue as q
 
 HOST = os.environ.get("CLIPPER_CONSOLE_HOST", "127.0.0.1")
@@ -186,6 +187,33 @@ th{color:var(--ink-dim); font-weight:500; font-size:.8rem}
 video{width:100%; max-width:22rem; border-radius:8px; border:1px solid var(--line)}
 .meta{color:var(--ink-dim); font-size:.85rem}
 a{color:var(--teal)}
+nav{display:flex; gap:.4rem; margin:0 0 1.5rem; flex-wrap:wrap}
+nav a{
+  text-decoration:none; padding:.45rem .9rem; border-radius:999px;
+  border:1px solid var(--line); color:var(--ink-dim); font-size:.9rem;
+}
+nav a.on{border-color:var(--teal); color:var(--teal)}
+.skor{font-weight:650; color:var(--teal)}
+.merah{color:var(--bad)}
+td.r,th.r{text-align:right}
+.chip{
+  display:inline-block; padding:.05rem .45rem; border-radius:4px;
+  font-size:.72rem; border:1px solid var(--line); color:var(--ink-dim);
+  margin-right:.2rem;
+}
+.garap{border-color:var(--teal); color:var(--teal)}
+.lewat{opacity:.45}
+tr.dilewat td{opacity:.4}
+.aset li{margin-bottom:.4rem}
+input[type=file]{
+  width:100%; padding:.5rem; background:#141210; color:var(--ink-dim);
+  border:1px dashed var(--line); border-radius:7px; font:inherit;
+  font-size:.85rem;
+}
+.desc{
+  font-size:.88rem; color:var(--ink-dim); white-space:pre-wrap;
+  max-height:11rem; overflow:auto;
+}
 @media(max-width:34rem){
   .wrap{padding:1.25rem .9rem 3rem}
   button{width:100%; padding:.8rem}
@@ -223,7 +251,7 @@ def _form(siapa, error=""):
 <h1>Clipper</h1>
 <p class=sub>Masuk sebagai <span class=num>%s</span> · satu render sekali jalan</p>
 %s
-<form method=post action=/render class=panel>
+<form method=post action=/render class=panel enctype="multipart/form-data">
   <h2>Render klip baru</h2>
   <label><span class=lab>Preset</span>
     <select name=preset>%s</select></label>
@@ -231,9 +259,15 @@ def _form(siapa, error=""):
     <input type=url name=content required placeholder="https://..."></label>
   <label><span class=lab>Link hook — b-roll pembuka (optional)</span>
     <input type=url name=opening placeholder="https://..."></label>
-  <label><span class=lab>Gambar outro — cuma kepakai di Jedag jedug</span>
-    <input type=text name=portrait placeholder="path gambar di server">
+  <label><span class=lab>Gambar outro (optional) — cuma kepakai di Jedag jedug</span>
+    <input type=file name=image accept="image/*">
     <span class=hint>Dikasih ke preset Mengharukan bakal ditolak job.py sendiri.</span></label>
+  <label><span class=lab>BGM (optional)</span>
+    <input type=file name=bgm accept="audio/*">
+    <span class=hint>Kosongin = musik dipilih dari mood klip pakai stok di
+    background_music/. File yang lu upload dipakai apa adanya, jadi aturan
+    "lagu hype ga boleh di klip duka" cuma bisa ngasih peringatan, ga bisa
+    nolak. Mood dibaca dari nama file (<code>emotional_piano.mp3</code>).</span></label>
   <label><span class=lab>Konteks — siapa yang ngomong, soal apa (optional)</span>
     <textarea name=context rows=2></textarea>
     <span class=hint>Dipake buat milih b-roll dan nulis judul. Kosong = diambil dari transkrip.</span></label>
@@ -265,6 +299,393 @@ def _tabel(jobs):
     )
 
 
+def _nav(aktif):
+    tab = (("render", "/", "Render"), ("campaign", "/campaign", "Campaign"))
+    return "<nav>%s</nav>" % "".join(
+        '<a class="%s" href="%s">%s</a>'
+        % ("on" if k == aktif else "", u, _e(label)) for k, u, label in tab)
+
+
+def _rp(n):
+    return "Rp" + format(int(n or 0), ",d").replace(",", ".")
+
+
+# ------------------------------------------------------------ papan campaign
+
+def _papan(rows, saring, umur):
+    """Tabel campaign. Urutan SKOR = cpm x sisa budget (pilihan operator).
+
+    Kolomnya nyebut `Rp / 1.000 views` dan bukan "CPM", karena field yang
+    namanya `rate_per_million` di API itu rupiah per SERIBU views -- udah
+    dicek ke halaman campaign-nya. Nulis "CPM" doang di header bikin orang
+    ngitung pakai arti yang salah dan kelirunya 1000x.
+    """
+    if not rows:
+        return ("<p class=meta>Belum ada campaign di papan. Klik "
+                "<b>Tarik ulang</b> di atas.</p>")
+    baris = []
+    for r in rows:
+        kelas = " class=dilewat" if r["pick"] == "lewat" else ""
+        tanda = ""
+        if r["pick"] == "garap":
+            tanda = "<span class='chip garap'>garap</span>"
+        elif r["pick"] == "lewat":
+            tanda = "<span class='chip lewat'>lewat</span>"
+        aset = ("<span class=chip>%d aset</span>" % r["n_asset"]) if r["n_asset"] else ""
+        mv = "?" if r["min_views"] is None else format(r["min_views"], ",d").replace(",", ".")
+        baris.append(
+            "<tr%s><td class='num r skor'>%s</td>"
+            "<td class='num r'>%s</td><td class='num r'>%s</td>"
+            "<td class='num r%s'>%s</td>"
+            "<td><a href='/campaign/%s'>%s</a><br>"
+            "<span class=meta>%s %s %s</span></td></tr>"
+            % (kelas, format(r["score"], ",d").replace(",", "."),
+               _rp(r["cpm"]),
+               "?" if r["budget_left"] is None else "%d%%" % r["budget_left"],
+               " merah" if r["min_views_merah"] else "", mv,
+               _e(r["slug"]), _e(r["title"][:60]),
+               _e(r["brand"][:26]), tanda, aset))
+    pil = []
+    for nama, nilai in (("Aktif", ""), ("Digarap", "garap"),
+                        ("Dilewat", "lewat"), ("Semua status", "semua")):
+        on = " class=on" if saring == nilai else ""
+        pil.append("<a%s href='/campaign?saring=%s'>%s</a>"
+                   % (on, nilai, _e(nama)))
+    return (
+        "<nav>%s</nav>"
+        "<form method=post action=/campaign/refresh style='margin-bottom:1rem'>"
+        "<button class=ghost type=submit>Tarik ulang dari marketplace</button>"
+        "<span class=hint> terakhir: %s</span></form>"
+        "<table><tr><th class=r>Skor</th><th class=r>Rp / 1.000 views</th>"
+        "<th class=r>sisa budget</th><th class=r>min views</th>"
+        "<th>Campaign</th></tr>%s</table>"
+        "<p class=hint>Urutan = <b>skor</b> (Rp/1.000 views × sisa budget). "
+        "CPM mentah nipu: campaign dengan rate tertinggi di marketplace "
+        "(Rp15.000) sisa budgetnya cuma 6%%, jadi rate-nya ga bisa diambil. "
+        "Angka merah di min views = lantai di atas 10.000, klip di bawah itu "
+        "ga dibayar sama sekali.</p>"
+        "<p class=hint>Rp/1.000 views, BUKAN per sejuta: field API-nya "
+        "ketulis <code>rate_per_million</code> tapi halaman campaign-nya "
+        "nulis \"Rp10.000 / 1K views\" buat angka yang sama. Namanya bohong, "
+        "angkanya per seribu.</p>"
+        % ("".join(pil), _e(umur), "".join(baris)))
+
+
+def _umur_refresh(conn):
+    t = camp.last_refresh(conn)
+    if not t:
+        return "BELUM PERNAH ditarik"
+    lalu = time.time() - t
+    return "%s lalu (%s)" % (_lama(lalu),
+                             time.strftime("%d %b %H:%M", time.localtime(t)))
+
+
+@app.get("/campaign")
+def papan(request: Request, saring: str = ""):
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = camp.connect()
+    rows = camp.board(
+        conn,
+        hanya_aktif=saring in ("", "garap", "lewat") and saring != "semua",
+        state=saring if saring in ("garap", "lewat") else None,
+        limit=300)
+    if saring == "semua":
+        rows = camp.board(conn, hanya_aktif=False, limit=300)
+    isi = (_nav("campaign")
+           + "<h1>Campaign</h1>"
+           + "<p class=sub>Masuk sebagai <span class=num>%s</span> · "
+             "%d campaign kelihatan</p>" % (_e(siapa), len(rows))
+           + "<div class=panel>%s</div>" % _papan(rows, saring,
+                                                  _umur_refresh(conn)))
+    return _halaman("Campaign", isi)
+
+
+@app.post("/campaign/refresh")
+def papan_refresh(request: Request):
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = camp.connect()
+    try:
+        camp.refresh(conn)
+    except Exception as exc:
+        # Marketplace ga kebaca itu keadaan yang wajar (mereka bisa down,
+        # kotak ini bisa kena rate limit). Papan lama TETEP ditampilin dan
+        # umur refresh-nya keliatan basi -- itu jujur. Yang ga boleh:
+        # halaman kosong tanpa sebab.
+        rows = camp.board(conn, limit=300)
+        return _halaman("Campaign", _nav("campaign")
+                        + "<h1>Campaign</h1>"
+                        + "<div class=err>Marketplace ga kebaca: %s</div>"
+                        % _e("%s: %s" % (type(exc).__name__, exc))
+                        + "<div class=panel>%s</div>"
+                        % _papan(rows, "", _umur_refresh(conn)))
+    return RedirectResponse("/campaign", status_code=303)
+
+
+def _aset_panel(c, aset):
+    def daftar(kind, kosong):
+        pilih = [a for a in aset if a["kind"] == kind]
+        if not pilih:
+            return "<p class=meta>%s</p>" % _e(kosong)
+        li = []
+        for a in pilih:
+            if kind == "video_link":
+                badan = "<a href='%s' rel=noreferrer>%s</a>" % (
+                    _e(a["value"]), _e(a["value"][:70]))
+            else:
+                badan = "<span class=num>%s</span>" % _e(
+                    os.path.basename(a["value"]))
+            if not a["ada"]:
+                badan += " <span class='chip merah'>file ilang</span>"
+            li.append(
+                "<li>%s %s<form method=post action=/campaign/%s/aset/hapus "
+                "style='display:inline'>"
+                "<input type=hidden name=asset_id value=%d>"
+                "<button class=ghost type=submit "
+                "style='padding:.1rem .5rem;font-size:.75rem'>hapus</button>"
+                "</form></li>"
+                % (badan,
+                   ("<span class=meta>%s</span>" % _e(a["label"]))
+                   if a["label"] else "",
+                   _e(c["slug"]), a["id"]))
+        return "<ul class=aset>%s</ul>" % "".join(li)
+
+    return """
+<div class=panel>
+  <h2>Bahan buat campaign ini</h2>
+  <h3 style="font-size:.85rem;color:var(--ink-dim)">Link video</h3>
+  %s
+  <h3 style="font-size:.85rem;color:var(--ink-dim)">Gambar</h3>
+  %s
+  <h3 style="font-size:.85rem;color:var(--ink-dim)">BGM</h3>
+  %s
+  <form method=post action="/campaign/%s/aset" enctype="multipart/form-data"
+        style="margin-top:1.25rem;border-top:1px solid var(--line);padding-top:1rem">
+    <label><span class=lab>Tambah link video (YouTube / Google Drive)</span>
+      <input type=url name=video_link placeholder="https://..."></label>
+    <label><span class=lab>Upload gambar (jpg/png/webp)</span>
+      <input type=file name=image accept="image/*"></label>
+    <label><span class=lab>Upload BGM (mp3/wav/m4a)</span>
+      <input type=file name=bgm accept="audio/*">
+      <span class=hint>Mood dibaca dari nama file (misal
+      <code>emotional_piano.mp3</code>). Nama tanpa mood tetep kepakai —
+      cuma peringatan tabrakan registernya yang ga bisa dikasih.</span></label>
+    <label><span class=lab>Catatan (optional)</span>
+      <input type=text name=label placeholder="misal: dari brand, wajib dipakai"></label>
+    <button type=submit>Simpan bahan</button>
+    <p class=hint>Disimpen di <span class=num>assets/campaign/%s/</span> —
+    DI LUAR <span class=num>media/</span> dan <span class=num>jobs/</span>
+    yang dibersihin auto-clean tiap jam 5 pagi. File yang lu upload sendiri
+    ga bisa diunduh ulang, jadi dia ga boleh punya umur 24 jam.</p>
+  </form>
+</div>""" % (daftar("video_link", "Belum ada link video."),
+             daftar("image", "Belum ada gambar."),
+             daftar("bgm", "Belum ada BGM. Tanpa ini, musik dipilih dari "
+                           "mood klip pakai stok di background_music/."),
+             _e(c["slug"]), _e(camp.safe_slug(c["slug"])))
+
+
+def _render_panel(c, aset):
+    """Form render yang bahannya diambil dari aset campaign ini."""
+    vids = [a for a in aset if a["kind"] == "video_link"]
+    imgs = [a for a in aset if a["kind"] == "image" and a["ada"]]
+    bgms = [a for a in aset if a["kind"] == "bgm" and a["ada"]]
+    if not vids:
+        return ("<div class=panel><h2>Render klip</h2>"
+                "<p class=meta>Belum bisa: campaign ini belum punya link "
+                "video. Tambahin di panel bahan dulu.</p></div>")
+    opsi_preset = "".join(
+        '<option value="%s">%s — %s</option>'
+        % (k, _e(v["label"]), _e(v["note"])) for k, v in PRESETS.items())
+    opsi_vid = "".join(
+        '<option value="%s">%s</option>' % (_e(a["value"]), _e(a["value"][:70]))
+        for a in vids)
+    opsi_img = "<option value=''>— ga pakai gambar outro —</option>" + "".join(
+        '<option value="%s">%s</option>'
+        % (_e(a["value"]), _e(os.path.basename(a["value"]))) for a in imgs)
+    opsi_bgm = ("<option value=''>— pilih otomatis dari mood klip —</option>"
+                + "".join(
+                    '<option value="%s">%s</option>'
+                    % (_e(a["value"]), _e(os.path.basename(a["value"])))
+                    for a in bgms))
+    return """
+<form method=post action=/render class=panel>
+  <h2>Render klip buat campaign ini</h2>
+  <input type=hidden name=campaign value="%s">
+  <label><span class=lab>Preset</span>
+    <select name=preset>%s</select></label>
+  <label><span class=lab>Link isi — video yang dipotong</span>
+    <select name=content>%s</select></label>
+  <label><span class=lab>Link hook — b-roll pembuka (optional)</span>
+    <input type=url name=opening placeholder="https://..."></label>
+  <label><span class=lab>Gambar outro — cuma kepakai di Jedag jedug</span>
+    <select name=portrait>%s</select></label>
+  <label><span class=lab>BGM</span>
+    <select name=bgm_file>%s</select>
+    <span class=hint>BGM yang dipilih tangan NGELEWATIN pemilihan lewat
+    mood, jadi aturan "lagu hype ga boleh di klip duka" ga bisa nolak
+    di sini — kalau nama filenya bentrok sama mood klip, render-nya jalan
+    tapi bawa peringatan.</span></label>
+  <label><span class=lab>Konteks — siapa yang ngomong, soal apa</span>
+    <textarea name=context rows=2>%s</textarea>
+    <span class=hint>Udah diisi dari brief campaign. Edit kalau klip ini
+    soal bagian lain.</span></label>
+  <button type=submit>Masukin antrean</button>
+</form>""" % (_e(c["slug"]), opsi_preset, opsi_vid, opsi_img, opsi_bgm,
+              _e((c["description"] or "")[:400]))
+
+
+@app.get("/campaign/{slug}")
+def campaign(request: Request, slug: str):
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = camp.connect()
+    c = camp.get(conn, slug)
+    if not c:
+        return _halaman("Ga ketemo", _nav("campaign")
+                        + "<h1>Campaign ga ada di papan</h1>"
+                        "<p>Mungkin belum pernah ditarik. "
+                        "<a href=/campaign>Balik ke papan</a></p>")
+    aset = camp.assets(conn, slug)
+    qconn = q.connect()
+    jobs = q.for_campaign(qconn, slug, limit=12)
+
+    sisa = "?" if c["budget_left"] is None else "%d%%" % c["budget_left"]
+    mv = "?" if c["min_views"] is None else format(c["min_views"], ",d").replace(",", ".")
+    kepala = (
+        "<h1>%s</h1><p class=sub>%s · <a href='%s' rel=noreferrer>buka di "
+        "marketplace</a></p>"
+        "<div class=panel><table>"
+        "<tr><th>Skor</th><td class=num><span class=skor>%s</span></td></tr>"
+        "<tr><th>Rp / 1.000 views</th><td class=num>%s <span class=meta>(%s)"
+        "</span></td></tr>"
+        "<tr><th>Sisa budget</th><td class=num>%s</td></tr>"
+        "<tr><th>Min views</th><td class='num%s'>%s</td></tr>"
+        "<tr><th>Min durasi</th><td class=num>%s detik</td></tr>"
+        "<tr><th>Platform</th><td>%s</td></tr>"
+        "<tr><th>Status</th><td>%s · %s · %s</td></tr>"
+        "<tr><th>Hashtag</th><td class=num>%s</td></tr>"
+        "</table><h2 style='margin-top:1rem'>Brief</h2>"
+        "<div class=desc>%s</div></div>"
+        % (_e(c["title"]), _e(c["brand"]), _e(c["url"]),
+           format(c["score"], ",d").replace(",", "."),
+           _rp(c["cpm"]), _e(c["cpm_source"] or "ga ada rate"),
+           sisa,
+           " merah" if c["min_views_merah"] else "", mv,
+           c["min_seconds"] if c["min_seconds"] is not None else "?",
+           _e(", ".join(c["platform"]) or "-"),
+           _e(c["status"]), _e(c["campaign_type"]), _e(c["content_type"]),
+           _e(" ".join("#" + h for h in c["hashtags"]) or "-"),
+           _e(c["description"] or "(brief kosong di daftar API)")))
+
+    pilih = (
+        "<form method=post action='/campaign/%s/pick' class=panel>"
+        "<h2>Keputusan</h2><p class=meta>Sekarang: <b>%s</b>%s</p>"
+        "<label><span class=lab>Catatan (optional)</span>"
+        "<input type=text name=note value=\"%s\"></label>"
+        "<div class=row>"
+        "<button name=state value=garap type=submit>Garap</button>"
+        "<button class=ghost name=state value=lewat type=submit>Lewat</button>"
+        "<button class=ghost name=state value=batal type=submit>Hapus "
+        "tanda</button></div></form>"
+        % (_e(slug), _e(c["pick"] or "belum diputusin"),
+           (" oleh %s" % _e(c["pick_who"])) if c["pick_who"] else "",
+           _e(c["pick_note"] or "")))
+
+    isi = (_nav("campaign") + kepala + pilih + _aset_panel(c, aset)
+           + _render_panel(c, aset)
+           + "<div class=panel><h2>Render buat campaign ini</h2>%s</div>"
+             % _tabel(jobs)
+           + "<p><a href=/campaign>Balik ke papan</a></p>")
+    return _halaman(c["title"][:40], isi)
+
+
+@app.post("/campaign/{slug}/pick")
+def campaign_pick(request: Request, slug: str,
+                  state: str = Form(...), note: str = Form("")):
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = camp.connect()
+    camp.pick(conn, slug, None if state == "batal" else state,
+              who=siapa, note=note.strip())
+    return RedirectResponse("/campaign/%s" % slug, status_code=303)
+
+
+# Batas ukuran upload. Gambar outro dan satu track BGM ga pernah segede ini;
+# yang ditahan itu orang nyoba naro video lewat kolom gambar.
+MAX_UPLOAD_MB = float(os.environ.get("CLIPPER_MAX_UPLOAD_MB", "25"))
+
+
+@app.post("/campaign/{slug}/aset")
+async def campaign_aset(request: Request, slug: str,
+                        video_link: str = Form(""),
+                        label: str = Form(""),
+                        image: UploadFile = File(None),
+                        bgm: UploadFile = File(None)):
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = camp.connect()
+    if not camp.get(conn, slug):
+        return RedirectResponse("/campaign", status_code=303)
+
+    salah = []
+    link = (video_link or "").strip()
+    if link:
+        # Link yang ga didukung ditolak DI SINI, bukan 3 menit kemudian di
+        # dalam render. fetch.py cuma ngerti dua host.
+        if not (link.startswith("http://") or link.startswith("https://")):
+            salah.append("link video harus mulai http:// atau https://")
+        elif not any(h in link for h in ("youtube.com", "youtu.be",
+                                         "drive.google.com")):
+            salah.append("link video cuma didukung YouTube atau Google Drive "
+                         "(fetch.py cuma punya dua jalur itu)")
+        else:
+            camp.add_asset(conn, slug, "video_link", link,
+                           label=label.strip(), who=siapa)
+
+    for f, kind in ((image, "image"), (bgm, "bgm")):
+        if not f or not f.filename:
+            continue
+        isi = await f.read()
+        if not isi:
+            salah.append("%s: filenya kosong" % kind)
+            continue
+        if len(isi) > MAX_UPLOAD_MB * 1e6:
+            salah.append("%s: %0.1f MB lewat batas %0.0f MB"
+                         % (kind, len(isi) / 1e6, MAX_UPLOAD_MB))
+            continue
+        path = camp.save_upload(slug, kind, f.filename, isi)
+        camp.add_asset(conn, slug, kind, path, label=label.strip(), who=siapa)
+
+    if salah:
+        c = camp.get(conn, slug)
+        return _halaman(
+            "Campaign",
+            _nav("campaign")
+            + "<h1>%s</h1>" % _e(c["title"])
+            + "<div class=err>%s</div>" % _e(" · ".join(salah))
+            + _aset_panel(c, camp.assets(conn, slug))
+            + "<p><a href='/campaign/%s'>Balik ke campaign</a></p>" % _e(slug))
+    return RedirectResponse("/campaign/%s" % slug, status_code=303)
+
+
+@app.post("/campaign/{slug}/aset/hapus")
+def campaign_aset_hapus(request: Request, slug: str,
+                        asset_id: int = Form(...)):
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = camp.connect()
+    camp.remove_asset(conn, asset_id, slug=slug)
+    return RedirectResponse("/campaign/%s" % slug, status_code=303)
+
+
 @app.get("/")
 def index(request: Request):
     siapa = _siapa(request)
@@ -272,31 +693,85 @@ def index(request: Request):
         return _minta_sandi()
     conn = q.connect()
     q.reap_stale(conn)
-    isi = _form(siapa) + (
+    isi = _nav("render") + _form(siapa) + (
         '<div class=panel><h2>Render terakhir</h2>%s</div>' % _tabel(q.recent(conn, limit=12))
     )
     return _halaman("Clipper", isi)
 
 
 @app.post("/render")
-def mulai(request: Request,
+async def mulai(request: Request,
           preset: str = Form(...),
           content: str = Form(...),
           opening: str = Form(""),
           portrait: str = Form(""),
-          context: str = Form("")):
+          context: str = Form(""),
+          campaign: str = Form(""),
+          bgm_file: str = Form(""),
+          image: UploadFile = File(None),
+          bgm: UploadFile = File(None)):
     siapa = _siapa(request)
     if not siapa:
         return _minta_sandi()
     if preset not in PRESETS:
         return _halaman("Clipper", _form(siapa, "Preset '%s' ga ada." % preset))
+
+    # Form render bisa dapet aset dua jalan: UPLOAD langsung (form utama)
+    # atau PILIH aset campaign yang udah ke-upload (halaman campaign).
+    # Upload disimpen ke folder aset supaya satu pagar yang sama berlaku
+    # buat keduanya, dan supaya auto-clean ga ngebuangnya.
+    _slug = campaign.strip() or "_lepas"
+    try:
+        for f, kind in ((image, "image"), (bgm, "bgm")):
+            if not f or not f.filename:
+                continue
+            isi = await f.read()
+            if not isi:
+                continue
+            if len(isi) > MAX_UPLOAD_MB * 1e6:
+                return _halaman("Clipper", _form(
+                    siapa, "%s: %0.1f MB lewat batas %0.0f MB."
+                           % (kind, len(isi) / 1e6, MAX_UPLOAD_MB)))
+            path = camp.save_upload(_slug, kind, f.filename, isi)
+            if kind == "image":
+                portrait = path
+            else:
+                bgm_file = path
+            if campaign.strip():
+                # Aset yang diupload lewat form campaign ikut kecatet, biar
+                # render berikutnya buat campaign yang sama bisa milih dia
+                # lagi tanpa upload ulang.
+                camp.add_asset(camp.connect(), _slug, kind, path, who=siapa)
+    except ValueError as exc:
+        return _halaman("Clipper", _form(siapa, str(exc)))
+
     if portrait and not PRESETS[preset]["pakai_outro"]:
         return _halaman("Clipper", _form(
             siapa,
             "Gambar outro cuma kepakai di preset Jedag jedug. Preset "
             "Mengharukan dikasih gambar outro bakal ditolak job.py."))
+    # Path aset datang dari form, jadi dia input yang ga dipercaya: tanpa
+    # pagar ini sebuah POST bisa nyuruh pekerja baca file mana pun di kotak
+    # ini (/etc/passwd sebagai "BGM") dan nempelin isinya ke render.
+    # Dibatasin ke folder aset campaign; BGM bawaan tetep bisa dipakai lewat
+    # jalur mood otomatis, yang ga ngelewatin form.
+    for nama, nilai in (("gambar outro", portrait), ("BGM", bgm_file)):
+        if not nilai:
+            continue
+        p = os.path.abspath(nilai)
+        if not p.startswith(os.path.abspath(camp.ASSET_DIR) + os.sep):
+            return _halaman("Clipper", _form(
+                siapa,
+                "%s harus file yang diupload di halaman campaign. Path lain "
+                "ditolak: form ga boleh bisa nunjuk file sembarangan di "
+                "server." % nama))
+        if not os.path.isfile(p):
+            return _halaman("Clipper", _form(
+                siapa, "%s udah ga ada di disk — mungkin kehapus dari aset "
+                       "campaign." % nama))
     params = {"content": content.strip(), "opening": opening.strip(),
-              "portrait": portrait.strip(), "context": context.strip()}
+              "portrait": portrait.strip(), "context": context.strip(),
+              "campaign": campaign.strip(), "bgm_file": bgm_file.strip()}
     conn = q.connect()
     job_id = q.submit(conn, siapa, preset, params)
     return RedirectResponse("/job/%d" % job_id, status_code=303)
@@ -376,6 +851,13 @@ def lihat(request: Request, job_id: int):
               "<span class=num>%s</span></p>"
               % (job_id, _e(PRESETS.get(j["preset"], {}).get("label", j["preset"])),
                  _e(st), _e(j["owner"])))
+    _p = json.loads(j["params"])
+    if _p.get("campaign"):
+        kepala += ("<p class=sub>buat campaign <a href='/campaign/%s'>%s</a>"
+                   "</p>" % (_e(_p["campaign"]), _e(_p["campaign"])))
+    if _p.get("bgm_file"):
+        kepala += ("<p class=sub>BGM dipilih tangan: <span class=num>%s"
+                   "</span></p>" % _e(os.path.basename(_p["bgm_file"])))
     return _halaman("Job #%d" % job_id,
                     kepala + "".join(bagian) + "<p><a href=/>Balik</a></p>",
                     refresh=refresh)

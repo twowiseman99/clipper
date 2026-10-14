@@ -825,7 +825,8 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         platform="youtube",
         start=None, seconds=None, mood=None, mood_from_preset=False,
         out=None, max_mb=0, context=None,
-        copy_style=None, snap_end=False, portrait=None, **style):
+        copy_style=None, snap_end=False, portrait=None, bgm_file=None,
+        **style):
     """Fetch, transcribe, pick a segment, render. Returns a result dict."""
     import bgm
     import edit
@@ -1051,7 +1052,39 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
             audit.warned("sound", "mood clash",
                          f"preset {mood!r} vs transcript {meta['mood']!r}",
                          f"kept {mood!r} (explicit --clip-type)")
-    track, why = bgm.pick(_mood, key=f"job:{int(seg_start)}")
+    if bgm_file:
+        # BGM yang DIPILIH TANGAN. Dipakai console campaign: operator upload
+        # satu lagu buat sebuah campaign, dan brand sering maksa lagunya.
+        #
+        # Jalur ini NGELEWATIN bgm.pick, jadi aturan register (emotional x
+        # hype ga boleh ketemu) ga bisa nolak apa pun di sini -- lagu ini ga
+        # ada di manifest dan kita ga bisa denger isinya. Yang bisa dilakukan:
+        # baca mood dari NAMA FILE-nya (pola yang sama kayak bgm.py pakai buat
+        # folder tanpa manifest) dan NGADUIN kalau tabrakan. Sama tangganya
+        # kayak --clip-type: pilihan manusia menang, tabrakan DIKABARIN, bukan
+        # dibalik diem-diem.
+        if not os.path.exists(bgm_file):
+            raise RuntimeError(f"--bgm-file ga ada di disk: {bgm_file!r}")
+        _nama_mood = bgm._from_filename(os.path.basename(bgm_file))
+        track = {"path": bgm_file, "file": os.path.basename(bgm_file),
+                 "mood": _nama_mood, "attribution": ""}
+        why = f"dipilih tangan: {os.path.basename(bgm_file)}"
+        _bentrok = [m for m in _nama_mood if bgm._clashes(m, _mood or "")]
+        if _bentrok:
+            warnings.append(
+                f"musik: lagu yang diupload namanya ngaku {_bentrok[0]!r} "
+                f"tapi klipnya kebaca {_mood!r} — dua-duanya tabrakan, tetep "
+                f"dipakai karena lagunya dipilih tangan"
+                " | stage: music | source: job.py:run (--bgm-file)"
+                f" | trigger: nama file {_bentrok[0]!r} vs klip {_mood!r}"
+                f" | error: mood clash on a hand-picked track"
+                " | fix: upload lagu lain, atau hapus dari aset campaign"
+                f" | fallback: lagu yang diupload tetep dipakai")
+            audit.warned("sound", "mood clash (hand-picked)",
+                         f"file {_bentrok[0]!r} vs clip {_mood!r}",
+                         "kept the uploaded track")
+    else:
+        track, why = bgm.pick(_mood, key=f"job:{int(seg_start)}")
     # Where _mood CAME FROM, which is not always the transcript. The brief
     # said "mood = 'hype', dibaca dari transkrip" on a render whose transcript
     # read 'emotional' and whose own next line was a clash warning -- the
@@ -1464,6 +1497,11 @@ def main(argv=None):
                         "instead of using the full --seconds, so the clip does "
                         "not roll past the point being made")
     p.add_argument("--mood", help="override the music mood")
+    p.add_argument("--bgm-file", dest="bgm_file",
+                   help="pakai file musik ini apa adanya, lewatin pemilihan "
+                        "lewat mood. Buat BGM yang diupload per campaign; "
+                        "mood dari nama file cuma dipakai buat ngabarin "
+                        "tabrakan register, bukan buat nolak")
     p.add_argument("--context", help="what the clip is about: who is speaking, "
                                      "where, and why the moment matters. Steers "
                                      "which segment is cut and how the hook and "
@@ -1558,7 +1596,8 @@ def main(argv=None):
                       mood_from_preset=mood_from_preset, out=a.out,
                       snap_end=a.end_at_sentence,
                       max_mb=a.max_mb, context=a.context,
-                      copy_style=a.copy_style, portrait=a.portrait, **style)
+                      copy_style=a.copy_style, portrait=a.portrait,
+                      bgm_file=a.bgm_file, **style)
     except Busy as e:
         # not a failure of this job, so it gets no report and its own code —
         # the caller should retry rather than escalate

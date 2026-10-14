@@ -209,6 +209,20 @@ def waiting_count(conn):
     ).fetchone()[0]
 
 
+def for_campaign(conn, slug, limit=50):
+    """Job yang dirender buat sebuah campaign, terbaru dulu.
+
+    Slug-nya nempel di `params` JSON, bukan di kolom sendiri: tabel ini
+    udah dipakai antrean yang jalan, dan `json_extract` bawaan SQLite
+    cukup buat jumlah job segini. Kalau nanti papannya butuh urutan per
+    campaign di SQL, baru pantes jadi kolom + index.
+    """
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE json_extract(params,'$.campaign')=? "
+        "ORDER BY id DESC LIMIT ?", (slug, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def reap_stale(conn, max_age_sec=3600):
     """Job 'running' yang ketinggalan karena pekerjanya mati.
 

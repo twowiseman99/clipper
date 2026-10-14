@@ -42,8 +42,56 @@ gambar outro **nyala**.
 | link hook | ga | video pembuka, bagian paling nyantol. Kosongin = klip tanpa hook, itu hasil yang bener bukan fallback |
 | link isi | **iya** | video yang dipotong |
 | gambar outro | cuma jedag jedug | foto tegak yang dipegang di akhir |
+| BGM | ga | lagu yang dipakai apa adanya. Kosongin = dipilih dari mood klip pakai stok di `background_music/` |
 
 Link YouTube atau Google Drive. Link lain ditolak dengan pesan jelas.
+
+Gambar outro dan BGM sekarang **di-upload** dari browser, bukan diisi path
+server. File masuk ke `assets/campaign/<slug>/` — di luar `media/` dan
+`jobs/` yang dibuang auto-clean tiap jam 5 pagi, karena file yang lu upload
+sendiri ga bisa diunduh ulang.
+
+### BGM yang di-upload ngelewatin satu pengaman
+
+Pemilihan BGM otomatis lewat `bgm.py` punya aturan register: lagu hype ga
+boleh nempel di klip duka (`bgm._CLASH`). Lagu yang lu upload **ga bisa
+ditolak** aturan itu — dia ga ada di manifest dan kodenya ga bisa denger
+isinya. Yang bisa: baca satu kata mood dari **nama file** lu dan ngasih
+peringatan kalau bentrok.
+
+Jadi kasih nama yang jujur: `emotional_piano.mp3`, `hype_jedag.mp3`. Nama
+tanpa mood (`WhatsApp Audio 2026.mp3`) tetep kepakai, cuma peringatannya ga
+bisa dikasih. Mood yang dikenal ada di `bgm.MOODS`.
+
+## Papan campaign
+
+Tab **Campaign** di atas. Daftar campaign dari konten.com, diurut **skor**:
+
+```
+skor = Rp per 1.000 views x sisa budget %
+```
+
+Bukan CPM mentah, dan itu bukan selera. Diukur: campaign dengan rate
+tertinggi di marketplace (Rp15.000, Krakatau) sisa budgetnya **6%** —
+duitnya hampir abis, jadi rate gedenya ga bisa diambil. Yang nomor satu
+pakai skor: Rp10.000 dengan sisa 97%.
+
+**Kolomnya nulis "Rp / 1.000 views", bukan CPM.** Field API-nya ketulis
+`rate_per_million` tapi halaman campaign-nya nulis "Rp10.000 / 1K views"
+buat angka yang sama. Namanya bohong; angkanya per seribu. Salah baca di
+sini kelirunya 1000x.
+
+**min views merah** = lantai di atas 10.000. Di bawah lantai itu klip ga
+dibayar sama sekali, jadi di akun kecil campaign begitu artinya kerja
+gratis.
+
+Per campaign lu bisa: tandain **garap**/**lewat**, naro bahan (link video,
+gambar, BGM), dan render langsung dari halaman campaign-nya — bahannya
+diambil dari aset yang udah ke-upload, dan job-nya kecatet milik campaign
+itu.
+
+Papan ga butuh login konten.com (daftar campaign-nya publik). Yang butuh
+sesi login cuma SUBMIT klip, dan itu belum ada di console.
 
 ## Sesudah klik Render
 

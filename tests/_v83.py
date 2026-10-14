@@ -1,211 +1,356 @@
-"""Gaya caption "bold": satu warna, penekanan lewat UKURAN.
+"""_v83: papan campaign + upload aset di console, dites lewat HTTP.
 
-Yang dijaga di sini sifatnya, bukan angka fontnya -- 120/86 itu keputusan
-hasil ngukur referensi, bisa berubah kalau operator minta. Yang TIDAK boleh
-berubah:
+Yang dijaga di sini BUKAN "halamannya kebuka". Tiga hal yang bisa diem-diem
+rusak dan bikin kerugian nyata:
 
-  - tiap kata warnanya SAMA (ga ada highlight karaoke di gaya ini)
-  - accent bikin baris jadi LEBIH GEDE, bukan ganti warna
-  - ga ada kotak latar
-  - gaya lama (phrase/karaoke) TETEP seperti sebelumnya
+1. **Form ga boleh bisa nunjuk file sembarangan di server.** Dropdown BGM dan
+   gambar outro ngirim PATH, bukan file. POST bisa dibikin tangan. Tanpa
+   pagar, `bgm_file=/etc/passwd` bikin pekerja nempelin file itu ke render.
+   Dites dengan POST tangan, bukan lewat tombol.
 
-Yang terakhir itu kontrol negatifnya: operator udah approve dua preset, dan
-nambah gaya keempat ga boleh ngubah yang udah dia setujuin. Tanpa cek ini,
-"gaya bold jalan" bisa berarti "gua nimpa gaya lama".
+2. **Nama file upload ga boleh keluar dari folder aset.** `../../job.py`
+   sebagai nama file bakal nimpa kode kalau namanya dipakai apa adanya.
+
+3. **Urutan papan ga boleh CPM mentah.** Campaign Rp15.000 dengan sisa budget
+   6% harus kalah dari Rp10.000 sisa 97%; itu seluruh alasan papan ini ada.
+
+Dijalanin pakai server sungguhan di port acak + DB sementara, jadi tes ini ga
+nyentuh queue.db atau campaigns.db yang dipakai operator.
 """
+import io
+import json
 import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PIL import Image  # noqa: E402
-
-import edit  # noqa: E402
-import job  # noqa: E402
-
-n = 0
-
-
-def ok(label):
-    global n
-    n += 1
-    print("  %-52s ok" % label)
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PY = os.path.join(BASE, ".venv", "bin", "python")
+USER, PASS = "tes", "sandi-tes"
 
 
-def kata(teks, langkah=0.35):
-    return [{"word": w, "start": i * langkah, "end": (i + 1) * langkah - 0.05}
-            for i, w in enumerate(teks.split())]
+def _port_bebas():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
 
 
-def warna_dominan(path, langkah=2):
-    im = Image.open(path).convert("RGBA")
-    px = im.load()
-    hit = {}
-    for y in range(0, im.height, langkah):
-        for x in range(0, im.width, langkah):
-            r, g, b, a = px[x, y]
-            if a < 200:
-                continue
-            k = (r // 40, g // 40, b // 40)
-            hit[k] = hit.get(k, 0) + 1
-    return hit
+def _auth():
+    import base64
+    return "Basic " + base64.b64encode(
+        ("%s:%s" % (USER, PASS)).encode()).decode()
 
 
-tmp = tempfile.mkdtemp(prefix="v83_")
-ws = kata("SUPAYA MEMINANG MAS GIBRAN")
+def _req(url, data=None, headers=None, method=None):
+    h = {"Authorization": _auth()}
+    h.update(headers or {})
+    r = urllib.request.Request(url, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
 
-# --- gaya kedaftar di dua tempat yang beda ------------------------------
-# job.py punya DUA daftar pilihan: catalogue() dan argparse. Yang ketinggalan
-# bikin --caption-style bold ditolak padahal kodenya udah ada.
-ids = [c["id"] for c in job.catalogue()["caption_style"]]
-assert "bold" in ids, "bold ga ada di catalogue(): %s" % ids
-ok("bold kedaftar di catalogue()")
 
-import subprocess  # noqa: E402
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY = os.path.join(REPO, ".venv", "bin", "python")
-h = subprocess.run([PY if os.path.exists(PY) else sys.executable,
-                    os.path.join(REPO, "job.py"), "--help"],
-                   capture_output=True, text=True, timeout=120).stdout
-m = re.search(r"caption-style \{([^}]*)\}", h)
-assert m, "--caption-style ga ketemu di --help"
-pilihan = m.group(1).split(",")
-assert "bold" in pilihan, \
-    "argparse nolak bold (daftar KEDUA di job.py, gampang kelewat): %s" % pilihan
-ok("bold keterima CLI nyata (daftar KEDUA, %s)" % ",".join(pilihan))
+def _form(url, fields):
+    body = "&".join("%s=%s" % (k, urllib.request.quote(str(v)))
+                    for k, v in fields.items()).encode()
+    return _req(url, data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"})
 
-# --- tanpa accent: semua kecil, satu warna ------------------------------
-ov = edit._bold_layer(ws, 0.0, tmp, accent_words=())
-assert ov, "ga ada overlay"
-ok("tanpa accent: overlay kebentuk")
 
-# --- accent bikin GEDE, bukan ganti warna -------------------------------
-ov2 = edit._bold_layer(ws, 0.0, tmp, accent_words=("gibran",))
-h1 = max(Image.open(o.path).height for o in ov)
-h2 = max(Image.open(o.path).height for o in ov2)
-assert h2 > h1, "accent ga bikin lebih gede (%d vs %d)" % (h1, h2)
-ok("accent nambah ukuran (%d -> %d px)" % (h1, h2))
+def _multipart(url, fields, files):
+    """files: [(name, filename, bytes)]"""
+    b = "----tes%d" % time.time()
+    buf = io.BytesIO()
+    for k, v in fields.items():
+        buf.write(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n"
+                   "%s\r\n" % (b, k, v)).encode())
+    for name, fn, data in files:
+        buf.write(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; "
+                   "filename=\"%s\"\r\nContent-Type: application/octet-stream"
+                   "\r\n\r\n" % (b, name, fn)).encode())
+        buf.write(data)
+        buf.write(b"\r\n")
+    buf.write(("--%s--\r\n" % b).encode())
+    return _req(url, data=buf.getvalue(),
+                headers={"Content-Type": "multipart/form-data; boundary=%s" % b})
 
-# --- warna: putih doang, ga ada teal/kuning -----------------------------
-hit = warna_dominan(ov2[0].path)
-TEAL = (1, 4, 4)     # #64BBA8
-EMAS = (6, 5, 1)     # #FFD24A
-BIRU = (2, 5, 6)     # #87CEFA, warna karaoke
-for haram, nama in ((TEAL, "teal"), (EMAS, "kuning"), (BIRU, "biru karaoke")):
-    assert hit.get(haram, 0) == 0, "ada %s di gaya bold" % nama
-ok("ga ada warna highlight (teal/kuning/biru semuanya nol)")
 
-putih = sum(v for k, v in hit.items() if min(k) >= 5)
-hitam = sum(v for k, v in hit.items() if max(k) <= 1)
-assert putih > 0, "ga ada piksel putih"
-assert hitam > 0, "ga ada stroke/shadow hitam"
-ok("putih %d px + stroke/shadow %d px" % (putih, hitam))
+def main():
+    import campaigns as camp
 
-# --- ga ada kotak latar -------------------------------------------------
-# kotak latar = baris paling atas gambar ikut keisi. Teks doang: baris atas
-# harus transparan.
-im = Image.open(ov2[0].path).convert("RGBA")
-px = im.load()
-atas = [px[x, 0][3] for x in range(0, im.width, 7)]
-assert max(atas) < 60, "baris paling atas keisi (alpha %d) -- ada kotak latar" % max(atas)
-ok("ga ada kotak latar (baris atas transparan)")
+    tmp = tempfile.mkdtemp(prefix="v83_")
+    aset_dir = os.path.join(tmp, "aset")
+    port = _port_bebas()
+    env = dict(os.environ)
+    env.update({
+        "CLIPPER_CONSOLE_USERS": "%s:%s" % (USER, PASS),
+        "CLIPPER_CONSOLE_PORT": str(port),
+        "CLIPPER_QUEUE_DB": os.path.join(tmp, "queue.db"),
+        "CLIPPER_CAMPAIGN_DB": os.path.join(tmp, "campaigns.db"),
+        "CLIPPER_CAMPAIGN_ASSETS": aset_dir,
+        "PYTHONPATH": BASE,
+    })
 
-# --- 2 kata per baris ---------------------------------------------------
-for ph in edit.group_phrases(ws, max_words=edit.BOLD_MAX_WORDS, max_lines=2):
-    for line in ph["lines"]:
-        assert len(line) <= 2, "baris isinya %d kata" % len(line)
-ok("maks 2 kata per baris, sesuai referensi")
+    # Papan diisi dari data, bukan dari jaringan: tes ga boleh gantung ke
+    # marketplace yang bisa down.
+    conn = camp.connect(env["CLIPPER_CAMPAIGN_DB"])
+    camp.refresh(conn, [
+        {"slug": "krakatau", "id": "1", "title": "Krakatau", "brand": "KRK",
+         "status": "active", "cpm_tiktok": 15000,
+         "budget_bar_percent_override": 6, "min_views": 20000,
+         "min_video_duration": 30, "platform": ["tiktok"],
+         "description": "brief krakatau", "hashtags": ["krakatau"]},
+        {"slug": "karomah-insani", "id": "2", "title": "Karomah Insani",
+         "brand": "KI", "status": "active", "cpm_tiktok": 10000,
+         "budget_bar_percent_override": 97, "min_views": 10000,
+         "min_video_duration": 60, "platform": ["tiktok", "instagram"],
+         "description": "brief karomah", "hashtags": ["karomah"]},
+    ])
 
-# --- font condensed beneran kepasang ------------------------------------
-assert os.path.exists(edit.BOLD_FONT_PATH), \
-    "font bold ga ada: %s" % edit.BOLD_FONT_PATH
-from PIL import ImageFont  # noqa: E402
-f = ImageFont.truetype(edit.BOLD_FONT_PATH, edit.BOLD_FONT_SIZE)
-lebar = f.getlength("GIBRAN")
-# referensi: 143px pada frame 480 lebar = 29.8%. Ambang longgar, yang dijaga
-# cuma "jangan selebar DejaVu" (38%) dan "jangan kekecilan".
-frac = lebar / edit.CANVAS_W
-assert 0.24 < frac < 0.34, \
-    "GIBRAN %.1f%% dari lebar, referensi 29.8%%" % (frac * 100)
-ok("lebar huruf cocok referensi (%.1f%% vs 29.8%%)" % (frac * 100))
+    proc = subprocess.Popen([PY, os.path.join(BASE, "render_console.py")],
+                            env=env, cwd=BASE,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    url = "http://127.0.0.1:%d" % port
+    try:
+        for _ in range(60):
+            try:
+                if _req(url + "/sehat")[0] == 200:
+                    break
+            except Exception:
+                pass
+            if proc.poll() is not None:
+                print(proc.stdout.read().decode("utf-8", "replace"))
+                raise AssertionError("console mati sebelum siap")
+            time.sleep(0.4)
+        else:
+            raise AssertionError("console ga pernah siap di %s" % url)
 
-# --- kata muncul SATU-SATU, bukan frasa utuh sekaligus -----------------
-# Ini yang gua salah baca pertama kali: gua ambil frame tiap 2 detik, lebih
-# panjang dari satu frasa, jadi tiap sampel nunjukin frasa yang UDAH lengkap
-# dan bedanya ga pernah masuk sampel. Frame tiap 0.2 detik nunjukin
-# "SUPAYA" dulu, baru "SUPAYA / MEMINANG".
-ws4 = [{"word": w, "start": i * 0.4, "end": i * 0.4 + 0.35}
-       for i, w in enumerate("SUPAYA MEMINANG MAS GIBRAN".split())]
-ovb = edit._bold_layer(ws4, 0.0, tmp, accent_words=())
-assert len(ovb) == 4, \
-    "4 kata harusnya 4 langkah build, dapet %d -- frasa nongol sekaligus" % len(ovb)
-ok("4 kata -> 4 langkah (muncul satu-satu)")
+        # --- 1. Tanpa sandi: 401, dan isi papan GA BOLEH kebocor ------------
+        r = urllib.request.Request(url + "/campaign")
+        try:
+            urllib.request.urlopen(r, timeout=10)
+            raise AssertionError("papan kebuka tanpa sandi")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401, e.code
+            assert "Karomah" not in e.read().decode("utf-8", "replace")
 
-# tiap langkah nambah, ga ada yang ngurang
-lebar = [Image.open(o.path).width for o in ovb]
-tinggi = [Image.open(o.path).height for o in ovb]
-luas = [w * h for w, h in zip(lebar, tinggi)]
-assert all(b >= a for a, b in zip(luas, luas[1:])), \
-    "blok nyusut di tengah build: %s" % luas
-ok("blok cuma nambah, ga pernah nyusut")
+        # --- 2. Urutan papan: SKOR, bukan CPM mentah ------------------------
+        kode, html = _req(url + "/campaign")
+        assert kode == 200, kode
+        i_kar = html.index("karomah-insani")
+        i_kra = html.index("krakatau")
+        assert i_kar < i_kra, ("CPM 15rb sisa 6% nongol di atas CPM 10rb "
+                              "sisa 97% — papannya balik ke CPM mentah")
+        # Header kolom wajib bilang PER SERIBU. Nulis "CPM" doang = ngundang
+        # salah hitung 1000x.
+        assert "1.000 views" in html, "header kolom ga nyebut per 1.000 views"
+        # min_views 20.000 ditandain merah, 10.000 ENGGA.
+        baris_kra = html[i_kra - 400:i_kra]
+        assert "merah" in baris_kra, "min_views 20rb ga ditandain merah"
 
-# langkah 1 cuma SATU kata: mesti lebih sempit dari langkah terakhir
-assert lebar[0] < lebar[-1], \
-    "langkah pertama selebar yang terakhir (%d vs %d) -- ga ada build" % (
-        lebar[0], lebar[-1])
-ok("langkah 1 lebih sempit dari langkah akhir (%d < %d px)"
-   % (lebar[0], lebar[-1]))
+        # --- 3. Pilih garap, dan tandanya nempel ----------------------------
+        kode, _ = _form(url + "/campaign/karomah-insani/pick",
+                        {"state": "garap", "note": "cpm tinggi budget penuh"})
+        assert kode == 200, kode
+        kode, html = _req(url + "/campaign?saring=garap")
+        assert "karomah-insani" in html and "krakatau" not in html, \
+            "saringan 'digarap' ga nyaring"
 
-# --- kata yang udah nongol GA BOLEH gerak ------------------------------
-# Blok tumbuh ke bawah, jadi kalau dipaku di bawah, kata pertama kelempar
-# naik pas baris kedua masuk. Diukur: lompat 138 px. Referensi ga gerak.
-atas = [o.y for o in ovb]
-assert len(set(atas)) == 1, \
-    "atas blok geser %s -- kata yang udah nongol ikut lompat" % atas
-ok("atas blok tetap (%d px) -- kata yang udah nongol diem" % atas[0])
+        # --- 4. Upload BGM + gambar + link video ----------------------------
+        kode, html = _multipart(
+            url + "/campaign/karomah-insani/aset",
+            {"video_link": "https://youtu.be/abc123", "label": "dari brand"},
+            [("image", "poster.png", b"\x89PNG\r\n\x1a\n" + b"x" * 64),
+             ("bgm", "emotional_piano.mp3", b"ID3" + b"y" * 128)])
+        assert kode == 200, kode
+        kode, html = _req(url + "/campaign/karomah-insani")
+        assert "youtu.be/abc123" in html
+        assert "emotional_piano.mp3" in html
+        assert "poster.png" not in html, \
+            "nama file asli dipakai apa adanya — harusnya diganti"
+        # Filenya beneran ada di folder aset, bukan cuma baris di DB.
+        ada = os.listdir(os.path.join(aset_dir, "karomah-insani"))
+        assert len(ada) == 2, ada
+        assert all(f.startswith(("image_", "bgm_")) for f in ada), ada
 
-# --- langkah nyambung, ga ada lubang -----------------------------------
-for a, b in zip(ovb, ovb[1:]):
-    assert abs(a.t_end - b.t_start) < 0.01, \
-        "ada lubang antara langkah: %.2f -> %.2f" % (a.t_end, b.t_start)
-ok("langkah nyambung tanpa lubang")
+        # --- 5. Nama file ga boleh keluar dari folder aset ------------------
+        jejak = os.path.join(BASE, "job.py")
+        sebelum = os.path.getsize(jejak)
+        kode, _ = _multipart(
+            url + "/campaign/karomah-insani/aset", {},
+            [("image", "../../../job.py", b"RUSAK")])
+        assert kode == 200, kode
+        assert os.path.getsize(jejak) == sebelum, "job.py ketimpa upload!"
+        assert not os.path.exists(os.path.join(tmp, "job.py"))
 
-# --- KONTROL: frasa beda tetep KEBERSIH, bukan numpuk ------------------
-# Referensi ngosongin blok antar frasa (2 frame blank 0.4s). Kalau build
-# ga pernah reset, klip 60 detik bakal numpuk terus sampai penuh.
-ws_dua = ([{"word": w, "start": i * 0.3, "end": i * 0.3 + 0.25}
-           for i, w in enumerate("SATU DUA".split())]
-          + [{"word": w, "start": 3.0 + i * 0.3, "end": 3.0 + i * 0.3 + 0.25}
-             for i, w in enumerate("TIGA EMPAT".split())])
-ov_dua = edit._bold_layer(ws_dua, 0.0, tmp, accent_words=())
-teks_akhir = Image.open(ov_dua[-1].path)
-teks_awal = Image.open(ov_dua[0].path)
-# frasa kedua ga boleh lebih tinggi dari frasa pertama yang lengkap:
-# kalau numpuk, tingginya bakal 2x
-assert teks_akhir.height <= teks_awal.height * 3, \
-    "frasa numpuk, tinggi akhir %d vs awal %d" % (
-        teks_akhir.height, teks_awal.height)
-ok("KONTROL: frasa kedua ga numpuk di atas yang pertama")
+        # --- 6. Link selain YouTube/Drive ditolak di depan ------------------
+        kode, html = _multipart(
+            url + "/campaign/karomah-insani/aset",
+            {"video_link": "https://vimeo.com/123"}, [])
+        assert "cuma didukung YouTube atau Google Drive" in html, html[:400]
+        kode, html = _req(url + "/campaign/karomah-insani")
+        assert "vimeo" not in html, "link ga didukung tetep kesimpen"
 
-# --- KONTROL NEGATIF: gaya lama ga boleh berubah ------------------------
-ovp = edit._phrase_layer(ws, 0.0, tmp, accent_words=())
-hp = warna_dominan(ovp[0].path)
-ada_emas = any(k[0] >= 5 and 4 <= k[1] <= 5 and k[2] <= 2 for k in hp)
-assert ada_emas, "KONTROL GAGAL: gaya phrase kehilangan kuningnya"
-ok("KONTROL: gaya phrase masih kuning (preset lama utuh)")
+        # --- 7. PAGAR: form ga boleh nunjuk file sembarangan ---------------
+        # POST dibikin tangan, persis kayak orang yang ngedit HTML-nya.
+        #
+        # DUA CACAT tes yang ketangkep di kontrol negatif (pagar dimatiin,
+        # tes tetep ijo), dan dua-duanya bikin tesnya palsu:
+        #   1. preset "jedag" GA ADA (kuncinya 'sedih'/'jamet'), jadi POST-nya
+        #      kena tolak di cek preset dan pagar path ga pernah kejalan.
+        #   2. kata "ditolak" muncul di hint form render yang biasa, jadi
+        #      assertion-nya kecocokan terus walau yang balik halaman sukses.
+        # Makanya sekarang: preset yang SAH, dan buktinya bukan teks halaman
+        # tapi jumlah job di antrean.
+        import render_queue as rq
+        qconn = rq.connect(env["CLIPPER_QUEUE_DB"])
+        assert rq.waiting_count(qconn) == 0, "antrean ga kosong di awal"
+        for jahat in ("/etc/passwd", os.path.join(BASE, "job.py"),
+                      os.path.join(aset_dir, "..", "..", "etc", "passwd")):
+            kode, html = _form(url + "/render", {
+                "preset": "jamet", "content": "https://youtu.be/x",
+                "bgm_file": jahat})
+            assert kode == 200, kode
+            assert "Path lain" in html or "ga ada di disk" in html, \
+                ("path %r ga ditolak: %s" % (jahat, html[:400]))
+            # Bukti yang ga bisa dipalsuin teks halaman: ga ada job masuk.
+            assert rq.waiting_count(qconn) == 0, \
+                "job dengan bgm_file=%r masuk antrean" % jahat
+        # Gambar outro juga, lewat jalur yang sama.
+        kode, html = _form(url + "/render", {
+            "preset": "jamet", "content": "https://youtu.be/x",
+            "portrait": "/etc/hostname"})
+        assert rq.waiting_count(qconn) == 0, "portrait sembarangan masuk antrean"
 
-ovk = edit._karaoke_layer(ws, 0.0, tmp, sub_y=1200)
-assert ovk, "KONTROL GAGAL: gaya karaoke ga bikin overlay"
-ok("KONTROL: gaya karaoke masih jalan")
+        # --- 8. Jalur yang BENER: aset campaign masuk antrean --------------
+        bgm_path = [os.path.join(aset_dir, "karomah-insani", f)
+                    for f in ada if f.startswith("bgm_")][0]
+        kode, html = _form(url + "/render", {
+            "preset": "sedih", "content": "https://youtu.be/abc123",
+            "campaign": "karomah-insani", "bgm_file": bgm_path,
+            "context": "tes"})
+        assert kode == 200, kode
+        jobs = rq.for_campaign(qconn, "karomah-insani")
+        assert len(jobs) == 1, jobs
+        p = json.loads(jobs[0]["params"])
+        assert p["bgm_file"] == bgm_path and p["campaign"] == "karomah-insani"
+        # Job-nya kelihatan di halaman campaign-nya, bukan cuma di DB.
+        kode, html = _req(url + "/campaign/karomah-insani")
+        assert "#%d" % jobs[0]["id"] in html
 
-# --- KONTROL NEGATIF: tanpa accent, ga ada yang digedein ----------------
-# Kalau ini gagal, berarti kode milih kata sendiri -- itu ngarang penekanan
-# yang modelnya ga pernah pilih.
-t_kecil = [Image.open(o.path).height for o in ov]
-t_accent = [Image.open(o.path).height for o in ov2]
-assert max(t_kecil) < max(t_accent), \
-    "tanpa accent ukurannya sama kayak yang pakai accent -- ada yang digedein sendiri"
-ok("KONTROL: tanpa accent ga ada yang digedein sendiri")
+        # --- 9. Perintah render BENER-BENER bawa --bgm-file ----------------
+        # Ini yang nentuin pixel: param di DB yang ga nyampe argv itu no-op.
+        import render_worker as rw
+        cmd = rw._perintah(jobs[0])
+        assert "--bgm-file" in cmd and cmd[cmd.index("--bgm-file") + 1] == bgm_path, cmd
+        # Dan kalau filenya ilang, flag-nya DIBUANG (render jalan pakai stok
+        # + warning dari job.py) bukan bikin argparse gagal.
+        hilang = dict(jobs[0],
+                      params=json.dumps(dict(p, bgm_file=os.path.join(
+                          tmp, "ga-ada.mp3"))))
+        assert "--bgm-file" not in rw._perintah(hilang)
+        # Flag-nya harus yang job.py BENERAN punya. --copy-style pernah
+        # kepake di sini dan render gagal "invalid choice".
+        bantuan = subprocess.run([PY, os.path.join(BASE, "job.py"), "--help"],
+                                 capture_output=True, text=True, cwd=BASE).stdout
+        assert "--bgm-file" in bantuan, "job.py ga punya flag --bgm-file"
 
-print("\n%d cek + 3 kontrol negatif, gaya bold jalan tanpa ngerusak yang lama" % n)
+        # --- 9b. MOOD WAJIB SELAMAT DARI RENAME UPLOAD -------------------
+        # Bug nyata yang cuma ketangkep dari render sungguhan: upload
+        # disimpen jadi `bgm_<timestamp>.mp3`, dan `bgm._from_filename`
+        # baca mood DARI NAMA FILE -- jadi tiap BGM upload kebaca mood
+        # kosong dan pemeriksa tabrakan register MATI PERMANEN. Lagu
+        # jedag-jedug nempel di klip duka tanpa satu pun warning.
+        import bgm as _bgm
+        hype = camp.save_upload(
+            "karomah-insani", "bgm",
+            "hype_dj_nansuya_gang_jedag_jedug.mp3", b"ID3" + b"z" * 64)
+        assert _bgm._from_filename(os.path.basename(hype)) == ["hype"], \
+            ("mood ilang waktu upload di-rename: %s"
+             % os.path.basename(hype))
+        assert _bgm._clashes("emotional", "hype"), \
+            "aturan bentrok emotional x hype ilang dari bgm.py"
+
+        # Dan blok --bgm-file di job.py BENERAN ngasih warning buat bentrok
+        # itu. Yang dieksekusi POTONGAN KODE ASLINYA, bukan versi tulis
+        # ulang di tes: tes yang nyalin logika bisa ijo sementara yang
+        # jalan di render udah beda.
+        import audit as _audit
+        src = open(os.path.join(BASE, "job.py"), encoding="utf-8").read()
+        blok = src[src.index("    if bgm_file:"):
+                   src.index("    # Where _mood CAME FROM")]
+        blok = blok.replace("    ", "", 1).replace("\n    ", "\n")
+        kasus = [("emotional", hype, True),
+                 ("hype", hype, False),
+                 ("emotional", camp.save_upload(
+                     "karomah-insani", "bgm", "emotional_piano.mp3", b"x"),
+                  False)]
+        for mood_klip, path, harus_warning in kasus:
+            ns = {"bgm_file": path, "os": os, "bgm": _bgm, "audit": _audit,
+                  "_mood": mood_klip, "warnings": [], "track": None,
+                  "why": None}
+            exec(blok, ns)
+            ada = bool(ns["warnings"])
+            assert ada == harus_warning, \
+                ("klip %r + %s: warning=%s, harusnya %s"
+                 % (mood_klip, os.path.basename(path), ada, harus_warning))
+            # Lagunya TETEP dipakai apa adanya, warning atau ga: pilihan
+            # manusia menang, tabrakan cuma dikabarin.
+            assert ns["track"]["path"] == path
+
+        # --- 10. Aset kehapus: baris ilang, file ikut kebuang -------------
+        aid = [a["id"] for a in camp.assets(conn, "karomah-insani")
+               if a["kind"] == "bgm"][0]
+        assert os.path.exists(bgm_path)
+        kode, _ = _form(url + "/campaign/karomah-insani/aset/hapus",
+                        {"asset_id": aid})
+        assert kode == 200, kode
+        assert not os.path.exists(bgm_path), "file aset ga kebuang dari disk"
+
+        # --- 11. Marketplace mati: papan lama TETEP kelihatan ------------
+        # Diuji dengan ngerusak URL-nya di proses tes, lalu manggil refresh.
+        _lama_url = camp.LIST_URL
+        camp.LIST_URL = "https://127.0.0.1:1/ga-ada"
+        try:
+            try:
+                camp.refresh(conn)
+                raise AssertionError("refresh ke host mati harusnya gagal")
+            except RuntimeError:
+                pass
+            # Papan masih punya dua campaign-nya, ga kekosongan.
+            assert len(camp.board(conn)) == 2
+        finally:
+            camp.LIST_URL = _lama_url
+
+        # --- 12. Halaman render utama masih idup, formnya bisa upload ----
+        kode, html = _req(url + "/")
+        assert kode == 200
+        assert 'enctype="multipart/form-data"' in html, \
+            "form render ga bisa nerima file"
+        assert 'name=bgm' in html and 'name=image' in html
+        assert "/campaign" in html, "ga ada jalan ke papan campaign"
+
+        print("_v83 ok: papan urut skor, upload aman, --bgm-file nyampe argv")
+        return 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, BASE)
+    raise SystemExit(main())

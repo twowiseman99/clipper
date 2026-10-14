@@ -41,6 +41,12 @@ def _perintah(job):
         cmd += ["--opening", p["opening"]]
     if p.get("portrait"):
         cmd += ["--portrait", p["portrait"]]
+    # BGM yang diupload operator buat sebuah campaign. Ga lewat bgm.pick:
+    # lihat job.py --bgm-file. Dikirim cuma kalau filenya masih ada, biar
+    # aset yang kehapus bikin render pakai musik bawaan + warning dari
+    # job.py, bukan gagal di argparse.
+    if p.get("bgm_file") and os.path.exists(p["bgm_file"]):
+        cmd += ["--bgm-file", p["bgm_file"]]
     if p.get("context"):
         cmd += ["--context", p["context"]]
     # Preset nentuin mood + ending + b-roll sekaligus. Flagnya --clip-type
