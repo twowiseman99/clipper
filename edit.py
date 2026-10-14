@@ -1077,35 +1077,77 @@ def _bold_layer(words, clip_start, tmp_dir, accent_words=(), y_frac=BOLD_Y_FRAC,
 
     for ph in group_phrases(words, max_lines=max_lines,
                             max_words=BOLD_MAX_WORDS):
-        tiles = []
-        for line in ph["lines"]:
+        # Flatten the phrase to a word sequence while remembering which line
+        # each word belongs to, so the build can stop mid-line.
+        seq = [(li, w) for li, line in enumerate(ph["lines"]) for w in line]
+
+        # The finished block's height, worked out BEFORE the build: the block
+        # grows downward as lines arrive, so pinning its bottom would shove
+        # line one upward the moment line two lands. The reference holds the
+        # first word still -- measured at 0.2s intervals, "SUPAYA" does not
+        # move when "MEMINANG" appears beneath it. So pin the TOP, using the
+        # height the phrase will reach.
+        tinggi_penuh = 0
+        for li, line in enumerate(ph["lines"]):
             plain = [re.sub(r"[.,!?]", "", w["word"].upper()) for w in line]
-            text = censor.mask(" ".join(plain))
-            # size is the ONLY emphasis channel in this style
             hit = bool(accent) and any(p.lower() in accent for p in plain)
-            font = font_big if hit else font_small
-            img = _bold_text_image(text, font)
-            if img.width > max_w:
-                s = max_w / img.width
-                img = img.resize((max(1, int(img.width * s)),
-                                  max(1, int(img.height * s))))
-            tiles.append(img)
+            probe = _bold_text_image(censor.mask(" ".join(plain)),
+                                     font_big if hit else font_small)
+            tinggi_penuh += probe.height
+        tinggi_penuh += BOLD_LINE_GAP * (len(ph["lines"]) - 1)
+        y_atas = int(y_frac * CANVAS_H - tinggi_penuh)
 
-        block_w = max(t.width for t in tiles)
-        block_h = sum(t.height for t in tiles) + BOLD_LINE_GAP * (len(tiles) - 1)
-        block = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
-        cy = 0
-        for t in tiles:
-            block.paste(t, ((block_w - t.width) // 2 if centred else 0, cy), t)
-            cy += t.height + BOLD_LINE_GAP
-        path = os.path.join(tmp_dir, _name("b"))
-        block.save(path)
+        # One overlay per word: the words said so far stay on screen and the
+        # new one joins them. The reference builds a phrase up this way and
+        # only then clears the whole block -- measured on frames 0.2s apart,
+        # "SUPAYA" alone, then "SUPAYA / MEMINANG".
+        for n_shown in range(1, len(seq) + 1):
+            shown = seq[:n_shown]
+            baris = {}
+            for li, w in shown:
+                baris.setdefault(li, []).append(w)
 
-        t_start = max(0.0, ph["start"] - clip_start)
-        t_end = max(t_start + 0.3, ph["end"] - clip_start)
-        x = (CANVAS_W - block_w) // 2
-        overlays.append(Overlay(path, x, int(y_frac * CANVAS_H - block_h),
-                                t_start, t_end))
+            tiles = []
+            for li in sorted(baris):
+                plain = [re.sub(r"[.,!?]", "", w["word"].upper())
+                         for w in baris[li]]
+                text = censor.mask(" ".join(plain))
+                # size is the ONLY emphasis channel in this style
+                hit = bool(accent) and any(p.lower() in accent for p in plain)
+                font = font_big if hit else font_small
+                img = _bold_text_image(text, font)
+                if img.width > max_w:
+                    s = max_w / img.width
+                    img = img.resize((max(1, int(img.width * s)),
+                                      max(1, int(img.height * s))))
+                tiles.append(img)
+
+            block_w = max(t.width for t in tiles)
+            block_h = (sum(t.height for t in tiles)
+                       + BOLD_LINE_GAP * (len(tiles) - 1))
+            block = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
+            cy = 0
+            for t in tiles:
+                block.paste(t, ((block_w - t.width) // 2 if centred else 0,
+                                cy), t)
+                cy += t.height + BOLD_LINE_GAP
+            path = os.path.join(tmp_dir, _name("b"))
+            block.save(path)
+
+            # this step lasts from its own word until the next word lands;
+            # the last step holds to the end of the phrase
+            w_now = shown[-1][1]
+            t_start = max(0.0, w_now["start"] - clip_start)
+            if n_shown < len(seq):
+                t_end = max(0.0, seq[n_shown][1]["start"] - clip_start)
+            else:
+                t_end = max(0.0, ph["end"] - clip_start)
+            t_end = max(t_start + 0.08, t_end)
+
+            # pinned to the TOP of the finished block, so a word already on
+            # screen never moves when the next line arrives
+            x = (CANVAS_W - block_w) // 2
+            overlays.append(Overlay(path, x, y_atas, t_start, t_end))
     return overlays
 
 

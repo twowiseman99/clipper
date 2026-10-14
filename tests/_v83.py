@@ -130,6 +130,64 @@ assert 0.24 < frac < 0.34, \
     "GIBRAN %.1f%% dari lebar, referensi 29.8%%" % (frac * 100)
 ok("lebar huruf cocok referensi (%.1f%% vs 29.8%%)" % (frac * 100))
 
+# --- kata muncul SATU-SATU, bukan frasa utuh sekaligus -----------------
+# Ini yang gua salah baca pertama kali: gua ambil frame tiap 2 detik, lebih
+# panjang dari satu frasa, jadi tiap sampel nunjukin frasa yang UDAH lengkap
+# dan bedanya ga pernah masuk sampel. Frame tiap 0.2 detik nunjukin
+# "SUPAYA" dulu, baru "SUPAYA / MEMINANG".
+ws4 = [{"word": w, "start": i * 0.4, "end": i * 0.4 + 0.35}
+       for i, w in enumerate("SUPAYA MEMINANG MAS GIBRAN".split())]
+ovb = edit._bold_layer(ws4, 0.0, tmp, accent_words=())
+assert len(ovb) == 4, \
+    "4 kata harusnya 4 langkah build, dapet %d -- frasa nongol sekaligus" % len(ovb)
+ok("4 kata -> 4 langkah (muncul satu-satu)")
+
+# tiap langkah nambah, ga ada yang ngurang
+lebar = [Image.open(o.path).width for o in ovb]
+tinggi = [Image.open(o.path).height for o in ovb]
+luas = [w * h for w, h in zip(lebar, tinggi)]
+assert all(b >= a for a, b in zip(luas, luas[1:])), \
+    "blok nyusut di tengah build: %s" % luas
+ok("blok cuma nambah, ga pernah nyusut")
+
+# langkah 1 cuma SATU kata: mesti lebih sempit dari langkah terakhir
+assert lebar[0] < lebar[-1], \
+    "langkah pertama selebar yang terakhir (%d vs %d) -- ga ada build" % (
+        lebar[0], lebar[-1])
+ok("langkah 1 lebih sempit dari langkah akhir (%d < %d px)"
+   % (lebar[0], lebar[-1]))
+
+# --- kata yang udah nongol GA BOLEH gerak ------------------------------
+# Blok tumbuh ke bawah, jadi kalau dipaku di bawah, kata pertama kelempar
+# naik pas baris kedua masuk. Diukur: lompat 138 px. Referensi ga gerak.
+atas = [o.y for o in ovb]
+assert len(set(atas)) == 1, \
+    "atas blok geser %s -- kata yang udah nongol ikut lompat" % atas
+ok("atas blok tetap (%d px) -- kata yang udah nongol diem" % atas[0])
+
+# --- langkah nyambung, ga ada lubang -----------------------------------
+for a, b in zip(ovb, ovb[1:]):
+    assert abs(a.t_end - b.t_start) < 0.01, \
+        "ada lubang antara langkah: %.2f -> %.2f" % (a.t_end, b.t_start)
+ok("langkah nyambung tanpa lubang")
+
+# --- KONTROL: frasa beda tetep KEBERSIH, bukan numpuk ------------------
+# Referensi ngosongin blok antar frasa (2 frame blank 0.4s). Kalau build
+# ga pernah reset, klip 60 detik bakal numpuk terus sampai penuh.
+ws_dua = ([{"word": w, "start": i * 0.3, "end": i * 0.3 + 0.25}
+           for i, w in enumerate("SATU DUA".split())]
+          + [{"word": w, "start": 3.0 + i * 0.3, "end": 3.0 + i * 0.3 + 0.25}
+             for i, w in enumerate("TIGA EMPAT".split())])
+ov_dua = edit._bold_layer(ws_dua, 0.0, tmp, accent_words=())
+teks_akhir = Image.open(ov_dua[-1].path)
+teks_awal = Image.open(ov_dua[0].path)
+# frasa kedua ga boleh lebih tinggi dari frasa pertama yang lengkap:
+# kalau numpuk, tingginya bakal 2x
+assert teks_akhir.height <= teks_awal.height * 3, \
+    "frasa numpuk, tinggi akhir %d vs awal %d" % (
+        teks_akhir.height, teks_awal.height)
+ok("KONTROL: frasa kedua ga numpuk di atas yang pertama")
+
 # --- KONTROL NEGATIF: gaya lama ga boleh berubah ------------------------
 ovp = edit._phrase_layer(ws, 0.0, tmp, accent_words=())
 hp = warna_dominan(ovp[0].path)
