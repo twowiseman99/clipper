@@ -12,6 +12,15 @@ sessions/
 *.sqlite
 *.sqlite-*
 media/
+# Antrean + papan campaign: state runtime, dan `campaigns.db` nyimpen
+# daftar aset yang jalurnya khas box ini. `*.db-wal`/`-shm` ikut, kalau
+# enggak commit-nya bawa potongan transaksi.
+*.db
+*.db-wal
+*.db-shm
+# Aset yang DI-UPLOAD operator (BGM, gambar outro). Bukan sumber kode, dan
+# ada yang berhak cipta -- jangan sampai kebawa ke repo.
+assets/
 *.words.json
 *.heatmap.json
 # ...but test fixtures are source, not runtime state. `media/` plus the global
