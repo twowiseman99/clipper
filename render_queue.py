@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     error       TEXT NOT NULL DEFAULT '',
     out_path    TEXT NOT NULL DEFAULT '',
     warnings    TEXT NOT NULL DEFAULT '[]',
+    -- Hasil render yang BUKAN file: judul, deskripsi, tag, mood, durasi.
+    -- job.py sudah membuat semua ini (title/description dari model), tapi
+    -- dulu worker membuangnya dan hanya menyimpan out_path -- jadi panel
+    -- upload tidak punya apa pun untuk diisikan ke form dan operator harus
+    -- mengarang ulang judul yang sudah dibayar.
+    meta        TEXT NOT NULL DEFAULT '{}',
     created_at  REAL NOT NULL,
     started_at  REAL,
     finished_at REAL
@@ -58,7 +64,24 @@ def connect(path=None):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    _migrasi(conn)
     return conn
+
+
+def _migrasi(conn):
+    """Tambah kolom yang belum ada di DB yang sudah terbentuk.
+
+    `CREATE TABLE IF NOT EXISTS` TIDAK menambah kolom baru ke tabel yang
+    sudah ada, jadi menambah kolom di _SCHEMA saja membuat DB produksi
+    tertinggal dan setiap pembacaan kolom itu melempar OperationalError.
+    Dicek dengan PRAGMA, bukan dengan try/except di sekitar ALTER, supaya
+    kesalahan lain tidak ikut tertelan.
+    """
+    ada = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    for nama, definisi in (("meta", "TEXT NOT NULL DEFAULT '{}'"),):
+        if nama not in ada:
+            conn.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (nama, definisi))
+    conn.commit()
 
 
 def submit(conn, owner, preset, params):
@@ -116,12 +139,12 @@ def set_stage(conn, job_id, stage):
     conn.commit()
 
 
-def finish(conn, job_id, out_path, warnings=None):
+def finish(conn, job_id, out_path, warnings=None, meta=None):
     conn.execute(
-        "UPDATE jobs SET status='done', out_path=?, warnings=?, finished_at=?, "
-        "stage='' WHERE id=?",
+        "UPDATE jobs SET status='done', out_path=?, warnings=?, meta=?, "
+        "finished_at=?, stage='' WHERE id=?",
         (out_path, json.dumps(warnings or [], ensure_ascii=False),
-         time.time(), job_id),
+         json.dumps(meta or {}, ensure_ascii=False), time.time(), job_id),
     )
     conn.commit()
 

@@ -132,7 +132,18 @@ def kerjakan(conn, job):
                "job.py lapor sukses tapi filenya ga ada di %r" % path)
         return False
 
-    q.finish(conn, job["id"], path, data.get("warnings") or [])
+    # Hasil render yang bukan file. job.py sudah membuat judul dan deskripsi
+    # (dari model, kalau NINEROUTER_API_KEY ada) dan dulu worker membuang
+    # semuanya -- panel upload lalu tidak punya apa pun untuk diisikan dan
+    # operator mengarang ulang judul yang sudah dibayar. Hanya kunci yang
+    # dipakai halaman job yang disimpan; sisanya tetap di laporan job.py.
+    meta = {k: data.get(k) for k in (
+        "title", "description", "hook", "mood", "mood_used", "music",
+        "attribution", "duration_sec", "segment", "size_bytes",
+        "delivery_file", "delivery_size_bytes", "elapsed_sec",
+    ) if data.get(k) is not None}
+
+    q.finish(conn, job["id"], path, data.get("warnings") or [], meta)
     return True
 
 

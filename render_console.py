@@ -848,14 +848,7 @@ def lihat(request: Request, job_id: int):
             % (job_id, _lama((j["finished_at"] or 0) - (j["started_at"] or 0)),
                wbox, job_id))
         bagian.append(_panel_fix(j))
-        bagian.append(
-            "<div class=panel><h2>Kirim ke YouTube</h2>"
-            "<button disabled>Upload — belum ada akun</button>"
-            "<p class=hint>Mati karena <code>preflight.upload_accounts()</code> "
-            "balik daftar kosong: belum ada file <code>tokens/token_&lt;nama&gt;"
-            ".pickle</code> di box ini. Yang dibutuhin satu kali OAuth Google "
-            "punya operator; abis token-nya ada, tombol ini nyala sendiri tanpa "
-            "ubah kode. Sementara itu pakai Unduh file di atas.</p></div>")
+        bagian.append(_panel_upload(j, job_id))
     elif st == "failed":
         bagian.append(
             "<div class=panel><h2>Gagal</h2><div class=err>%s</div>"
@@ -878,6 +871,86 @@ def lihat(request: Request, job_id: int):
     return _halaman("Job #%d" % job_id,
                     kepala + "".join(bagian) + "<p><a href=/>Balik</a></p>",
                     refresh=refresh)
+
+
+def _panel_upload(j, job_id):
+    """Form upload YouTube, keisi otomatis dari judul/deskripsi hasil render.
+
+    Kenapa field-nya ada walaupun tombolnya bisa mati: judul dan deskripsi
+    SUDAH dibikin saat render (job.py manggil model buat itu), jadi
+    nyembunyiin field bikin operator ngarang ulang sesuatu yang udah dibayar.
+    Field-nya dikasih nilai awal dan boleh diubah -- yang dikirim ke YouTube
+    adalah apa yang kelihatan di kotak, bukan versi tersimpan.
+
+    Judul YouTube keras di 100 karakter (API motong tanpa ngasih tau), jadi
+    batasnya dipasang di input DAN sisa karakternya ditulis -- orang ga bisa
+    nebak batas yang ga kelihatan.
+
+    Tombol bisa mati karena token OAuth belum ada. Kalau mati, field-nya TETAP
+    kelihatan dan tetap bisa disunting, karena nyiapin teks itu kerjaan yang
+    berguna walaupun pengirimannya nunggu operator.
+    """
+    meta = {}
+    try:
+        meta = json.loads(j["meta"] or "{}")
+    except Exception:
+        meta = {}
+
+    akun = []
+    try:
+        import preflight
+        akun = preflight.upload_accounts() or []
+    except Exception:
+        akun = []
+
+    judul = (meta.get("title") or "").strip()
+    desk = (meta.get("description") or "").strip()
+    hook = (meta.get("hook") or "").strip()
+
+    # Render lama (sebelum kolom meta ada) ga punya judul. Itu bukan error,
+    # tapi harus dibilang, bukan dibiarin kotaknya kosong tanpa sebab.
+    if not judul and not desk:
+        asal = ("<p class=hint>Render ini dibikin sebelum console nyimpen "
+                "judul dari model, jadi kotaknya kosong. Render ulang kalau "
+                "mau judul otomatis.</p>")
+    else:
+        asal = ("<p class=hint>Judul dan deskripsi di atas dibikin saat "
+                "render. Ubah sesuka lu — yang dikirim itu isi kotaknya.</p>")
+
+    if akun:
+        pilih = "".join("<option value=\"%s\">%s</option>" % (_e(a), _e(a))
+                        for a in akun)
+        kontrol = (
+            "<label><span class=lab>Akun</span><select name=akun>%s</select>"
+            "</label>" % pilih)
+        tombol = "<button type=submit>Upload ke YouTube</button>"
+        catatan = ("<p class=hint>Diupload sebagai <strong>private</strong> "
+                   "dulu, jadi lu bisa cek di YouTube Studio sebelum "
+                   "dipublikasikan.</p>")
+    else:
+        kontrol = ""
+        tombol = "<button type=submit disabled>Upload — belum ada akun</button>"
+        catatan = (
+            "<p class=hint>Tombol mati karena belum ada file "
+            "<code>tokens/token_&lt;nama&gt;.pickle</code> di box ini. Yang "
+            "dibutuhin satu kali OAuth Google punya operator; abis token-nya "
+            "ada, tombol ini nyala sendiri tanpa ubah kode. Teks di atas tetep "
+            "bisa lu siapin sekarang, dan sementara itu pakai Unduh file.</p>")
+
+    return """
+<form method=post action=/upload class=panel>
+  <h2>Kirim ke YouTube</h2>
+  <input type=hidden name=job_id value=%d>
+  <label><span class=lab>Judul (maks 100 karakter)</span>
+    <input type=text name=judul maxlength=100 value="%s"></label>
+  <label><span class=lab>Deskripsi</span>
+    <textarea name=deskripsi rows=4>%s</textarea></label>
+  %s
+  %s
+  %s
+  %s
+</form>""" % (job_id, _e(judul), _e(desk or hook), kontrol, tombol, asal,
+              catatan)
 
 
 def _panel_fix(j):
@@ -925,6 +998,89 @@ def fix(request: Request,
     params["fix_sampai"] = sampai.strip()
     baru = q.submit(conn, siapa, lama["preset"], params)
     return RedirectResponse("/job/%d" % baru, status_code=303)
+
+
+@app.post("/upload")
+def upload(request: Request,
+           job_id: int = Form(...),
+           judul: str = Form(""),
+           deskripsi: str = Form(""),
+           akun: str = Form("")):
+    """Kirim klip yang udah kelar ke YouTube.
+
+    Upload dilakukan di sini, bukan di antrean, karena dia hitungan detik dan
+    ga makan CPU kayak render -- tapi error-nya diterjemahin, bukan dilempar
+    mentah: kuota harian habis dan token kedaluwarsa itu dua hal beda yang
+    butuh dua tindakan beda dari operator.
+    """
+    siapa = _siapa(request)
+    if not siapa:
+        return _minta_sandi()
+    conn = q.connect()
+    j = q.get(conn, job_id)
+    if not j:
+        return RedirectResponse("/", status_code=303)
+
+    def _tolak(pesan):
+        return _halaman("Job #%d" % job_id,
+                        "<div class=panel><h2>Upload ga jalan</h2>"
+                        "<div class=err>%s</div>"
+                        "<p><a href=/job/%d>Balik ke job</a></p></div>"
+                        % (_e(pesan), job_id))
+
+    if j["status"] != "done" or not j["out_path"]:
+        return _tolak("Job ini belum kelar, jadi ga ada file buat diupload.")
+    if not os.path.exists(j["out_path"]):
+        return _tolak("File rendernya udah ga ada di disk — mungkin kena "
+                      "pembersihan otomatis. Render ulang dulu.")
+
+    judul = judul.strip()
+    if not judul:
+        return _tolak("Judul ga boleh kosong: YouTube nolak video tanpa "
+                      "judul, dan judul otomatis dari render ada di form.")
+
+    try:
+        import preflight
+        tersedia = preflight.upload_accounts() or []
+    except Exception as e:
+        return _tolak("Ga bisa baca daftar akun upload: %s" % e)
+    if not tersedia:
+        return _tolak("Belum ada akun upload di box ini (file "
+                      "tokens/token_<nama>.pickle ga ada). Butuh satu kali "
+                      "OAuth Google punya operator.")
+    pilih = akun.strip() or tersedia[0]
+    if pilih not in tersedia:
+        return _tolak("Akun %r ga ada di daftar akun yang kepasang." % pilih)
+
+    try:
+        import upload_youtube as uy
+        hasil = uy.upload(
+            conn, j["out_path"],
+            {"title": judul, "description": deskripsi.strip(),
+             "youtube_tags": []},
+            account=pilih)
+    except Exception as e:
+        pesan = str(e)
+        # Dua kegagalan yang paling sering dan paling beda tindakannya.
+        if "uploadLimitExceeded" in pesan or "DailyLimit" in type(e).__name__:
+            return _tolak("Kuota upload harian akun %s udah habis. Coba besok "
+                          "atau pakai akun lain — filenya tetep ada." % pilih)
+        if "invalid_grant" in pesan or "RefreshError" in type(e).__name__:
+            return _tolak("Token akun %s udah kedaluwarsa. Operator perlu "
+                          "OAuth ulang buat akun itu." % pilih)
+        return _tolak("Upload gagal: %s" % pesan)
+
+    return _halaman(
+        "Job #%d" % job_id,
+        "<div class=panel><h2>Udah keupload</h2>"
+        "<p>Masuk sebagai <strong>private</strong> ke akun "
+        "<span class=num>%s</span>.</p>"
+        "<p><a href=\"%s\">Buka di YouTube</a></p>"
+        "<p class=hint>Masih private — publikasiin dari YouTube Studio kalau "
+        "udah oke.</p>"
+        "<p><a href=/job/%d>Balik ke job</a></p></div>"
+        % (_e(hasil.get("account") or pilih), _e(hasil.get("url") or ""),
+           job_id))
 
 
 @app.post("/batal")
