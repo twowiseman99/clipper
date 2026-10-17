@@ -1,0 +1,77 @@
+# Caddy: HTTPS di depan console render Clipper.
+#
+# Kenapa bentuknya begini, diukur 17 Okt 2026 (jangan diubah tanpa ngukur lagi):
+#
+# - Port 443 TERNYATA KEBUKA dari internet. Catatan lama di vault bilang
+#   "port 443 masih ketutup di panel cloud" -- itu salah. Diukur dengan
+#   listener sementara di 0.0.0.0:443 lalu dipanggil dari IP PUBLIK
+#   (43.157.203.118, bukan localhost): HTTP 200 + body "halo!". Kontrol
+#   localhost juga 200, jadi listener-nya memang hidup di dua jalur.
+#   ufw inactive, 0 rule iptables buat 80/443.
+#
+# - Hostname dari nip.io dipakai BUKAN karena lebih bagus dari domain beli,
+#   tapi karena Let's Encrypt butuh NAMA, bukan IP, dan nama ini resolve ke
+#   IP kita hari ini (diukur: getent hosts -> 43.157.203.118). Begitu
+#   operator punya domain sendiri, ganti blok hostname di bawah; sisanya
+#   tidak berubah.
+#
+# - Console TETAP bind 127.0.0.1:8001. Caddy yang kena internet, bukan
+#   uvicorn. Jangan pernah ubah console ke 0.0.0.0 -- itu ngilangin satu
+#   lapis dan bikin Basic Auth console jadi satu-satunya pagar.
+#
+# - Blok :80 default pabrik (file_server /usr/share/caddy) DIBUANG dari
+#   sini: dia nyajiin halaman contoh Caddy ke internet dan bikin orang
+#   nebak box ini kosong. :80 sekarang cuma buat redirect ke HTTPS dan
+#   tantangan ACME.
+
+43-157-203-118.nip.io {
+	# Sertifikat otomatis dari Let's Encrypt. Butuh :80 kebuka untuk
+	# tantangan HTTP-01, dan itu sudah diukur kebuka.
+	reverse_proxy 127.0.0.1:8001 {
+		# Render bisa 2,4 menit dan halaman job nahan koneksi lebih lama
+		# dari default Caddy pada file 60 MB. Angka ini dari median render
+		# yang terukur, bukan tebakan: 829 detik pernah kejadian pada klip
+		# panjang, jadi batasnya di atas itu.
+		transport http {
+			read_timeout 20m
+			write_timeout 20m
+		}
+	}
+
+	# Unduhan klip 60 MB lewat koneksi rumahan: jangan dikompres ulang,
+	# mp4 sudah terkompresi dan gzip cuma makan CPU yang sama dipakai ffmpeg.
+	encode {
+		gzip
+		match {
+			header Content-Type text/*
+			header Content-Type application/json*
+		}
+	}
+
+	log {
+		output file /var/log/caddy/clipper-console.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		# Jangan log query string: link job dan nama file aset bisa bawa
+		# nama kampanye operator.
+		format console
+	}
+
+	header {
+		# Console ini cuma buat tim kecil; nol alasan dia muncul di hasil
+		# pencarian atau ke-embed di situs lain.
+		X-Robots-Tag "noindex, nofollow"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}
+
+# Semua yang masuk lewat IP mentah atau hostname lain: tolak, jangan
+# nyajiin apa pun. Scanner internet nemu port 80 dalam hitungan menit, dan
+# halaman contoh Caddy itu kabar gratis buat mereka.
+:80 {
+	respond 404
+}
