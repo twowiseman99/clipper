@@ -286,8 +286,15 @@ def _form(siapa, error=""):
 
 def _tabel(jobs):
     if not jobs:
-        return "<p class=meta>Belum ada render.</p>"
-        
+        # R-27: an empty state names the cause and the one action that fills
+        # it. "Belum ada render." passes the letter of "has an empty state"
+        # and tells a first-time user nothing: not why the table is empty,
+        # not what to do, not how long the thing they start will take.
+        return ("<p class=meta>Belum ada render di box ini.</p>"
+                "<p class=hint>Isi form di atas dan klik Render — hasilnya "
+                "muncul di sini. Satu klip median 2,4 menit, dan halaman ini "
+                "aman ditinggal: rendernya jalan di proses terpisah.</p>")
+
     baris = []
     for j in jobs:
         st = j["status"]
@@ -844,8 +851,11 @@ def lihat(request: Request, job_id: int):
         bagian.append(
             "<div class=panel><h2>Kirim ke YouTube</h2>"
             "<button disabled>Upload — belum ada akun</button>"
-            "<p class=hint>Tombol ini mati karena preflight.upload_accounts() "
-            "masih kosong. Dinyalain pas akun YouTube udah kepasang.</p></div>")
+            "<p class=hint>Mati karena <code>preflight.upload_accounts()</code> "
+            "balik daftar kosong: belum ada file <code>tokens/token_&lt;nama&gt;"
+            ".pickle</code> di box ini. Yang dibutuhin satu kali OAuth Google "
+            "punya operator; abis token-nya ada, tombol ini nyala sendiri tanpa "
+            "ubah kode. Sementara itu pakai Unduh file di atas.</p></div>")
     elif st == "failed":
         bagian.append(
             "<div class=panel><h2>Gagal</h2><div class=err>%s</div>"
