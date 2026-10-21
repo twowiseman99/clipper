@@ -1,7 +1,7 @@
-"""_v91: tanda 'garap' punya ARTI, dan triage bisa dari baris papan.
+"""_v91: triage putusan dari baris papan, TANPA ngunci render.
 
-Dua permintaan operator ("ya untuk both 1 dan 2"), dan dua-duanya punya cara
-gagal yang diem-diem:
+Permintaan operator dua tahap, dan tahap kedua DICABUT dengan alasan yang
+harus ikut kejaga di sini:
 
 1. **Tombol putusan di baris papan.** Triage 49 campaign lewat buka-tutup
    halaman detail itu 98 klik. Tombolnya harus POST (bukan link GET: GET yang
@@ -9,15 +9,20 @@ gagal yang diem-diem:
    SARINGAN yang lagi dipakai, bukan ke papan default — kalau balik ke default
    tiap klik, orang kehilangan tempat dia berhenti.
 
-2. **Render cuma buat campaign 'garap'.** Ini yang bikin tandanya berarti.
-   CARA GAGAL YANG DIJAGA DI SINI: pagar yang cuma nyembunyiin form.
-   Nyembunyiin tombol BUKAN pagar — tab lama yang masih kebuka, tombol back,
-   atau POST bikinan tangan semuanya ngelewatin tampilan. Jadi tes ini nembak
-   POST /render LANGSUNG, dan buktinya bukan teks halaman tapi JUMLAH JOB DI
-   ANTREAN (teks bisa kebetulan cocok; antrean nol ga bisa dipalsuin).
+2. ~~Render cuma buat campaign 'garap'~~ **DITOLAK operator 21 Okt:**
+   *"kalau 2 di iyakan nanti ribet kalau mau testing untuk video2 yg non
+   campaign"*. Pagar itu sempat kepasang lalu dicabut lagi.
 
-Yang juga dijaga: render LEPAS (tanpa campaign) harus TETEP jalan. Pagar yang
-kelewat lebar matiin form utama, dan itu bukan yang diminta.
+   Yang bikin ini lebih dari "ya udah dihapus": nguji video DI BAWAH campaign
+   itu kerjaan yang SAH — di situ aset + brief-nya kepake. Pagar garap bikin
+   lu wajib nandain keputusan bisnis dulu cuma buat nyoba render, dan itu
+   bikin tanda `garap` jadi bohong (ketekan buat tes, bukan buat mutusin).
+   Jadi tes di bawah ini ngejaga ARAH SEBALIKNYA: render WAJIB jalan di
+   status apa pun — belum diputusin, `lewat`, maupun `garap`. Kalau besok ada
+   yang masang balik pagarnya, cek ini yang merah.
+
+`garap` itu penanda keputusan tim (siapa + kapan + alasan), BUKAN izin
+teknis. Jangan kasih dia kuasa mengeksekusi.
 
 Jalan pakai server sungguhan di port acak + DB sementara.
 """
@@ -171,34 +176,45 @@ def main():
             "putusan kepasang sebagai link GET — prefetch browser bisa "
             "nandain campaign tanpa ada yang ngeklik")
 
-        # ---- 2. PAGAR RENDER, campaign BELUM diputusin ------------------
+        # ---- 2. Render JALAN walau campaign belum diputusin -------------
+        # Ini arah yang dijaga setelah operator nolak pagar garap: nguji
+        # video non-campaign / campaign yang belum diputusin itu kerjaan
+        # yang sah. Bukti pakai JUMLAH JOB, bukan teks halaman.
         cek(rq.waiting_count(qconn) == 0, "antrean ga kosong di awal")
         kode, html, _ = _form(url + "/render", {
             "preset": "jamet", "content": "https://youtu.be/abc123",
-            "campaign": "satu"})
+            "campaign": "satu", "context": "tes"})
         cek(kode == 200, "POST render bales %s" % kode)
-        # Bukti yang ga bisa dipalsuin teks halaman.
-        cek(rq.waiting_count(qconn) == 0,
-            "campaign BELUM diputusin tapi job-nya masuk antrean — pagar "
-            "garap cuma di tampilan, bukan di server")
-        cek("garap" in html.lower(),
-            "pesan tolakan ga nyebut garap, orang ga tau mesti ngapain")
+        jobs = rq.for_campaign(qconn, "satu")
+        cek(len(jobs) == 1,
+            "campaign BELUM diputusin ga bisa dirender — pagar garap kepasang "
+            "lagi, padahal operator nolak: testing video non-campaign jadi "
+            "ribet")
+        cek(json.loads(jobs[0]["params"])["campaign"] == "satu",
+            "job kesimpen tapi campaign-nya ilang dari params")
 
-        # ---- 3. Pagar juga nolak status 'lewat' -------------------------
+        # ---- 3. Render JALAN juga di campaign 'lewat' -------------------
+        # Status 'lewat' itu catatan keputusan bisnis, bukan larangan
+        # teknis. Orang tetep boleh nyoba render buat ngecek apakah
+        # keputusan 'lewat'-nya udah bener.
         _form(url + "/campaign/dua/pick", {"state": "lewat"})
         kode, html, _ = _form(url + "/render", {
             "preset": "jamet", "content": "https://youtu.be/abc123",
-            "campaign": "dua"})
-        cek(rq.waiting_count(qconn) == 0,
-            "campaign 'lewat' tetep bisa masuk antrean")
+            "campaign": "dua", "context": "tes"})
+        cek(len(rq.for_campaign(qconn, "dua")) == 1,
+            "campaign 'lewat' ga bisa dirender — status putusan jangan "
+            "dijadiin izin teknis")
 
-        # ---- 4. Panel form juga ga nawarin tombol bohong ---------------
+        # ---- 4. Panel form render kebuka tanpa lihat status putusan -----
         kode, html = _req(url + "/campaign/satu")
-        cek("Masukin antrean" not in html,
-            "form render masih nongol padahal campaign belum garap — "
-            "tombolnya bohong")
+        cek("Masukin antrean" in html,
+            "form render ketutup padahal campaign belum diputusin — itu "
+            "pagar garap lewat tampilan")
+        kode, html = _req(url + "/campaign/dua")
+        cek("Masukin antrean" in html,
+            "form render ketutup di campaign 'lewat'")
 
-        # ---- 5. Abis ditandain GARAP, render JALAN ----------------------
+        # ---- 5. Putusan dari baris papan: redirect ke saringan ----------
         kode, html, hdr = _form(url + "/campaign/satu/pick",
                                 {"state": "garap", "balik": "garap"},
                                 ikuti=False)
@@ -206,50 +222,30 @@ def main():
         cek("saring=garap" in hdr.get("Location", ""),
             "abis klik dari baris papan, orang ga dibalikin ke saringannya "
             "(Location=%r)" % hdr.get("Location"))
+        # Form di halaman DETAIL ga ngirim `balik` -> perilaku lama kejaga.
+        kode, html, hdr = _form(url + "/campaign/satu/pick",
+                                {"state": "garap"}, ikuti=False)
+        cek(hdr.get("Location", "").endswith("/campaign/satu"),
+            "form di halaman detail ga balik ke halaman campaign lagi "
+            "(Location=%r)" % hdr.get("Location"))
 
-        kode, html = _req(url + "/campaign/satu")
-        cek("Masukin antrean" in html,
-            "campaign udah garap tapi form render masih ketutup")
-        kode, html, _ = _form(url + "/render", {
-            "preset": "jamet", "content": "https://youtu.be/abc123",
-            "campaign": "satu", "context": "tes"})
-        jobs = rq.for_campaign(qconn, "satu")
-        cek(len(jobs) == 1,
-            "campaign GARAP malah ga bisa render — pagarnya kelewat lebar: "
-            "%r" % jobs)
-        cek(json.loads(jobs[0]["params"])["campaign"] == "satu",
-            "job kesimpen tapi campaign-nya ilang dari params")
+        # ---- 6. Tanda garap nempel + nyaring ---------------------------
+        kode, html = _req(url + "/campaign?saring=garap")
+        cek("satu" in html and "Campaign Dua" not in html,
+            "saringan 'digarap' ga nyaring")
+        kode, html = _req(url + "/campaign?saring=lewat")
+        cek("Campaign Dua" in html, "saringan 'dilewat' ga nyaring")
 
-        # ---- 6. Render LEPAS (tanpa campaign) tetep jalan ---------------
-        # Pagar yang kelewat lebar matiin form utama. Ini kontrol arah
-        # sebaliknya: yang dijaga cuma render yang nempel ke campaign.
+        # ---- 7. Render lepas (tanpa campaign) tetep jalan ---------------
         sebelum = rq.waiting_count(qconn)
         kode, html, _ = _form(url + "/render", {
             "preset": "sedih", "content": "https://youtu.be/lepas1"})
         cek(rq.waiting_count(qconn) == sebelum + 1,
-            "render lepas (tanpa campaign) kena pagar garap — pagarnya "
-            "kelewat lebar, form utama ikut mati")
+            "render lepas (tanpa campaign) ga masuk antrean")
 
-        # ---- 7. Campaign yang ga ada di papan ditolak -------------------
-        sebelum = rq.waiting_count(qconn)
-        kode, html, _ = _form(url + "/render", {
-            "preset": "jamet", "content": "https://youtu.be/abc123",
-            "campaign": "slug-ngawur-ga-ada"})
-        cek(rq.waiting_count(qconn) == sebelum,
-            "campaign ngawur masuk antrean")
-
-        # ---- 8. Hapus tanda: balik ketutup lagi ------------------------
-        _form(url + "/campaign/satu/pick", {"state": "batal"})
-        sebelum = rq.waiting_count(qconn)
-        kode, html, _ = _form(url + "/render", {
-            "preset": "jamet", "content": "https://youtu.be/abc123",
-            "campaign": "satu"})
-        cek(rq.waiting_count(qconn) == sebelum,
-            "tanda garap dihapus tapi render masih jalan — statusnya dibaca "
-            "sekali lalu di-cache, bukan dibaca per POST")
-
-        print("_v91 ok: %d cek — tombol putusan di baris papan, pagar garap "
-              "di server (bukan cuma UI), render lepas tetep jalan" % ok)
+        print("_v91 ok: %d cek — tombol putusan di baris papan, redirect "
+              "balik ke saringan, dan render TETEP bebas di semua status "
+              "putusan (pagar garap sengaja ga ada)" % ok)
         return 0
     finally:
         proc.terminate()

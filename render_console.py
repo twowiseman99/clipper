@@ -627,18 +627,6 @@ def _render_panel(c, aset):
         return ("<div class=panel><h2>Render klip</h2>"
                 "<p class=meta>Belum bisa: campaign ini belum punya link "
                 "video. Tambahin di panel bahan dulu.</p></div>")
-    if c["pick"] != "garap":
-        # Pagar yang SAMA dijaga di POST /render; ini cuma biar tombolnya ga
-        # bohong. Nyembunyiin tombol doang bukan pagar -- form lama yang
-        # masih kebuka di tab lain tetep bisa POST.
-        return ("<div class=panel><h2>Render klip</h2>"
-                "<p class=meta>Campaign ini belum ditandain "
-                "<b>garap</b>%s. Render cuma jalan buat campaign yang udah "
-                "diambil — itu yang bikin tanda garap berarti, bukan cuma "
-                "hiasan. Pakai tombol <b>Garap</b> di panel Keputusan di "
-                "atas.</p></div>"
-                % (" (sekarang: <b>lewat</b>)" if c["pick"] == "lewat"
-                   else ""))
     opsi_preset = "".join(
         '<option value="%s">%s — %s</option>'
         % (k, _e(v["label"]), _e(v["note"])) for k, v in PRESETS.items())
@@ -866,24 +854,6 @@ async def mulai(request: Request,
         return _minta_sandi()
     if preset not in PRESETS:
         return _halaman("Clipper", _form(siapa, "Preset '%s' ga ada." % preset))
-
-    # PAGAR GARAP. Ini yang bikin tanda 'garap' berarti sesuatu, dan dia di
-    # sini -- bukan cuma di tampilan form -- karena tombol yang disembunyiin
-    # bukan pagar: tab lama yang masih kebuka, tombol back, atau POST
-    # langsung semuanya ngelewatin UI. Render LEPAS (tanpa campaign) ga
-    # kena: form utama ga ada hubungannya sama papan campaign.
-    if campaign.strip():
-        _c = camp.get(camp.connect(), campaign.strip())
-        if not _c:
-            return _halaman("Clipper", _form(
-                siapa, "Campaign '%s' ga ada di papan." % campaign.strip()))
-        if _c["pick"] != "garap":
-            skrg = _c["pick"] or "belum diputusin"
-            return _halaman("Clipper", _form(
-                siapa,
-                "Campaign '%s' statusnya '%s', jadi render ditolak. Tandain "
-                "GARAP dulu di halaman campaign-nya — render cuma jalan buat "
-                "campaign yang udah diambil." % (campaign.strip(), skrg)))
 
     # Form render bisa dapet aset dua jalan: UPLOAD langsung (form utama)
     # atau PILIH aset campaign yang udah ke-upload (halaman campaign).
