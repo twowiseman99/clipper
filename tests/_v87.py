@@ -102,6 +102,18 @@ cek("penjelasan kotak kosong muncul SEBELUM field judul",
     i_asal != -1 and i_judul != -1 and i_asal < i_judul,
     "asal=%d judul=%d" % (i_asal, i_judul))
 
+# Sebab tombol mati wajib kebaca SEBELUM tombolnya, bukan sesudah: di lebar
+# HP tombol mati ketusuk dulu baru alasannya kebaca.
+i_sebab = up.find("belum punya akun YouTube yang keotorisasi")
+i_tombol = up.find("<button type=submit disabled")
+cek("sebab tombol mati muncul SEBELUM tombolnya",
+    i_sebab != -1 and i_tombol != -1 and i_sebab < i_tombol,
+    "sebab=%d tombol=%d" % (i_sebab, i_tombol))
+cek("tombol mati nyebut yang ditungguin (OAuth), bukan cuma 'ga bisa'",
+    "OAuth" in up)
+cek("jujur kalau teks yang diisi belum kesimpen",
+    "belum kesimpen" in up)
+
 # ---------------------------------------------------------------- median
 db = tempfile.mkdtemp()
 conn = sqlite3.connect(os.path.join(db, "t.db"))

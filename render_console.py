@@ -1000,14 +1000,18 @@ def _panel_upload(j, job_id):
                    "dulu, jadi lu bisa cek di YouTube Studio sebelum "
                    "dipublikasikan.</p>")
     else:
-        kontrol = ""
         tombol = "<button type=submit disabled>Upload — nunggu OAuth operator</button>"
+        # Kalimat sebab naik ke ATAS tombol: di lebar HP, tombol mati kebaca
+        # (dan ketusuk) sebelum alasannya kebaca. Detail path token tetep di
+        # bawah -- itu kerjaan operator, bukan hal yang nahan si pengisi form.
+        kontrol = ("<p class=hint>Upload belum bisa dijalanin: console ini "
+                   "belum punya akun YouTube yang keotorisasi.</p>")
         catatan = (
-            "<p class=hint>Tombol mati karena belum ada file "
+            "<p class=hint>Yang kurang: file "
             "<code>tokens/token_&lt;nama akun YouTube&gt;.pickle</code> di "
-            "server console ini. Yang dibutuhin satu kali OAuth Google punya "
-            "operator; abis token-nya ada, <strong>refresh halaman ini</strong> "
-            "dan tombolnya nyala. Judul &amp; Deskripsi di atas belum kesimpen "
+            "server console ini. Butuh satu kali OAuth Google punya operator; "
+            "abis token-nya ada, <strong>refresh halaman ini</strong> dan "
+            "tombolnya nyala. Judul &amp; Deskripsi di atas belum kesimpen "
             "kalau lu pindah halaman, jadi buat sekarang pakai Unduh file.</p>")
 
     return """

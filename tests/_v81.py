@@ -83,8 +83,18 @@ job2 = r.headers["location"]
 h = c.get(job2, auth=AUTH).text
 assert "Nomor urut" in h, "orang kedua ga dikasih nomor urut"
 assert "Perkiraan" in h, "orang kedua ga dikasih perkiraan nunggu"
-assert "2,4 menit" in h or "257" in h, \
+# Yang dijaga: perkiraan nyebut DASARNYA, bukan angka tertentu.
+#
+# Versi lama ngunci "2,4 menit" atau "257" -- dan itu bikin tes ini nagih
+# klaim BOHONG: 144 detik itu konstanta dari mesin lain (render nyata di box
+# ini 481 dan 405 detik), dan "257 render" ga pernah ada di DB mana pun.
+# Begitu angka karangan itu dibuang, tes ini merah padahal halamannya jadi
+# lebih jujur. Tes jangan ngunci angka yang masih dituning (lihat _v87).
+assert ("render yang kelar di box ini" in h
+        or "belum cukup buat median" in h
+        or "angka bawaan" in h), \
     "perkiraan ga nyebut dasarnya, jadi kelihatan karangan"
+assert "257 render" not in h, "halaman ngaku punya 257 sampel yang ga ada"
 print("antrean       : nomor urut + perkiraan + dasar angkanya muncul")
 
 # --- GA ADA progress bar persen ----------------------------------------
@@ -105,7 +115,13 @@ q.finish(conn, jid, palsu, ["contoh catatan render"])
 
 t = c.get(job1, auth=AUTH).text
 assert "disabled" in t, "tombol upload ga disabled padahal belum ada akun"
-assert "belum ada akun" in t, "tombol mati tanpa label yang jujur (R-26)"
+# R-26: tombol mati wajib nyebut SEBABNYA di labelnya. Yang dijaga properti
+# itu, bukan kalimatnya -- versi lama ngunci "belum ada akun" sementara
+# penjelasan di bawahnya nyebut file .pickle, dua model mental buat satu
+# blocker. Sekarang satu kosakata: OAuth.
+assert "OAuth" in t, "tombol mati tanpa label yang jujur (R-26)"
+assert "nunggu OAuth" in t or "belum ada akun" in t, \
+    "label tombol mati ga nyebut apa yang ditungguin"
 assert "contoh catatan render" in t, "warnings dari render ga ditampilin"
 print("upload        : tombol ada, disabled, labelnya nyebut sebabnya")
 print("warnings      : catatan render ikut ditampilin")
