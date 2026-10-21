@@ -23,6 +23,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# TOKEN_DIR diisolasi: upload_youtube baca /home/ubuntu/tokens (di LUAR repo),
+# jadi satu token nyata di box bikin panel upload kerender beda tanpa ada kode
+# yang berubah.
+os.environ["CLIPPER_TOKEN_DIR"] = tempfile.mkdtemp(prefix="tokens_kosong_")
 import render_console as rc  # noqa: E402
 import render_queue as q  # noqa: E402
 

@@ -1000,19 +1000,42 @@ def _panel_upload(j, job_id):
                    "dulu, jadi lu bisa cek di YouTube Studio sebelum "
                    "dipublikasikan.</p>")
     else:
-        tombol = "<button type=submit disabled>Upload — nunggu OAuth operator</button>"
+        # Dua sebab beda, dua kerjaan beda, dua orang beda. Dulu dua-duanya
+        # nulis "nunggu OAuth operator" -- jadi library yang belum keinstall
+        # bikin halaman nyuruh operator ngurus OAuth, yang ga akan pernah
+        # nolong. Sebabnya sekarang ditanya ke preflight.upload_blocker().
+        sebab = preflight.upload_blocker()
+        jenis = sebab[0] if sebab else "token"
+        rinci = sebab[1] if sebab else ""
         # Kalimat sebab naik ke ATAS tombol: di lebar HP, tombol mati kebaca
-        # (dan ketusuk) sebelum alasannya kebaca. Detail path token tetep di
+        # (dan ketusuk) sebelum alasannya kebaca. Detail teknis tetep di
         # bawah -- itu kerjaan operator, bukan hal yang nahan si pengisi form.
-        kontrol = ("<p class=hint>Upload belum bisa dijalanin: console ini "
-                   "belum punya akun YouTube yang keotorisasi.</p>")
-        catatan = (
-            "<p class=hint>Yang kurang: file "
-            "<code>tokens/token_&lt;nama akun YouTube&gt;.pickle</code> di "
-            "server console ini. Butuh satu kali OAuth Google punya operator; "
-            "abis token-nya ada, <strong>refresh halaman ini</strong> dan "
-            "tombolnya nyala. Judul &amp; Deskripsi di atas belum kesimpen "
-            "kalau lu pindah halaman, jadi buat sekarang pakai Unduh file.</p>")
+        if jenis == "library":
+            tombol = ("<button type=submit disabled>Upload — library Google "
+                      "belum keinstall</button>")
+            kontrol = ("<p class=hint>Upload belum bisa dijalanin: library "
+                       "YouTube-nya belum kepasang di server ini. "
+                       "<strong>Ini bukan soal OAuth</strong> — OAuth ga akan "
+                       "nolong sampai ini kelar.</p>")
+            catatan = (
+                "<p class=hint>Yang kurang di server console: "
+                "<code>google-api-python-client</code>, "
+                "<code>google-auth</code>, <code>google-auth-oauthlib</code> "
+                "(udah ke-list di <code>requirements.txt</code>, cuma belum "
+                "keinstall di venv-nya). Pesan aslinya: <code>" + _e(rinci) +
+                "</code></p>")
+        else:
+            tombol = "<button type=submit disabled>Upload — nunggu OAuth operator</button>"
+            kontrol = ("<p class=hint>Upload belum bisa dijalanin: console ini "
+                       "belum punya akun YouTube yang keotorisasi.</p>")
+            catatan = (
+                "<p class=hint>Yang kurang: file "
+                "<code>token_&lt;nama akun YouTube&gt;.pickle</code> di "
+                "<code>" + _e(rinci or "tokens/") + "</code>. Butuh satu kali "
+                "OAuth Google punya operator; abis token-nya ada, "
+                "<strong>refresh halaman ini</strong> dan tombolnya nyala. "
+                "Judul &amp; Deskripsi di atas belum kesimpen kalau lu pindah "
+                "halaman, jadi buat sekarang pakai Unduh file.</p>")
 
     return """
 <form method=post action=/upload class=panel>

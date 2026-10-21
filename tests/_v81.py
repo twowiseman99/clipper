@@ -18,6 +18,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 tmpdb = os.path.join(tempfile.mkdtemp(prefix="console_"), "q.db")
 os.environ["CLIPPER_QUEUE_DB"] = tmpdb
 os.environ["CLIPPER_CONSOLE_USERS"] = "dalmi:sandi1,oden:sandi2"
+# TOKEN_DIR juga wajib diisolasi, sama alasannya kayak QUEUE_DB di atas:
+# upload_youtube baca folder di LUAR repo (/home/ubuntu/tokens), jadi satu
+# token nyata di box ini bikin tes "tanpa akun OAuth tombolnya mati" merah
+# tanpa ada kode yang berubah. Kejadian 21 Okt 2026 pas token dummy dipasang
+# buat nguji jalur API: 4 tes merah sekaligus, nol di antaranya bug.
+os.environ["CLIPPER_TOKEN_DIR"] = tempfile.mkdtemp(prefix="tokens_kosong_")
 
 from fastapi.testclient import TestClient  # noqa: E402
 

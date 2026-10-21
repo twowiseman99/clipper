@@ -26,6 +26,37 @@ def upload_accounts():
         return []
 
 
+def upload_blocker():
+    """Why upload is unavailable: 'library', 'token', or None when it's fine.
+
+    These are two different jobs for two different people and they used to
+    look identical in the UI. Measured 21 Oct 2026: google-api-python-client
+    was listed in requirements.txt but never installed in this venv, and
+    upload_accounts() turns that ImportError into an empty list -- the exact
+    same value a missing token produces. The page then told the operator to
+    go do OAuth, which would never have helped: the fix was one install.
+
+    The library check imports what upload() actually calls, NOT upload_youtube
+    itself. That module imports googleapiclient INSIDE its functions, so
+    `import upload_youtube` succeeds on a box with no Google libraries at all
+    -- the first version of this check asked the wrong question and reported
+    None while the libraries were hidden.
+    """
+    for modul in ("googleapiclient.discovery", "googleapiclient.http",
+                  "google.auth.transport.requests", "google.oauth2.credentials"):
+        try:
+            __import__(modul)
+        except Exception as e:
+            return ("library", f"{modul}: {type(e).__name__}: {e}")
+    try:
+        import upload_youtube
+    except Exception as e:
+        return ("library", f"upload_youtube: {type(e).__name__}: {e}")
+    if not upload_accounts():
+        return ("token", upload_youtube.TOKEN_DIR)
+    return None
+
+
 def require(label, module):
     """Report a missing third-party package instead of dying on the import."""
     try:

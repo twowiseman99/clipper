@@ -116,6 +116,10 @@ cek("finish() tanpa meta -> '{}' bukan error",
 
 # --------------------------------------------------- 3. panel rendering field
 os.environ.setdefault("CLIPPER_CONSOLE_USERS", "tes:tes")
+# TOKEN_DIR diisolasi: upload_youtube baca /home/ubuntu/tokens (di LUAR repo),
+# jadi satu token nyata di box bikin cek "tanpa akun OAuth tombolnya mati"
+# merah tanpa ada kode yang berubah.
+os.environ["CLIPPER_TOKEN_DIR"] = tempfile.mkdtemp(prefix="tokens_kosong_")
 import render_console as rc  # noqa: E402
 
 
