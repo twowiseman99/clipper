@@ -151,9 +151,13 @@ def main():
         i_kra = html.index("krakatau")
         assert i_kar < i_kra, ("CPM 15rb sisa 6% nongol di atas CPM 10rb "
                               "sisa 97% — papannya balik ke CPM mentah")
-        # Header kolom wajib bilang PER SERIBU. Nulis "CPM" doang = ngundang
-        # salah hitung 1000x.
-        assert "1.000 views" in html, "header kolom ga nyebut per 1.000 views"
+        # Header kolom sekarang "CPM" (minta operator), TAPI halamannya wajib
+        # tetep nyebut per 1.000 views di hint — tanpa itu `rate_per_million`
+        # ngundang salah hitung 1000x.
+        assert ">CPM<" in html, "header kolom ga nyebut CPM"
+        assert "1.000" in html and "rate_per_million" in html, (
+            "hint per-seribu ilang — CPM tanpa penjelasan satuan = salah "
+            "hitung 1000x nunggu kejadian")
         # min_views 20.000 ditandain merah, 10.000 ENGGA.
         baris_kra = html[i_kra - 400:i_kra]
         assert "merah" in baris_kra, "min_views 20rb ga ditandain merah"

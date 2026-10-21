@@ -16,9 +16,11 @@ masing-masing ngubah desainnya:
 
 2. **`rate_per_million` NAMANYA BOHONG.** Halaman campaign nulis
    "Rp10.000 / 1K views" buat nilai 10000 yang sama. Jadi angkanya itu rupiah
-   per **SERIBU** views, bukan per sejuta — beda 1000x. Kolomnya di sini
-   dilabelin `Rp / 1.000 views` biar ga ada yang ngitung pakai arti yang
-   salah. 56 dari 111 campaign cuma punya field ini; `cpm_tiktok` dkk itu
+   per **SERIBU** views, bukan per sejuta — beda 1000x. Kolomnya di UI
+   dilabelin `CPM` (minta operator: "kita semua udah paham artinya") dengan
+   satuan per-1.000 ditulis di hint bawah tabel, biar ga ada yang ngitung
+   pakai arti yang salah. 56 dari 111 campaign cuma punya field ini;
+   `cpm_tiktok` dkk itu
    override per platform kalau ada.
 
 3. **CPM doang nipu.** Diukur barusan: campaign CPM tertinggi (Rp15.000,

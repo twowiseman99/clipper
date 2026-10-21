@@ -28,6 +28,7 @@ import html
 import json
 import os
 import time
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
@@ -173,6 +174,11 @@ button[disabled]{
   color:var(--ink-dim); border-color:var(--line);
 }
 button[disabled]:hover{background:transparent}
+button.mini{
+  padding:.25rem .55rem; font-size:.75rem; font-weight:500;
+  border-radius:5px; min-height:28px;
+}
+td.putus{white-space:nowrap}
 .hint{font-size:.8rem; color:var(--ink-dim); margin-top:.3rem}
 table{width:100%; border-collapse:collapse; font-size:.9rem}
 th,td{text-align:left; padding:.5rem .4rem; border-bottom:1px solid var(--line)}
@@ -240,7 +246,7 @@ select{
 }
 @media(max-width:34rem){
   .wrap{padding:1.25rem .9rem 3rem}
-  button{width:100%; padding:.8rem}
+  button:not(.mini){width:100%; padding:.8rem}
   .row>*{flex:1 1 100%}
 }
 """
@@ -398,13 +404,49 @@ def _rp(n):
 
 # ------------------------------------------------------------ papan campaign
 
+def _putus_cepat(slug, pick, saring):
+    """Tombol garap/lewat di BARIS papan, biar triage ga perlu buka halaman.
+
+    Kenapa form per baris dan bukan satu link GET: keputusan ini nulis ke
+    DB, dan GET yang nulis itu bisa kepanggil ulang sendiri oleh prefetch
+    browser atau refresh — 49 baris x satu salah-klik yang ga bisa dibatalin
+    itu mahal. POST juga yang sama dipakai halaman detail, jadi cuma satu
+    pintu masuk ke camp.pick().
+
+    `balik` dibawa biar abis klik lu balik ke SARINGAN yang lagi dipakai.
+    Tanpa itu triage di tab "Aktif" nendang lu ke papan default tiap klik,
+    dan baris yang baru ditandain ilang dari pandangan sebelum lu lihat
+    hasilnya.
+    """
+    def tombol(nilai, label, kelas, judul):
+        return ("<form method=post action='/campaign/%s/pick' "
+                "style='display:inline'>"
+                "<input type=hidden name=state value=%s>"
+                "<input type=hidden name=balik value='%s'>"
+                "<button class='%s mini' type=submit title='%s'>%s</button>"
+                "</form>" % (_e(slug), nilai, _e(saring), kelas,
+                             _e(judul), _e(label)))
+
+    if pick == "garap":
+        return tombol("batal", "batal", "ghost",
+                      "Hapus tanda garap — campaign balik ke belum diputusin")
+    if pick == "lewat":
+        return tombol("batal", "batal", "ghost",
+                      "Hapus tanda lewat — campaign balik ke belum diputusin")
+    return (tombol("garap", "garap", "", "Ambil campaign ini")
+            + " " + tombol("lewat", "lewat", "ghost",
+                           "Lewatin campaign ini"))
+
+
 def _papan(rows, saring, umur):
     """Tabel campaign. Urutan SKOR = cpm x sisa budget (pilihan operator).
 
-    Kolomnya nyebut `Rp / 1.000 views` dan bukan "CPM", karena field yang
-    namanya `rate_per_million` di API itu rupiah per SERIBU views -- udah
-    dicek ke halaman campaign-nya. Nulis "CPM" doang di header bikin orang
-    ngitung pakai arti yang salah dan kelirunya 1000x.
+    Header kolomnya "CPM" atas permintaan operator ("kita semua udah paham
+    artinya"). Artinya tetep rupiah per SERIBU views: field yang namanya
+    `rate_per_million` di API itu per seribu -- udah dicek ke halaman
+    campaign-nya. Namanya yang bohong, bukan angkanya, jadi catatan itu
+    ditahan di hint bawah tabel biar siapa pun yang nanti baca API ga
+    ngitung kelirunya 1000x.
     """
     if not rows:
         return ("<p class=meta>Belum ada campaign di papan. Klik "
@@ -424,13 +466,15 @@ def _papan(rows, saring, umur):
             "<td class='num r'>%s</td><td class='num r'>%s</td>"
             "<td class='num r%s'>%s</td>"
             "<td><a href='/campaign/%s'>%s</a><br>"
-            "<span class=meta>%s %s %s</span></td></tr>"
+            "<span class=meta>%s %s %s</span></td>"
+            "<td class=putus>%s</td></tr>"
             % (kelas, format(r["score"], ",d").replace(",", "."),
                _rp(r["cpm"]),
                "?" if r["budget_left"] is None else "%d%%" % r["budget_left"],
                " merah" if r["min_views_merah"] else "", mv,
                _e(r["slug"]), _e(r["title"][:60]),
-               _e(r["brand"][:26]), tanda, aset))
+               _e(r["brand"][:26]), tanda, aset,
+               _putus_cepat(r["slug"], r["pick"], saring)))
     pil = []
     for nama, nilai in (("Aktif", ""), ("Digarap", "garap"),
                         ("Dilewat", "lewat"), ("Semua status", "semua")):
@@ -442,16 +486,16 @@ def _papan(rows, saring, umur):
         "<form method=post action=/campaign/refresh style='margin-bottom:1rem'>"
         "<button class=ghost type=submit>Tarik ulang dari marketplace</button>"
         "<span class=hint> terakhir: %s</span></form>"
-        "<table><tr><th class=r>Skor</th><th class=r>Rp / 1.000 views</th>"
+        "<table><tr><th class=r>Skor</th><th class=r>CPM</th>"
         "<th class=r>sisa budget</th><th class=r>min views</th>"
-        "<th>Campaign</th></tr>%s</table>"
-        "<p class=hint>Urutan = <b>skor</b> (Rp/1.000 views × sisa budget). "
+        "<th>Campaign</th><th>Putusan</th></tr>%s</table>"
+        "<p class=hint>Urutan = <b>skor</b> (CPM × sisa budget). "
         "CPM mentah nipu: campaign dengan rate tertinggi di marketplace "
         "(Rp15.000) sisa budgetnya cuma 6%%, jadi rate-nya ga bisa diambil. "
         "Angka merah di min views = lantai di atas 10.000, klip di bawah itu "
         "ga dibayar sama sekali.</p>"
-        "<p class=hint>Rp/1.000 views, BUKAN per sejuta: field API-nya "
-        "ketulis <code>rate_per_million</code> tapi halaman campaign-nya "
+        "<p class=hint>CPM di sini = rupiah per <b>1.000</b> views. Field "
+        "API-nya ketulis <code>rate_per_million</code> tapi halaman "
         "nulis \"Rp10.000 / 1K views\" buat angka yang sama. Namanya bohong, "
         "angkanya per seribu.</p>"
         % ("".join(pil), _e(umur), "".join(baris)))
@@ -583,6 +627,18 @@ def _render_panel(c, aset):
         return ("<div class=panel><h2>Render klip</h2>"
                 "<p class=meta>Belum bisa: campaign ini belum punya link "
                 "video. Tambahin di panel bahan dulu.</p></div>")
+    if c["pick"] != "garap":
+        # Pagar yang SAMA dijaga di POST /render; ini cuma biar tombolnya ga
+        # bohong. Nyembunyiin tombol doang bukan pagar -- form lama yang
+        # masih kebuka di tab lain tetep bisa POST.
+        return ("<div class=panel><h2>Render klip</h2>"
+                "<p class=meta>Campaign ini belum ditandain "
+                "<b>garap</b>%s. Render cuma jalan buat campaign yang udah "
+                "diambil — itu yang bikin tanda garap berarti, bukan cuma "
+                "hiasan. Pakai tombol <b>Garap</b> di panel Keputusan di "
+                "atas.</p></div>"
+                % (" (sekarang: <b>lewat</b>)" if c["pick"] == "lewat"
+                   else ""))
     opsi_preset = "".join(
         '<option value="%s">%s — %s</option>'
         % (k, _e(v["label"]), _e(v["note"])) for k, v in PRESETS.items())
@@ -647,7 +703,7 @@ def campaign(request: Request, slug: str):
         "marketplace</a></p>"
         "<div class=panel><table>"
         "<tr><th>Skor</th><td class=num><span class=skor>%s</span></td></tr>"
-        "<tr><th>Rp / 1.000 views</th><td class=num>%s <span class=meta>(%s)"
+        "<tr><th>CPM</th><td class=num>%s <span class=meta>(%s)"
         "</span></td></tr>"
         "<tr><th>Sisa budget</th><td class=num>%s</td></tr>"
         "<tr><th>Min views</th><td class='num%s'>%s</td></tr>"
@@ -692,13 +748,22 @@ def campaign(request: Request, slug: str):
 
 @app.post("/campaign/{slug}/pick")
 def campaign_pick(request: Request, slug: str,
-                  state: str = Form(...), note: str = Form("")):
+                  state: str = Form(...), note: str = Form(""),
+                  balik: str = Form(None)):
     siapa = _siapa(request)
     if not siapa:
         return _minta_sandi()
     conn = camp.connect()
     camp.pick(conn, slug, None if state == "batal" else state,
               who=siapa, note=note.strip())
+    # `balik` cuma dikirim tombol cepat di baris papan. Dia balikin orang ke
+    # saringan yang lagi dipakai, bukan ke halaman campaign: triage 49 baris
+    # itu satu layar, dan mental ke halaman detail tiap klik ngilangin
+    # tempat orang berhenti. Form di halaman detail ga ngirim field ini,
+    # jadi dia tetep balik ke halaman campaign-nya seperti sebelumnya.
+    if balik is not None:
+        return RedirectResponse("/campaign?saring=%s" % quote_plus(balik),
+                                status_code=303)
     return RedirectResponse("/campaign/%s" % slug, status_code=303)
 
 
@@ -801,6 +866,24 @@ async def mulai(request: Request,
         return _minta_sandi()
     if preset not in PRESETS:
         return _halaman("Clipper", _form(siapa, "Preset '%s' ga ada." % preset))
+
+    # PAGAR GARAP. Ini yang bikin tanda 'garap' berarti sesuatu, dan dia di
+    # sini -- bukan cuma di tampilan form -- karena tombol yang disembunyiin
+    # bukan pagar: tab lama yang masih kebuka, tombol back, atau POST
+    # langsung semuanya ngelewatin UI. Render LEPAS (tanpa campaign) ga
+    # kena: form utama ga ada hubungannya sama papan campaign.
+    if campaign.strip():
+        _c = camp.get(camp.connect(), campaign.strip())
+        if not _c:
+            return _halaman("Clipper", _form(
+                siapa, "Campaign '%s' ga ada di papan." % campaign.strip()))
+        if _c["pick"] != "garap":
+            skrg = _c["pick"] or "belum diputusin"
+            return _halaman("Clipper", _form(
+                siapa,
+                "Campaign '%s' statusnya '%s', jadi render ditolak. Tandain "
+                "GARAP dulu di halaman campaign-nya — render cuma jalan buat "
+                "campaign yang udah diambil." % (campaign.strip(), skrg)))
 
     # Form render bisa dapet aset dua jalan: UPLOAD langsung (form utama)
     # atau PILIH aset campaign yang udah ke-upload (halaman campaign).

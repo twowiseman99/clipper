@@ -1398,12 +1398,13 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
 
     # Printed after the JSON result is assembled but before returning, so the
     # review is the last thing on stderr and lines up with the clip just made.
-    # The checker list is explicit: a gate named here that recorded nothing
-    # prints DID NOT RUN instead of vanishing.
+    # The checker list is every division there is: a gate that recorded nothing
+    # prints DID NOT RUN instead of vanishing. It is derived from DIVISIONS, not
+    # typed out here — a hand-kept list silently stops watching any gate added
+    # after it was written, which is how "freeze" and "caption" went unwatched.
     led = audit.current()
     if led is not None:
-        checkers = ("sourcing", "footage", "copy",
-                    "language", "sound", "edit")
+        checkers = tuple(audit.DIVISIONS)
         led.emit(checkers=checkers)
         # Also write it down. Printing was the only output, so the review
         # existed solely in whoever's terminal ran the render — the operator
