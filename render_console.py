@@ -216,6 +216,23 @@ input[type=file]{
   width:100%; padding:.5rem; background:#141210; color:var(--ink-dim);
   border:1px dashed var(--line); border-radius:7px; font:inherit;
   font-size:.85rem;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+/* Tombol bawaan browser di file input itu abu terang kotak -- di tema gelap
+   dia jadi benda paling mencolok setelah tombol utama dan kelihatan kayak
+   CSS gagal muat, bukan kontrol yang disengaja. */
+input[type=file]::file-selector-button{
+  font:inherit; font-size:.82rem; margin-right:.6rem; cursor:pointer;
+  padding:.3rem .7rem; border-radius:5px; color:var(--ink);
+  background:#1E1B18; border:1px solid var(--line);
+}
+input[type=file]::file-selector-button:hover{border-color:var(--teal)}
+/* Label preset panjang kepotong TENGAH HURUF di lebar HP (diukur 390px:
+   "ending melankoli" langsung nempel chevron). padding-right nyediain ruang
+   buat chevron, ellipsis bikin potongnya kebaca sebagai sengaja. */
+select{
+  text-overflow:ellipsis; white-space:nowrap; overflow:hidden;
+  padding-right:2rem;
 }
 .desc{
   font-size:.88rem; color:var(--ink-dim); white-space:pre-wrap;
@@ -246,12 +263,13 @@ def _form(siapa, error=""):
     )
     conn = q.connect()
     nunggu = q.waiting_count(conn)
+    med_form, n_form = q.median_render_sec(conn)
     antrean_nota = (
         '<p class=hint>Antrean kosong, render lu mulai langsung.</p>'
         if nunggu == 0 else
         '<p class=hint>Ada <span class=num>%d</span> job nunggu di depan. '
         'Perkiraan mulai: <span class=num>%s</span>.</p>'
-        % (nunggu, _lama(nunggu * q.MEDIAN_RENDER_SEC))
+        % (nunggu, _lama(nunggu * med_form))
     )
     err = ('<div class=err>%s</div>' % _e(error)) if error else ""
     return """
@@ -261,14 +279,15 @@ def _form(siapa, error=""):
 <form method=post action=/render class=panel enctype="multipart/form-data">
   <h2>Render klip baru</h2>
   <label><span class=lab>Preset</span>
-    <select name=preset>%s</select></label>
+    <select name=preset id=preset>%s</select></label>
   <label><span class=lab>Link isi — video yang dipotong jadi klip</span>
     <input type=url name=content required placeholder="https://..."></label>
   <label><span class=lab>Link hook — b-roll pembuka (optional)</span>
     <input type=url name=opening placeholder="https://..."></label>
-  <label><span class=lab>Gambar outro (optional) — cuma kepakai di Jedag jedug</span>
-    <input type=file name=image accept="image/*">
-    <span class=hint>Dikasih ke preset Mengharukan bakal ditolak job.py sendiri.</span></label>
+  <label id=lbl-outro><span class=lab>Gambar outro (optional)</span>
+    <input type=file name=image accept="image/*" id=outro
+           aria-describedby=hint-outro>
+    <span class=hint id=hint-outro role=status></span></label>
   <label><span class=lab>BGM (optional)</span>
     <input type=file name=bgm accept="audio/*">
     <span class=hint>Kosongin = musik dipilih dari mood klip pakai stok di
@@ -281,7 +300,60 @@ def _form(siapa, error=""):
   %s
   <button type=submit>Masukin antrean</button>
 </form>
-""" % (_e(siapa), err, opsi, antrean_nota)
+<script>
+/* Field gambar outro dulu selalu nyala sambil labelnya nyuruh jangan dipakai.
+   Sekarang statusnya ngikut preset, jadi aturannya KELIHATAN bukan dibaca.
+   Server TETAP nolak (400): JS bisa mati dan POST bisa dateng tanpa halaman
+   ini. Lapis kejelasan, bukan lapis keamanan. */
+(function () {
+  var PAKAI = %s;
+  var sel = document.getElementById("preset");
+  var inp = document.getElementById("outro");
+  var hint = document.getElementById("hint-outro");
+  var lbl = document.getElementById("lbl-outro");
+  if (!sel || !inp || !hint || !lbl) return;
+  function sync() {
+    var boleh = PAKAI[sel.value] === true;
+    inp.disabled = !boleh;
+    /* Yang diredupin cuma KONTROLnya, bukan hint-nya. Pertama kali gua
+       redupin seluruh label dan hasilnya kebalik: satu-satunya kalimat yang
+       ngasih tau cara ngidupin field itu jadi teks paling pudar di halaman. */
+    inp.style.opacity = boleh ? "" : ".5";
+    lbl.querySelector(".lab").style.opacity = boleh ? "" : ".6";
+    if (boleh) {
+      hint.textContent = "Dipakai jadi frame penutup klip.";
+      hint.style.color = "";
+    } else {
+      hint.textContent = "Preset " + sel.options[sel.selectedIndex].text.split(" — ")[0]
+        + " ga pakai gambar outro, jadi field ini mati. Pilih Jedag jedug buat ngisinya.";
+      hint.style.color = "var(--gold)";
+      inp.value = "";
+    }
+  }
+  sel.addEventListener("change", sync);
+  sync();
+})();
+</script>
+""" % (_e(siapa), err, opsi, antrean_nota,
+       json.dumps({k: v["pakai_outro"] for k, v in PRESETS.items()}))
+
+
+def _dasar_median(med, n):
+    """Kalimat estimasi yang nyebut DARI BERAPA render angkanya diambil.
+
+    Versi lama nulis "median 2,4 menit dari 257 render" -- dua angka yang
+    dua-duanya ga ada di box ini (konstanta dari mesin lain, dan DB cuma
+    punya 2 render kelar). Angka yang ngaku punya dasar 257 sampel lebih
+    berbahaya daripada ga ngasih angka, karena dia ngundang dipercaya.
+    """
+    if n == 0:
+        return ("Belum ada render kelar di box ini, jadi perkiraannya pakai "
+                "angka bawaan %s. Bakal makin akurat sendiri." % _lama(med))
+    if n < 3:
+        return ("Baru %d render kelar di box ini — belum cukup buat median, "
+                "jadi ini masih angka bawaan %s." % (n, _lama(med)))
+    return ("Perkiraan pakai median %s dari %d render yang kelar di box ini. "
+            "Tiap render baru bikin angka ini makin bener." % (_lama(med), n))
 
 
 def _tabel(jobs):
@@ -292,8 +364,8 @@ def _tabel(jobs):
         # not what to do, not how long the thing they start will take.
         return ("<p class=meta>Belum ada render di box ini.</p>"
                 "<p class=hint>Isi form di atas dan klik Render — hasilnya "
-                "muncul di sini. Satu klip median 2,4 menit, dan halaman ini "
-                "aman ditinggal: rendernya jalan di proses terpisah.</p>")
+                "muncul di sini. Halaman ini aman ditinggal: rendernya jalan "
+                "di proses terpisah, jadi nutup tab ga ngebatalin.</p>")
 
     baris = []
     for j in jobs:
@@ -810,30 +882,30 @@ def lihat(request: Request, job_id: int):
     if st == "waiting":
         pos = q.position(conn, job_id)
         eta = q.eta_seconds(conn, job_id)
+        med, n = q.median_render_sec(conn)
         refresh = 10
         bagian.append(
             "<div class=panel><h2>Nunggu antrean</h2>"
             "<p>Nomor urut <span class=num>%d</span>. "
             "Perkiraan mulai <span class=num>%s</span> lagi.</p>"
-            "<p class=hint>Perkiraan pakai median 2,4 menit dari 257 render. "
-            "Render terlama yang pernah keukur 6,6 menit, jadi ini bisa "
-            "lebih lama.</p>"
+            "<p class=hint>%s</p>"
             "<form method=post action=/batal>"
             "<input type=hidden name=job_id value=%d>"
             "<button class=ghost type=submit>Batalin</button></form></div>"
-            % (pos, _lama(eta), job_id))
+            % (pos, _lama(eta), _dasar_median(med, n), job_id))
     elif st == "running":
         jalan = time.time() - (j["started_at"] or time.time())
+        med, n = q.median_render_sec(conn)
         refresh = 10
         bagian.append(
             "<div class=panel><h2>Lagi dirender</h2>"
             "<p>Tahap: <span class=num>%s</span> · udah jalan "
             "<span class=num>%s</span>.</p>"
             "<p class=hint>Ga ada bar persen di sini: job.py ga lapor persen, "
-            "jadi bar yang gerak sendiri bakal bohong. Median 2,4 menit.</p>"
+            "jadi bar yang gerak sendiri bakal bohong. %s</p>"
             "<p class=hint>Halaman bisa kerasa lambat sekarang — ffmpeg makan "
             "dua core yang sama.</p></div>"
-            % (_e(j["stage"] or "mulai"), _lama(jalan)))
+            % (_e(j["stage"] or "mulai"), _lama(jalan), _dasar_median(med, n)))
     elif st == "done":
         warn = json.loads(j["warnings"] or "[]")
         wbox = ""
@@ -929,28 +1001,46 @@ def _panel_upload(j, job_id):
                    "dipublikasikan.</p>")
     else:
         kontrol = ""
-        tombol = "<button type=submit disabled>Upload — belum ada akun</button>"
+        tombol = "<button type=submit disabled>Upload — nunggu OAuth operator</button>"
         catatan = (
             "<p class=hint>Tombol mati karena belum ada file "
-            "<code>tokens/token_&lt;nama&gt;.pickle</code> di box ini. Yang "
-            "dibutuhin satu kali OAuth Google punya operator; abis token-nya "
-            "ada, tombol ini nyala sendiri tanpa ubah kode. Teks di atas tetep "
-            "bisa lu siapin sekarang, dan sementara itu pakai Unduh file.</p>")
+            "<code>tokens/token_&lt;nama akun YouTube&gt;.pickle</code> di "
+            "server console ini. Yang dibutuhin satu kali OAuth Google punya "
+            "operator; abis token-nya ada, <strong>refresh halaman ini</strong> "
+            "dan tombolnya nyala. Judul &amp; Deskripsi di atas belum kesimpen "
+            "kalau lu pindah halaman, jadi buat sekarang pakai Unduh file.</p>")
 
     return """
 <form method=post action=/upload class=panel>
   <h2>Kirim ke YouTube</h2>
   <input type=hidden name=job_id value=%d>
-  <label><span class=lab>Judul (maks 100 karakter)</span>
-    <input type=text name=judul maxlength=100 value="%s"></label>
+  %s
+  <label><span class=lab>Judul <span class=hint id=sisa-judul></span></span>
+    <input type=text name=judul maxlength=100 value="%s" id=judul></label>
   <label><span class=lab>Deskripsi</span>
     <textarea name=deskripsi rows=4>%s</textarea></label>
   %s
   %s
   %s
-  %s
-</form>""" % (job_id, _e(judul), _e(desk or hook), kontrol, tombol, asal,
-              catatan)
+</form>
+<script>
+/* Label dulu nulis batas 100 tanpa nunjukin posisi lu di dalamnya. YouTube
+   motong judul kepanjangan TANPA ngasih tau, jadi angka yang kebaca itu
+   bedanya ketahuan sekarang vs ketahuan setelah tayang. */
+(function () {
+  var i = document.getElementById("judul");
+  var out = document.getElementById("sisa-judul");
+  if (!i || !out) return;
+  function hitung() {
+    var n = i.value.length;
+    out.textContent = "· " + n + "/100";
+    out.style.color = n > 90 ? "var(--gold)" : "";
+  }
+  i.addEventListener("input", hitung);
+  hitung();
+})();
+</script>""" % (job_id, asal, _e(judul), _e(desk or hook), kontrol, tombol,
+                catatan)
 
 
 def _panel_fix(j):
@@ -974,8 +1064,7 @@ def _panel_fix(j):
   </div>
   <button class=ghost type=submit>Render ulang</button>
   <p class=hint>Ini render ULANG penuh, bukan tambal bagian itu aja — jadi
-  makan waktu sama kayak render pertama (median 2,4 menit) dan masuk antrean
-  dari belakang.</p>
+  makan waktu sama kayak render pertama dan masuk antrean dari belakang.</p>
 </form>""" % j["id"]
 
 

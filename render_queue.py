@@ -187,23 +187,50 @@ def position(conn, job_id):
     ).fetchone()[0]
 
 
+def median_render_sec(conn, minimal=3):
+    """Median durasi render dari job yang BENERAN kelar di box ini.
+
+    Konstanta 144,0 detik itu tebakan dari mesin lain, dan di box ini dia
+    salah 3x: dua render pertama yang keukur 481 dan 405 detik (median 443).
+    Estimasi antrean yang ngaku 2,4 menit buat kerjaan 7,4 menit bukan
+    "kira-kira", itu ngasih angka yang salahnya searah terus -- selalu
+    bikin orang nungguin layar lebih lama dari yang dijanjiin.
+
+    Di bawah `minimal` sampel, median dari 1-2 render gampang kebawa satu
+    video aneh, jadi balikin konstanta. Fungsi ini sengaja ga nyimpen cache:
+    query-nya satu baris di tabel yang isinya puluhan.
+    """
+    rows = conn.execute(
+        "SELECT finished_at - started_at AS lama FROM jobs "
+        "WHERE status='done' AND started_at IS NOT NULL "
+        "AND finished_at IS NOT NULL"
+    ).fetchall()
+    d = sorted(r["lama"] for r in rows if r["lama"] and r["lama"] > 0)
+    if len(d) < minimal:
+        return MEDIAN_RENDER_SEC, len(d)
+    n = len(d)
+    med = d[n // 2] if n % 2 else (d[n // 2 - 1] + d[n // 2]) / 2
+    return med, n
+
+
 def eta_seconds(conn, job_id):
     """Perkiraan nunggu dalam detik. None kalau ga bisa diperkirakan.
 
     Hitungannya: sisa job yang lagi jalan + jumlah job di depan dikali
-    median. Ini PERKIRAAN dan halamannya harus bilang begitu -- render
-    terlama yang keukur 6,6 menit, hampir 3x median.
+    median NYATA box ini (lihat median_render_sec). Ini PERKIRAAN dan
+    halamannya harus bilang begitu.
     """
     pos = position(conn, job_id)
     if pos == 0:
         return None
+    med, _ = median_render_sec(conn)
     ahead = pos - 1
-    total = ahead * MEDIAN_RENDER_SEC
+    total = ahead * med
     running = conn.execute(
         "SELECT started_at FROM jobs WHERE status='running' LIMIT 1"
     ).fetchone()
     if running and running["started_at"]:
-        sisa = MEDIAN_RENDER_SEC - (time.time() - running["started_at"])
+        sisa = med - (time.time() - running["started_at"])
         total += max(sisa, 15.0)
     return total
 
