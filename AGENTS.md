@@ -37,3 +37,38 @@ use, and it covers the upload-size problem this repo's default bitrate creates.
 
 `CLAUDE.md` holds the working notes, the house rules and the antislop pointer.
 Read it before changing code.
+
+## Verification is mandatory
+
+Operator rule, 21 Oct 2026: *"WAJIB pakai di semua workflow development kita"*.
+
+Before you hand over development work on this repo, load the
+`create-verification-skill` skill and follow it. It generates a project-local
+verification skill that drives the app the way a user does. Keep it honest with
+`maintain-verification-skill`. Both are installed verbatim from
+`cursor/plugins` (`pstack/skills/`), with only the skills path adapted.
+
+These three are different layers, not substitutes for one another:
+
+- `verification-before-completion` gates the *claim*: no completion claim
+  without fresh evidence.
+- `dogfood` is a *one-off QA sweep* for finding bugs in a session.
+- `create-verification-skill` builds a *durable asset*: `verify-<app>/` plus a
+  maintained `features/` map that outlives the session.
+
+The rules that bite hardest here, each one a bug this repo has already shipped:
+
+- Proof drives the **real user path**, never an internal setter or a test-only
+  endpoint.
+- Capture the **action and the resulting state**, not just the final screen.
+- Check **side effects** (files written, rows inserted, messages sent), not only
+  what is visible.
+- `ready` means **usable**, not "a process answers". A health check can pass
+  while init scripts are still running.
+- Cleanup **never eats the evidence**; proof artifacts outlive the teardown.
+- Never kill by process name. Kill **what you started**.
+- For a dry-run, **measure what it actually skips** instead of trusting its name.
+- A missing precondition makes the journey **report failure**, and the reason
+  goes in that feature's `Gotchas`. Never weaken the journey to make it pass.
+- A generated skill that was never executed is a **draft, not a deliverable**.
+
