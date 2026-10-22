@@ -252,13 +252,14 @@ select{
 """
 
 
-def _halaman(judul, isi, refresh=0):
+def _halaman(judul, isi, refresh=0, status_code=200):
     meta = ('<meta http-equiv="refresh" content="%d">' % refresh) if refresh else ""
     return HTMLResponse(
         "<!doctype html><html lang=id><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         "%s<title>%s</title><style>%s</style></head><body><div class=wrap>%s"
-        "</div></body></html>" % (meta, _e(judul), STYLE, isi)
+        "</div></body></html>" % (meta, _e(judul), STYLE, isi),
+        status_code=status_code,
     )
 
 
@@ -679,7 +680,8 @@ def campaign(request: Request, slug: str):
         return _halaman("Ga ketemo", _nav("campaign")
                         + "<h1>Campaign ga ada di papan</h1>"
                         "<p>Mungkin belum pernah ditarik. "
-                        "<a href=/campaign>Balik ke papan</a></p>")
+                        "<a href=/campaign>Balik ke papan</a></p>",
+                        status_code=404)
     aset = camp.assets(conn, slug)
     qconn = q.connect()
     jobs = q.for_campaign(qconn, slug, limit=12)
@@ -926,7 +928,8 @@ def lihat(request: Request, job_id: int):
     j = q.get(conn, job_id)
     if not j:
         return _halaman("Ga ketemu", "<h1>Job #%d ga ada</h1>"
-                        "<p><a href=/>Balik</a></p>" % job_id)
+                        "<p><a href=/>Balik</a></p>" % job_id,
+                        status_code=404)
 
     st = j["status"]
     refresh = 0
