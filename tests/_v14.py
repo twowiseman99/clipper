@@ -20,6 +20,7 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
@@ -27,8 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import edit
 
-TMP = "/tmp/_v14"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v14". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v14_")
 
 
 def rms_db(path):

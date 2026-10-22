@@ -23,6 +23,7 @@ the clip's own subject matter, and it is not footage of Gaza.
 import os
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -30,8 +31,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 import ai
 import broll_place as bp
 
-TMP = "/tmp/_v20"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v20". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v20_")
 bars = os.path.join(TMP, "bars.mp4")
 subprocess.run(
     ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",

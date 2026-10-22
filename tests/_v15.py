@@ -20,14 +20,18 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
 import broll_place
 
-TMP = "/tmp/_v15"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v15". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v15_")
 base = os.path.join(TMP, "base.mp4")
 ins = os.path.join(TMP, "ins.mp4")
 out_old = os.path.join(TMP, "old.mp4")

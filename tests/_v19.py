@@ -16,14 +16,18 @@ pin the behaviour that replaced it.
 import os
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
 import broll_place as bp
 
-TMP = "/tmp/_v19"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v19". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v19_")
 
 
 def make(path, filt, seconds=6):

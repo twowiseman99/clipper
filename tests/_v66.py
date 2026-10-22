@@ -34,6 +34,7 @@ once by passing a string assertion and being rejected outright by ffmpeg.
 import os
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 
@@ -43,8 +44,11 @@ import edit  # noqa: E402
 
 FFMPEG = edit.FFMPEG
 FFPROBE = getattr(edit, "FFPROBE", "ffprobe")
-TMP = "/tmp/_v66"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v66". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v66_")
 
 
 def _luma(path, at, dur, fps=10, w=96, h=170):

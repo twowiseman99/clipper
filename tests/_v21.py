@@ -18,14 +18,18 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
 import broll_place as bp
 
-TMP = "/tmp/_v21"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v21". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v21_")
 W, H = 360, 640          # same 9:16 shape as the real canvas, cheap to render
 BAND_PX = H * bp.BAND_FRAC
 

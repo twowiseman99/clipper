@@ -25,6 +25,7 @@ minute per source.
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -40,8 +41,19 @@ assert bp.VISION_FINALISTS >= 6, \
      f"14 windows showed the action and neither was in the top 3")
 assert bp.VISION_PARALLEL >= 2, bp.VISION_PARALLEL
 
-TMP = "/tmp/_v25"
-os.makedirs(TMP, exist_ok=True)
+# A per-process directory, NOT a fixed "/tmp/_v25". Measured 22 Oct 2026: two
+# copies of this test running at once (a standalone run overlapping the suite)
+# race on the shared path, and whichever finishes first deletes the OTHER run's
+# busy.mp4 in its cleanup. The victim then fails with a message that names
+# nothing about files — every ffmpeg seek returns empty, _grab_jpeg gives None,
+# _vision_check returns None WITHOUT EVER CALLING THE MODEL, so _pick_window
+# sees asked=False and falls back to `motion 8.7` with no ", shows ...".
+# Reproduced by deleting the fixture mid-run: 4/6 timings gave exactly that
+# (stub called 0 times, bare "motion"), matching the original failure log; a
+# cleanup-time collision instead raises FileNotFoundError on this directory.
+# The giveaway is what is MISSING from the log: the two "router hiccup" lines
+# the stub must print are absent, because the stub never ran.
+TMP = tempfile.mkdtemp(prefix="_v25_")
 busy = os.path.join(TMP, "busy.mp4")
 subprocess.run(
     ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
@@ -68,12 +80,34 @@ def only_one(system, user, images, **kw):
             "shows": "airstrike" if len(seen) >= 7 else "rubble"}
 
 
+
+def _sebab(jumlah, why, busy_path):
+    """Why a count of 0 is not a vision result.
+
+    Measured 22 Oct 2026: when the fixture disappears mid-run (two copies of
+    this test racing on a shared /tmp path), every ffmpeg seek returns empty,
+    _grab_jpeg gives None, and _vision_check returns None WITHOUT CALLING THE
+    MODEL. _pick_window then reports a bare "motion 8.7" -- which is also the
+    PREFIX of the success message "motion 8.7, shows ..." -- so the failure
+    reads like a vision regression. Three measurements chased the wrong layer
+    before the fixture was suspected. If the count is 0, say so here.
+    """
+    import os as _os
+    if jumlah:
+        return ""
+    return (" -- the model was never called (0 calls), so this is not a vision "
+            "verdict at all: every frame grab failed. fixture %s exists=%s. "
+            "A bare 'motion N' with no ', shows ...' is the asked=False "
+            "fallback. why=%r" % (busy_path, _os.path.exists(busy_path), why))
+
 ai.vision_json = only_one
 try:
     at, why = bp._pick_window(busy, 20.0, 16.0, 2.0, "Gaza", "an explosion")
     assert at is not None, \
         f"a frame outside the top 3 was unreachable: {why}"
-    assert len(seen) >= 6, f"only {len(seen)} frames were judged"
+    assert len(seen) >= 6, (
+        f"only {len(seen)} frames were judged"
+        + _sebab(len(seen), why, busy))
 finally:
     ai.vision_json = real
 
@@ -97,7 +131,8 @@ ai.vision_json = slow
 try:
     at, why = bp._pick_window(busy, 20.0, 16.0, 2.0, "Gaza", "an explosion")
     n = len(calls)
-    assert n >= 6, f"expected a wide net, judged {n}"
+    assert n >= 6, (f"expected a wide net, judged {n}"
+                    + _sebab(n, why, busy))
     events = sorted(
         ev for t_enter, t_exit in calls
         for ev in ((t_enter, 1), (t_exit, -1))
@@ -152,7 +187,20 @@ ai.vision_json = flaky
 try:
     at, why = bp._pick_window(busy, 20.0, 16.0, 2.0, "Gaza", "an explosion")
     assert at is not None, f"two bad calls lost the whole source: {why}"
-    assert "airstrike fireball" in why, why
+    # Name the cause in the message. A bare `assert "..." in why` here cost
+    # hours: `why` came back "motion 8.7", which is ALSO the prefix of the
+    # success message ("motion 8.7, shows ..."), so the failure read like a
+    # vision regression when the fixture had simply been deleted underneath.
+    # state["n"] == 0 means the model was never reached at all.
+    assert state["n"] > 0, (
+        f"the vision stub was never called ({state['n']} calls) — every frame "
+        f"grab failed, so this is not a vision verdict at all. Check that "
+        f"{busy} still exists: another process deleting the fixture mid-run "
+        f"produces exactly this. why={why!r}")
+    assert "airstrike fireball" in why, (
+        f"expected the flaky-call recovery to report the accepted frame, got "
+        f"{why!r} (stub ran {state['n']} times; a bare 'motion N' with no "
+        f"', shows ...' is the asked=False fallback, not a verdict)")
 finally:
     ai.vision_json = real
 

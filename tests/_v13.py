@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -59,8 +60,10 @@ assert broll_place.MOTION_MIN < 16.3, "threshold must pass real footage"
 #   v12 shipped          0.37, 0.32  (stills the operator spotted)
 #   v12's one good cut   10.34
 #   v13 after the fix    14.75, 12.24, 11.19
-probe_dir = "/tmp/_v13src"
-os.makedirs(probe_dir, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v13src". Measured 22 Oct 2026: two
+# copies of a test at once (standalone run overlapping the suite) race on the
+# shared path and one deletes the other's fixture mid-run. Proven on _v25.
+probe_dir = tempfile.mkdtemp(prefix="_v13src_")
 still = os.path.join(probe_dir, "still.mp4")
 moving = os.path.join(probe_dir, "moving.mp4")
 subprocess.run(
@@ -107,7 +110,11 @@ assert edit._outro_filters(edit.OUTRO_SECONDS * 2, mood="emotional") == ("", [])
     "a clip barely longer than the outro should get no treatment"
 
 probe_dur = edit.OUTRO_SECONDS * 3 + 1
-probe = "/tmp/_v13probe.mp4"
+# Also per-process: with a fixed "/tmp/_v13probe.mp4" two copies of this test
+# overwrite and then os.remove() each other's probe, so one side hits ffmpeg
+# with a half-written or already-deleted file. Measured 22 Oct 2026.
+probe_dir2 = tempfile.mkdtemp(prefix="_v13probe_")
+probe = os.path.join(probe_dir2, "probe.mp4")
 subprocess.run(
     ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
      f"testsrc=size=320x568:rate=30:duration={probe_dur:.0f}", "-c:v",
@@ -124,6 +131,7 @@ for mood in ("emotional", "hype"):
         capture_output=True, text=True)
     assert res.returncode == 0, f"ffmpeg rejected {mood}: {res.stderr[:300]}"
 os.remove(probe)
+os.rmdir(probe_dir2)
 
 print(f"_v13.py OK — venue 'Gontor' excluded as a trigger, subject kept; "
       f"motion gate {broll_place.MOTION_MIN} separates {measured}; "

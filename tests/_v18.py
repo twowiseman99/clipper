@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -66,8 +67,11 @@ assert "between(t," in hb, f"hype lost its stinger: {hb[:120]}"
 assert hf == [], hf
 
 # --- real ffmpeg: the graph must contain what the mood implies ------------
-TMP = "/tmp/_v18"
-os.makedirs(TMP, exist_ok=True)
+# Per-process directory, NOT a fixed "/tmp/_v18". Measured 22 Oct 2026: two
+# copies of this test at once (standalone run overlapping the suite) race on
+# the shared path and one deletes the other's fixture mid-run. Proven on _v25:
+# the victim fails with a message naming nothing about files.
+TMP = tempfile.mkdtemp(prefix="_v18_")
 src = os.path.join(TMP, "src.mp4")
 out = os.path.join(TMP, "out.mp4")
 subprocess.run(
