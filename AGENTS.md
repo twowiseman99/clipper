@@ -102,12 +102,20 @@ division is not a pass.
 
 Two measurements that already cost a wrong report on this box:
 
-- **`/v1/models` is a catalogue, not an entitlement check.** On 9router 0.5.104
-  `ag/gemini-4-argon-high` is listed and returns upstream `404 Requested entity
-  was not found`, as does `ag/gemini-3.7-flash-high`. Never call a model
-  available because it appears in the list: send one real request and run what
-  comes back. Verified working through the router: `ag/gemini-3.8-flash-high`,
-  `ag/claude-sonnet-5-5`.
+- **`agy` is the working path for both workers — verified, not assumed.**
+  Measured 22 Oct 2026 with `agy 1.4.3` (login held in the `agylogin` tmux
+  session): `gemini-4-argon-high` and `gemini-3.8-flash-high` both exit 0 and
+  return code that **runs and gives the right answer**. Invoke it with the flags
+  in front and the prompt glued to `--print`:
+  `agy --model gemini-4-argon-high --print="$(cat brief.txt)"`. A bare `--print`
+  swallows the next token as its prompt, `--model` is dropped, and the task
+  silently runs on the default model.
+- **`/v1/models` on 9router is a catalogue, not an entitlement check.** On
+  0.5.104 `ag/gemini-4-argon-high` is listed yet returns upstream `404 Requested
+  entity was not found` (same for `ag/gemini-3.7-flash-high`) — so the router is
+  the wrong instrument for argon, not evidence that argon is unavailable. Never
+  call a model available *or* dead from the list alone: send one real request
+  through the path production uses and run what comes back.
 - The router **answers with streaming SSE even when `stream=False`**, so
   `json.loads(body)` fails at `line 1 column 1` and a healthy model looks
   broken. Assemble the content from the `data:` lines before judging it.
