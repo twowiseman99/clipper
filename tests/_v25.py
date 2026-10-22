@@ -78,30 +78,57 @@ finally:
     ai.vision_json = real
 
 # --- parallel, not sequential -----------------------------------------
-# Each stub call sleeps; wall time proves the calls overlap. Sequential would
-# be finalists x 0.4s, parallel is about that divided by the worker count.
+# Each stub call sleeps and records its (enter, exit) interval; overlap
+# proves the calls run concurrently regardless of machine load.
 calls = []
 
 
 def slow(system, user, images, **kw):
+    t_enter = time.time()
     time.sleep(0.4)
+    t_exit = time.time()
     with lock:
-        calls.append(1)
+        calls.append((t_enter, t_exit))
     return {"usable": True, "on_topic": True, "shows_action": False,
             "shows": "rubble"}
 
 
 ai.vision_json = slow
 try:
-    t0 = time.time()
     at, why = bp._pick_window(busy, 20.0, 16.0, 2.0, "Gaza", "an explosion")
-    elapsed = time.time() - t0
     n = len(calls)
     assert n >= 6, f"expected a wide net, judged {n}"
-    sequential = n * 0.4
-    # Allow generous slack for ffmpeg probing, but it must beat sequential.
-    assert elapsed < sequential, \
-        f"{n} calls took {elapsed:.1f}s; sequential would be {sequential:.1f}s"
+    events = sorted(
+        ev for t_enter, t_exit in calls
+        for ev in ((t_enter, 1), (t_exit, -1))
+    )
+    active = 0
+    max_overlap = 0
+    for _, delta in events:
+        active += delta
+        if active > max_overlap:
+            max_overlap = active
+    # QA rejected `max_overlap >= 2` (22 Oct 2026): a pool degraded from 4 to
+    # 2 workers still passed GREEN. My first fix (`>= VISION_PARALLEL`) ALSO
+    # leaked — measured: healthy 12, degraded-to-2 exactly 4, floor exactly 4,
+    # so it passed right on the line.
+    #
+    # The pools NEST (the window pool at broll_place.py:531 runs inside the
+    # frame pool at :410), so honest concurrency is a MULTIPLE of the setting,
+    # not the setting itself. Measured on this box:
+    #   VISION_PARALLEL=4 healthy        -> overlap 12   (>= 8  ok)
+    #   VISION_PARALLEL=4 degraded to 2  -> overlap  4   (>= 8  FAILS, correct)
+    #   VISION_PARALLEL=2 set honestly   -> overlap  4   (>= 4  ok)
+    # 2*VISION_PARALLEL is the only floor that separates "someone degraded the
+    # pool" from "the operator legitimately lowered the setting" — a hardcoded
+    # 4 or 12 cannot tell those apart, and goes stale on retune.
+    floor = 2 * bp.VISION_PARALLEL
+    assert max_overlap >= floor, \
+        (f"expected >= {floor} overlapping calls (2x VISION_PARALLEL="
+         f"{bp.VISION_PARALLEL}; the window pool nests inside the frame pool) "
+         f"across {n} calls, got {max_overlap} — a pool quietly degraded to "
+         f"fewer workers lands here")
+
     assert at is None and "no window" in why, (at, why)
 finally:
     ai.vision_json = real

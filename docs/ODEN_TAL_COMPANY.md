@@ -43,7 +43,7 @@ listed are installed and enabled in Hermes.
 
 **Skills:** `python-review-and-qa`, `writing-plans`, `systematic-debugging`
 
-### Quality — decides whether it ships
+### Quality — vetoes assets, not the clip
 
 | Agent | Owns |
 |---|---|
@@ -56,6 +56,49 @@ listed are installed and enabled in Hermes.
 
 This division outranks Engineering on ship decisions. Build velocity does not
 override evidence.
+
+#### What the veto can and cannot do (measured 22 Oct 2026)
+
+Be precise here, because the earlier wording of this charter claimed more than
+the code does.
+
+**The veto is real at ASSET level.** A gate that calls `audit.rejected(...)`
+drops the thing it judged: a b-roll clip failing `broll.credible()` is not
+used (`broll.py:565` rejects, then `continue` — the candidate never reaches
+`out[]`), a BGM track clashing with the clip's mood is not laid down. Those
+rejections happen before the asset reaches the timeline, and `warnings[]` plus
+the saved `.audit.json` record every one.
+
+**But "rejected" does not always mean "dropped" — one path FALLS BACK**
+(found by an independent reviewer, 22 Oct 2026). At `job.py:1263` the freeze
+gate rejects when no frame qualifies, and the clip then proceeds on a
+*mechanical* frame (`fallback: mechanical frame` in the same verdict). So the
+honest reading of a rejection is "the gate refused to endorse this asset", and
+whether that means dropped or substituted depends on the gate. Both outcomes
+are recorded; neither halts the render.
+
+
+**The veto does NOT stop a clip from shipping.** No code path turns a quality
+verdict into a failed render. Measured in `job.py`: of the three `ok: False`
+returns, two are exception handlers (queue busy ~1605, unhandled error ~1615)
+and one is CLI argument validation (`--content is required`, ~1547). None of
+them is a quality decision. The ledger is
+emitted and saved *after* `result` is already assembled (`job.py:1405-1432`),
+so it cannot change the outcome, and `upload_youtube.py` never reads the ledger
+at all. A clip with rejected assets still ships, with those rejections listed
+in `warnings[]`.
+
+**That is the operator's deliberate choice, not an oversight** (22 Oct 2026):
+a render refusing to deliver costs more than a clip delivering with a noted
+flaw. So the honest formulation is: Quality can veto any ASSET and every
+rejection is recorded, but Quality cannot block delivery of the clip itself —
+that call stays with the operator, who reads `warnings[]` and the
+`.audit.json`.
+
+If that trade-off is ever revisited, the change belongs in `job.py` where
+`result` is assembled (an `ok: false` exit driven by `led.counts()`), and this
+section must be rewritten in the same commit. Do not let the charter drift
+ahead of the code again.
 
 ### Security — audits what the assistant wrote
 
@@ -125,7 +168,7 @@ Client request
    ├─ Content      → what should it say / how should it cut?
    ├─ Engineering  → build the smallest thing that does it
    ├─ Security     → audit the new code (Pass 1 before enhancing)
-   ├─ Quality      → VETO POINT. evidence, or it does not ship
+   ├─ Quality      → VETO POINT for ASSETS. evidence, or the asset is dropped
    └─ Delivery     → artifact + what is still broken
 ```
 
@@ -133,8 +176,10 @@ Two rules on the flow:
 
 - **Security audits before the enhancement, not after.** Reviewing last means
   reviewing code that other work is already built on.
-- **Quality can send it back at any point.** There is no deadline that
-  outranks a known-broken clip.
+- **Quality can send an ASSET back at any point**, and every rejection lands in
+  `warnings[]`. It cannot hold the clip itself — see "What the veto can and
+  cannot do" above. A known-broken clip ships with its flaws named; the
+  operator decides whether to publish it.
 
 ---
 
