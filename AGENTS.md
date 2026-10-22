@@ -72,3 +72,48 @@ The rules that bite hardest here, each one a bug this repo has already shipped:
   goes in that feature's `Gotchas`. Never weaken the journey to make it pass.
 - A generated skill that was never executed is a **draft, not a deliverable**.
 
+## Who writes the code
+
+Operator rule, 22 Oct 2026: *"selama argon high dan gemini flash 3.8 high bisa
+coding, pake itu dulu sampai habis, kalian dan agency agent tugasnya review
+semua sampai clear baru claude turun tangan tapi ttp pakai agency agent buat
+saling review"*.
+
+Coding capacity is spent in order. Load the `foreman` skill for the full
+procedure; the rungs are:
+
+1. `gemini-4-argon-high` — **through the `agy` CLI only**.
+2. `gemini-3.8-flash-high`.
+3. Claude — only after rungs 1 and 2 are exhausted.
+
+**A rung change needs a quoted limit error from the worker, in the report.**
+"Argon seemed slow", "this task is too hard for flash" and "faster if I write
+it myself" are not conditions, they are violations. A wrong diff is a FAIL that
+earns a revision brief (three rounds at most), not an escalation.
+
+**Review never escalates with the coding.** Whoever wrote the diff, it is
+reviewed by the lead plus the agency agents per `audit.DIVISIONS` — and that
+includes Claude's own output at rung 3. Claude writing the code does not make
+the code trusted. An agent never reviews what it wrote.
+
+*Clear* means every division that should have run **returned a verdict**. A
+division that recorded nothing prints DID NOT RUN and blocks the ship; a silent
+division is not a pass.
+
+Two measurements that already cost a wrong report on this box:
+
+- **`/v1/models` is a catalogue, not an entitlement check.** On 9router 0.5.104
+  `ag/gemini-4-argon-high` is listed and returns upstream `404 Requested entity
+  was not found`, as does `ag/gemini-3.7-flash-high`. Never call a model
+  available because it appears in the list: send one real request and run what
+  comes back. Verified working through the router: `ag/gemini-3.8-flash-high`,
+  `ag/claude-sonnet-5-5`.
+- The router **answers with streaming SSE even when `stream=False`**, so
+  `json.loads(body)` fails at `line 1 column 1` and a healthy model looks
+  broken. Assemble the content from the `data:` lines before judging it.
+
+Argon's known failure mode is not laziness, it is **collateral edits**: it has
+rewritten files the brief told it not to touch. Run `git diff --stat` and revert
+anything outside the target file before accepting the work, and re-measure its
+reported numbers yourself.
+
