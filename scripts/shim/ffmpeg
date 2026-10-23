@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Shim PATH bernama "ffmpeg" — untuk pemanggil yang TIDAK punya env hook.
+#
+# clipper/edit.py punya CLIPPER_FFMPEG (baris 43), jadi di sana pagar bisa
+# dipasang lewat env. Tapi short1/build_short.py memanggil literal "ffmpeg"
+# lewat sh([...]) tanpa hook apa pun. Menambah hook ke file itu = mengubah
+# kode render; menaruh direktori ini di depan PATH = nol baris kode berubah
+# dan tiap "ffmpeg" otomatis lewat pagar.
+#
+# Dipakai begini di skrip cron:
+#   export PATH=/home/ubuntu/clipper/scripts/shim:$PATH
+#
+# Alasan angkanya ada di ../ffguard.sh (4x OOM 23 Okt, ffmpeg 7,4 GB, cgroup
+# gateway, nol lock antar-job).
+#
+# Penting: panggil ffguard dengan path ffmpeg ASLI, bukan "ffmpeg" — kalau
+# tidak, shim ini memanggil dirinya sendiri lewat PATH dan jadi rekursi tak
+# berujung.
+exec /home/ubuntu/clipper/scripts/ffguard.sh /usr/bin/ffmpeg "$@"
