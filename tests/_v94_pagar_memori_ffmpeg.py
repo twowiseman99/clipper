@@ -26,11 +26,25 @@ for p in (FFGUARD, SHIM, PATHSHIM):
 ff = open(FFGUARD, encoding="utf-8").read()
 
 # --- 2. batas memori betul-betul dipasang ----------------------------------
-cek("MemoryMax dipasang", "MemoryMax" in ff)
-cek("MemorySwapMax=0 dipasang", "MemorySwapMax=0" in ff,
+# Dibaca dari KODE saja, komentar dibuang dulu.
+#
+# Mutasi menangkap gate versi pertama BOCOR di sini: mutan mencabut
+# `-p MemorySwapMax=0` dari baris perintah (baris 78) dan gate tetap HIJAU,
+# karena string yang sama masih ada di KOMENTAR baris 74. Persis kelas
+# kesalahan yang sudah tercatat di repo ini pagi yang sama: sapuan path /tmp
+# bilang "bersih" karena sisa hit-nya ada di komentar yang baru ditulis.
+# Aturannya: gate yang memeriksa keberadaan argumen WAJIB grep kode, bukan
+# seluruh berkas.
+ff_kode = "\n".join(
+    l for l in ff.split("\n") if not l.lstrip().startswith("#"))
+
+cek("MemoryMax dipasang di KODE", "MemoryMax" in ff_kode)
+cek("MemorySwapMax=0 dipasang di KODE", "MemorySwapMax=0" in ff_kode,
     "tanpa ini box swap-thrash dulu sebelum ffmpeg mati, dan ITU yang "
-    "bikin SSH ga bisa masuk")
-cek("systemd-run --scope", "systemd-run" in ff and "--scope" in ff)
+    "bikin SSH ga bisa masuk. Dicek di kode, bukan di komentar: mutan yang "
+    "mencabut argumen ini pernah lolos karena komentarnya masih menyebutnya")
+cek("systemd-run --scope di KODE",
+    "systemd-run" in ff_kode and "--scope" in ff_kode)
 
 # --- 3. NOL suntikan argumen secara default -------------------------------
 m = re.search(r"^THREADS=\$\{FFGUARD_THREADS(.-?)\}", ff, re.M)
