@@ -125,128 +125,20 @@ rewritten files the brief told it not to touch. Run `git diff --stat` and revert
 anything outside the target file before accepting the work, and re-measure its
 reported numbers yourself.
 
-## Akses Server
+## Akses server & runbook darurat
 
-Server: `43.157.203.118` (Sumopod, Ubuntu 24.04 LTS, user `ubuntu`).
-**Nol password di file ini.** Kalau butuh sandi, minta ke operator langsung —
-jangan pernah ditulis di sini atau di channel grup.
+Catatan lengkapnya **bukan di sini** — ada di `~/vault/Operasi/Akses server.md`.
 
-**Kalau Kelvin minta cara masuk server, tanya dulu dia pakai Mac atau PC.**
-Jawabannya beda, dan ngasih yang salah bikin dia stuck di prompt password.
+Alasannya diukur, bukan selera: `AGENTS.md` itu **per-repo**. Hermes baca
+context file dari cwd lalu naik maksimal 6 level, dan `$HOME` **sengaja
+dilewati** (`agent/coding_context.py:410`: *"AGENTS.md sitting in the home
+directory is global user config, not a project-root signal"*). Jadi runbook
+lintas-project yang ditaruh di sini **tidak terbaca** waktu kerja di
+`projects/stockstory` atau `projects/athena-clip` — dan runbook darurat yang
+tidak terbaca saat darurat itu tidak berguna.
 
-### Dari Mac
+Isinya: cara masuk server (Mac vs Windows), fakta `sudo -n` / systemd user /
+path CLI, pitfall `pkill -f`, runbook server macet karena OOM, dan status job
+render yang sedang di-pause.
 
-SSH key udah terpasang, jadi tanpa password:
-
-```bash
-ssh sumo                  # masuk shell
-ssh sumo 'perintah'       # jalanin langsung tanpa masuk shell
-```
-
-`sumo` itu alias di `~/.ssh/config` **di Mac-nya**, bukan di server. Jadi
-perintah ini **tidak bisa** diverifikasi dari dalam box — ini instruksi buat
-mesin klien, bukan klaim terukur.
-
-### Dari PC (Windows)
-
-Pakai password:
-
-```powershell
-ssh ubuntu@43.157.203.118
-```
-
-Biar ga ditanya password terus, setup key **sekali** di PowerShell:
-
-```powershell
-ssh-keygen -t ed25519
-type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh ubuntu@43.157.203.118 "cat >> ~/.ssh/authorized_keys"
-```
-
-### Fakta server ini — diukur 23 Okt 2026, bukan diasumsikan
-
-- **`sudo` tanpa password**, tapi pakai `sudo -n` biar gagal terang-terangan
-  kalau ternyata dia minta sandi (diukur: `sudo -n true` → sukses).
-- **Hermes jalan sebagai service USER, bukan sistem.** Ini diukur dua arah:
-  `systemctl --user is-active hermes-gateway` → `active`, sementara
-  `systemctl is-active hermes-gateway` (sistem) → `inactive`. Jadi lewat SSH
-  non-login, set dulu runtime dir-nya:
-
-  ```bash
-  export XDG_RUNTIME_DIR=/run/user/$(id -u)
-  systemctl --user status|start|stop hermes-gateway
-  ```
-
-  Tanpa `XDG_RUNTIME_DIR`, `systemctl --user` ga nemu bus-nya dan errornya
-  kelihatan kayak service-nya ga ada.
-- **CLI hermes** di `~/.hermes/hermes-agent/venv/bin` (diukur: `hermes` ada di
-  situ). Lewat `ssh` langsung dia **ga ada di PATH** — tambahin dulu atau pakai
-  path penuh.
-- **Kalau login biasa langsung "Connection closed", jangan pakai `-t`.** Kirim
-  perintahnya langsung: `ssh sumo 'perintah'`.
-
-Satu aturan dari dalam: **restart/stop `hermes-gateway` dari dalam sesi Hermes
-diblokir guard, dan itu benar** — prosesnya bunuh interpreter-nya sendiri, jadi
-nol yang bisa mengonfirmasi hasilnya. Dari SSH luar aman; dari dalam sesi pakai
-`systemd-run --user --on-calendar='<tanggal jam absolut>'` manggil script
-idempotent di `~/.hermes/scripts/`.
-
-### Pitfall
-
-- **`pkill -f` dengan kata yang muncul di perintahnya sendiri bikin shell bunuh
-  diri** — pola `-f` dicocokkan ke seluruh command line, termasuk command line
-  shell yang sedang mengetik pola itu. Pakai trik kurung:
-
-  ```bash
-  pkill -f [f]fmpeg
-  pkill -f [h]ermes_cli
-  ```
-
-  `[f]fmpeg` cocok ke string `ffmpeg`, tapi **tidak** cocok ke teks
-  `[f]fmpeg` di command line sendiri. Buat sekadar menghitung, pakai
-  `pgrep -x ffmpeg` (nama proses persis, bukan command line).
-- **Jangan suruh Kelvin ketik password sebelum prompt `password:` muncul.**
-  Karakter yang diketik sebelum prompt siap ditelan terminal, bukan dikirim —
-  jadi kelihatan seperti sandinya salah padahal sandinya benar.
-
-### Darurat: server macet (SSH timeout / banner exchange)
-
-Penyebab terakhir (23 Okt 2026): satu proses `ffmpeg` makan **~7,4 GB** dari
-RAM 7,4 GB, swap 2 GB habis, server OOM. Kernel log:
-
-```
-Out of memory: Killed process (ffmpeg) anon-rss:7422720kB, UID:1000
-Out of memory: Killed process (ffmpeg) anon-rss:7430644kB
-```
-
-1. **Kalau SSH tidak tembus, restart dari dashboard Sumopod.** Box yang sudah
-   OOM tidak bisa menerima SSH baru — tunggu di SSH itu sia-sia.
-2. **Dari Mac**, tunggu SSH siap lalu matikan pemicunya:
-
-   ```bash
-   until ssh-keyscan -T 5 43.157.203.118 2>/dev/null | grep -q ssh; do sleep 5; done
-   ssh sumo 'export XDG_RUNTIME_DIR=/run/user/$(id -u); pkill -f [f]fmpeg; systemctl --user stop hermes-gateway; free -h; uptime'
-   ```
-
-   `ssh-keyscan` dipakai sebagai probe karena dia balik begitu port 22 jawab,
-   tanpa perlu otentikasi.
-3. **Lakukan dalam 9 menit setelah boot** — render jebol sekitar menit 9–10,
-   jadi itu jendela waktu yang ada sebelum box tidak bisa dimasuki lagi.
-
-### Status job render (per 23 Okt 2026)
-
-Di-pause sampai fix memori `ffmpeg` terbukti (diukur lewat `cronjob list`,
-ketiganya `state: paused`, `paused_at` 17:26):
-
-| job_id | nama | catatan |
-|---|---|---|
-| `4688dbed4c44` | `clipper-render-tick` | tiap 3 menit |
-| `455ebcd2fa17` | `bio1-render-broll` | tiap 30 menit, `last_status: error` |
-| `8cc06f546710` | `stockstory-scene-filler` | tiap 10 menit |
-
-**Resume satu per satu**, dan hanya setelah render percobaan dengan
-`/usr/bin/time -v` menunjukkan **Max RSS di bawah 1,5 GB**.
-
-Cron sistem juga sedang dihentikan (diukur: `systemctl is-active cron` →
-`inactive`, tapi masih `enabled` jadi dia nyala lagi sendiri kalau box reboot —
-ini bukan pagar permanen). Nyalakan lagi setelah fix: `sudo -n systemctl start cron`.
-
+**Nol password di vault maupun di sini.** Kalau butuh sandi, minta ke operator.
