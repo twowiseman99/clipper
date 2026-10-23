@@ -37,8 +37,9 @@ mkdir -p "$MARK" "$PROXY"
 # skrip ini. Pagar yang sudah diketahui perlu, tidak pernah terpasang; 23 Okt
 # ffmpeg OOM empat kali dan menarik hermes-gateway mati bersamanya tiga kali.
 #
-# ffmpeg di skrip ini (pembuatan proxy) dan ffmpeg di dalam
-# build_video_scenes.py dua-duanya lewat shim yang sama, jadi:
+# ffmpeg di skrip ini (pembuatan proxy) lewat $FFG langsung; ffmpeg di dalam
+# build_video_scenes.py lewat PATH shim di bawah (dia memanggil "ffmpeg"
+# literal, jadi env saja TIDAK menolong). Dua jalur, dua mekanisme:
 #   * MemoryMax -> yang mati cuma ffmpeg, bukan box
 #   * flock di SATU path -> render bio1 dan render clipper tidak bisa jalan
 #     bersamaan. Sebelum ini bio1 pakai /tmp/render_broll.lock sendiri
@@ -54,6 +55,17 @@ export FFGUARD_MEMMAX=${FFGUARD_MEMMAX:-3G}
 # render tidak berubah, jadi pagar hanya membatasi MEMORI -- nol sentuhan ke
 # argumen ffmpeg. Batas thread sudah ada di edit.py lewat CLIPPER_THREADS,
 # dan box ini cuma 2 vCPU sehingga default cpu_count() memang sudah 2.
+# PATH shim WAJIB, dan ini LUBANG YANG KEBUKTI BOCOR 23 Okt 19:06:43.
+#
+# CLIPPER_FFMPEG saja TIDAK CUKUP di sini: build_video_scenes.py memanggil
+# "ffmpeg" LITERAL di lima tempat (baris 75, 117, 203, 263, 275) dan tidak
+# pernah membaca env itu. Komentar di atas sempat mengklaim "dua-duanya lewat
+# shim yang sama" -- itu KLAIM SAYA YANG SALAH, dan kernel membuktikannya:
+#   19:06:43 ffmpeg pid 59223 anon-rss 7.237.136 kB, global_oom,
+#            task_memcg=.../hermes-gateway.service
+# Pola PERSIS insiden 16:14-17:19. Pagar yang terpasang di satu jalur tidak
+# menolong jalur yang tidak melewatinya.
+export PATH=/home/ubuntu/clipper/scripts/shim:$PATH
 FFG=/home/ubuntu/clipper/scripts/ffguard.sh
 
 SCENES="M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15 M16 M17 M18 M19 M20"

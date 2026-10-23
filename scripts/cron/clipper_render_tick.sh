@@ -28,6 +28,8 @@ cd /home/ubuntu/clipper
 # kenal: bio1 pakai /tmp/render_broll.lock, tick ini cuma mengandalkan claim()
 # di SQLite. Dua mekanisme berbeda = nol eksklusi antar-job.
 export CLIPPER_FFMPEG=/home/ubuntu/clipper/scripts/ffmpeg_guarded.sh
+export PATH=/home/ubuntu/clipper/scripts/shim:$PATH
+
 export FFGUARD_MEMMAX=${FFGUARD_MEMMAX:-3G}
 # FFGUARD_THREADS SENGAJA TIDAK DISET. Diukur 23 Okt 2026: render yang sama
 # tanpa pagar dua kali menghasilkan md5 IDENTIK (8a70bc4d, dua kali),

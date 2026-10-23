@@ -55,12 +55,42 @@ for n in wajib_pagar:
     if not os.path.exists(p):
         continue
     isi = open(p, encoding="utf-8").read()
-    pakai = ("CLIPPER_FFMPEG" in isi or "scripts/shim" in isi
-             or "ffguard" in isi)
-    assert pakai, (
+    # Komentar DIBUANG dulu. Versi pertama gate ini membaca seluruh file dan
+    # lolos pada bio1_render_broll.sh karena kata "shim" ada di sebuah
+    # KOMENTAR yang mengklaim shim terpasang — padahal PATH shim belum pernah
+    # dipasang di sana. Satu jam kemudian ffmpeg bio1 memegang 7,2 GB dan
+    # kernel mencatat global_oom lagi (19:06). Komentar bukan pagar.
+    kode = "\n".join(b for b in isi.split("\n")
+                     if not b.lstrip().startswith("#"))
+
+    # DUA syarat, bukan salah satu. `ffguard` saja tidak cukup: bio1 memakai
+    # "$FFG" untuk ffmpeg-nya sendiri sementara ffmpeg DI DALAM
+    # build_video_scenes.py (5 pemanggilan "ffmpeg" literal) lewat begitu saja.
+    # Pemanggil yang tidak punya env hook hanya tertangkap oleh PATH shim.
+    ada_env = "CLIPPER_FFMPEG" in kode
+    ada_shim = "scripts/shim" in kode
+    ada_wrap = "ffguard" in kode
+    # PATH shim menangkap SEMUA pemanggilan (termasuk "ffmpeg" literal di dalam
+    # modul Python), jadi shim sendirian sudah cukup. env CLIPPER_FFMPEG sendirian
+    # TIDAK cukup: 7 modul clipper (broll.py, emphasis.py, freeze_pick.py, ...)
+    # memanggil "ffmpeg" literal dan tidak pernah membaca env itu.
+    assert ada_shim or (ada_env and ada_wrap), (
         f"{n} yang DIJALANKAN cron tidak memakai pagar memori — satu ffmpeg "
-        "bisa menarik hermes-gateway mati lagi (terjadi 3x pada 23 Okt 2026)")
-    assert "export FFGUARD_THREADS=" not in isi, (
+        "bisa menarik hermes-gateway mati lagi (terjadi 3x pada 23 Okt 2026). "
+        f"env={ada_env} shim={ada_shim} wrapper={ada_wrap}")
+
+    # Skrip yang memanggil Python yang punya ffmpeg literal WAJIB punya PATH
+    # shim; env saja tidak menjangkau mereka.
+    if "python" in kode or ".venv/bin/python" in kode:
+        assert ada_shim, (
+            f"{n} menjalankan Python tapi tidak memasang PATH shim. Modul "
+            "Python di repo ini memanggil \"ffmpeg\" literal dan TIDAK membaca "
+            "CLIPPER_FFMPEG, jadi ffmpeg-nya lolos dari pagar. Inilah yang "
+            "menyebabkan OOM 19:06 pada 23 Okt 2026. Tambahkan: "
+            "export PATH=/home/ubuntu/clipper/scripts/shim:$PATH")
+        cek += 1
+
+    assert "export FFGUARD_THREADS=" not in kode, (
         f"{n} menyuntik FFGUARD_THREADS; itu menggeser bit keluaran render "
         "dan operator minta hasil clip tidak berubah")
     cek += 2
