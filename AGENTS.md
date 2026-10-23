@@ -190,3 +190,63 @@ nol yang bisa mengonfirmasi hasilnya. Dari SSH luar aman; dari dalam sesi pakai
 `systemd-run --user --on-calendar='<tanggal jam absolut>'` manggil script
 idempotent di `~/.hermes/scripts/`.
 
+### Pitfall
+
+- **`pkill -f` dengan kata yang muncul di perintahnya sendiri bikin shell bunuh
+  diri** — pola `-f` dicocokkan ke seluruh command line, termasuk command line
+  shell yang sedang mengetik pola itu. Pakai trik kurung:
+
+  ```bash
+  pkill -f [f]fmpeg
+  pkill -f [h]ermes_cli
+  ```
+
+  `[f]fmpeg` cocok ke string `ffmpeg`, tapi **tidak** cocok ke teks
+  `[f]fmpeg` di command line sendiri. Buat sekadar menghitung, pakai
+  `pgrep -x ffmpeg` (nama proses persis, bukan command line).
+- **Jangan suruh Kelvin ketik password sebelum prompt `password:` muncul.**
+  Karakter yang diketik sebelum prompt siap ditelan terminal, bukan dikirim —
+  jadi kelihatan seperti sandinya salah padahal sandinya benar.
+
+### Darurat: server macet (SSH timeout / banner exchange)
+
+Penyebab terakhir (23 Okt 2026): satu proses `ffmpeg` makan **~7,4 GB** dari
+RAM 7,4 GB, swap 2 GB habis, server OOM. Kernel log:
+
+```
+Out of memory: Killed process (ffmpeg) anon-rss:7422720kB, UID:1000
+Out of memory: Killed process (ffmpeg) anon-rss:7430644kB
+```
+
+1. **Kalau SSH tidak tembus, restart dari dashboard Sumopod.** Box yang sudah
+   OOM tidak bisa menerima SSH baru — tunggu di SSH itu sia-sia.
+2. **Dari Mac**, tunggu SSH siap lalu matikan pemicunya:
+
+   ```bash
+   until ssh-keyscan -T 5 43.157.203.118 2>/dev/null | grep -q ssh; do sleep 5; done
+   ssh sumo 'export XDG_RUNTIME_DIR=/run/user/$(id -u); pkill -f [f]fmpeg; systemctl --user stop hermes-gateway; free -h; uptime'
+   ```
+
+   `ssh-keyscan` dipakai sebagai probe karena dia balik begitu port 22 jawab,
+   tanpa perlu otentikasi.
+3. **Lakukan dalam 9 menit setelah boot** — render jebol sekitar menit 9–10,
+   jadi itu jendela waktu yang ada sebelum box tidak bisa dimasuki lagi.
+
+### Status job render (per 23 Okt 2026)
+
+Di-pause sampai fix memori `ffmpeg` terbukti (diukur lewat `cronjob list`,
+ketiganya `state: paused`, `paused_at` 17:26):
+
+| job_id | nama | catatan |
+|---|---|---|
+| `4688dbed4c44` | `clipper-render-tick` | tiap 3 menit |
+| `455ebcd2fa17` | `bio1-render-broll` | tiap 30 menit, `last_status: error` |
+| `8cc06f546710` | `stockstory-scene-filler` | tiap 10 menit |
+
+**Resume satu per satu**, dan hanya setelah render percobaan dengan
+`/usr/bin/time -v` menunjukkan **Max RSS di bawah 1,5 GB**.
+
+Cron sistem juga sedang dihentikan (diukur: `systemctl is-active cron` →
+`inactive`, tapi masih `enabled` jadi dia nyala lagi sendiri kalau box reboot —
+ini bukan pagar permanen). Nyalakan lagi setelah fix: `sudo -n systemctl start cron`.
+
