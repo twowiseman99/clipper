@@ -45,6 +45,18 @@ USER_AGENT = "clipper-audit-watch/1.0 (+https://github.com/twowiseman)"
 # decision rather than whatever fell off the end.
 MAX_MESSAGES = int(os.environ.get("AUDIT_WATCH_MAX_MESSAGES", "3"))
 
+# How many RENDERS one tick may deliver. MAX_MESSAGES caps ONE ledger;
+# nothing capped how many ledgers go out TOGETHER. run_once() looped over
+# every pending file, so N renders waiting = N x up to 3 messages fired in
+# one burst. That is the shape that already bit us once: the comment above
+# records a single render taking 179 messages, and the state file records a
+# 70-ledger backlog that the operator deliberately chose NOT to replay
+# because clearing it would be "a 70-message burst, ~84k chars, not undoable".
+#
+# A cap turns a burst into a queue: the cron job runs every 15 minutes, so
+# leftovers go out on the next tick instead of all at once. Nothing is lost —
+# a ledger is only marked sent after it is actually POSTED.
+MAX_LEDGERS = int(os.environ.get("AUDIT_WATCH_MAX_LEDGERS", "4"))
 
 def _narrator():
     """The Phase 2 narration callable, or None when it cannot be had.
@@ -158,6 +170,16 @@ def run_once(webhook):
     todo = pending(state)
     if not todo:
         return 0
+    # Cap the BURST, not the backlog. Leftovers are not dropped: `pending`
+    # recomputes from disk every tick, so what is skipped here is simply the
+    # head of the next run 15 minutes later. Reported so a backlog is visible
+    # instead of looking like the channel went quiet.
+    ekstra = len(todo) - MAX_LEDGERS
+    if ekstra > 0:
+        todo = todo[:MAX_LEDGERS]
+        print(f"audit_watch: {ekstra} ledger lagi nunggu tick berikutnya "
+              f"(batas {MAX_LEDGERS}/tick biar channel ga kebanjiran)",
+              file=sys.stderr)
     sent = 0
     for path in todo:
         try:
