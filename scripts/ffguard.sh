@@ -48,19 +48,23 @@ if [ $# -eq 0 ]; then
   exit 64
 fi
 
+cmd=("$@")
+
 catat() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null || true; }
 
-# -threads disuntik HANYA kalau pemanggil belum menyetelnya sendiri, supaya
-# tuning yang sudah ada (edit.py:3904 pakai THREADS dari env) tidak ketimpa.
-#
-# DAN hanya kalau FFGUARD_THREADS tidak kosong. Diukur 23 Okt 2026: render
-# yang sama tanpa pagar dua kali menghasilkan md5 IDENTIK (8a70bc4d, dua
-# kali) sementara lewat pagar jadi 6e4e2c6b dengan ukuran byte yang SAMA
-# persis. Jadi renderer ini deterministik dan pagarlah yang menggeser bit-nya
-# -- lewat satu argumen yang disuntik. Operator minta hasil render tidak
-# berubah, jadi suntikan ini harus bisa dimatikan: FFGUARD_THREADS= (kosong)
-# berarti jangan sentuh argumen sama sekali.
-cmd=("$@")
+# ANTI-DEADLOCK & ANTI-REKURSI:
+# Jika pemanggil luar sudah memanggil ffguard (misal bio1_render_broll.sh),
+# dan perintah di dalamnya memanggil "ffmpeg" yang mengarah ke shim PATH,
+# ffguard anak TIDAK BOLEH mencoba mengambil flock lagi (deadlock bapak-anak!)
+# dan tidak perlu systemd-run bersarang. Cukup exec langsung binary aslinya.
+if [ "${_FFGUARD_DEPTH:-0}" -ge 1 ]; then
+  real_cmd=("${cmd[@]}")
+  if [ "${real_cmd[0]}" = "ffmpeg" ] || [ "${real_cmd[0]}" = "/home/ubuntu/clipper/scripts/shim/ffmpeg" ]; then
+    real_cmd[0]="/usr/bin/ffmpeg"
+  fi
+  exec "${real_cmd[@]}"
+fi
+export _FFGUARD_DEPTH=1
 if [ -n "$THREADS" ] && { [ "${cmd[0]}" = "ffmpeg" ] || [ "${cmd[0]##*/}" = "ffmpeg" ]; }; then
   ada_threads=0
   for a in "${cmd[@]}"; do [ "$a" = "-threads" ] && ada_threads=1 && break; done

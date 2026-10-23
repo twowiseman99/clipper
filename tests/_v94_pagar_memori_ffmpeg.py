@@ -135,6 +135,31 @@ cek("C probe tidak dicap gagal", "probe rc=1" in isi,
 cek("D nol -threads disuntik", "-threads" not in isi,
     f"pagar menyuntik argumen; itu menggeser bit keluaran. log:\n{isi[-400:]}")
 
+# ARAH E: anti-deadlock reentrant (ffguard memanggil ffguard).
+# Diukur 23 Okt: bio1_render_broll.sh memanggil ffguard, lalu di dalamnya
+# build_video_scenes memanggil "ffmpeg" yang mengarah ke PATH shim. Tanpa
+# deteksi _FFGUARD_DEPTH, ffguard kedua mencoba mengambil flock yang sama
+# dan proses mengalami DEADLOCK antara bapak dan anak.
+import signal
+p_re = subprocess.Popen([FFGUARD, FFGUARD, "ffmpeg", "-version"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, env=env, start_new_session=True)
+try:
+    out_re, err_re = p_re.communicate(timeout=3)
+    cek("E reentrant tidak deadlock", p_re.returncode == 0,
+        f"rc={p_re.returncode} stderr={err_re[-200:]} -- pemanggilan bersarang "
+        "mengalami deadlock pada flock")
+    cek("E reentrant memanggil binary asli", "ffmpeg version" in out_re,
+        "pemanggilan bersarang tidak mengeksekusi ffmpeg")
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(os.getpgid(p_re.pid), signal.SIGKILL)
+    except Exception:
+        pass
+    p_re.communicate()
+    cek("E reentrant tidak deadlock", False,
+        "pemanggilan bersarang ffguard memicu DEADLOCK pada flock (>3s hang)")
+
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)
 print(f"_v94_pagar_memori_ffmpeg.py OK -- {ok} cek; pagar memotong (rc "
