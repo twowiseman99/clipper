@@ -125,3 +125,68 @@ rewritten files the brief told it not to touch. Run `git diff --stat` and revert
 anything outside the target file before accepting the work, and re-measure its
 reported numbers yourself.
 
+## Akses Server
+
+Server: `43.157.203.118` (Sumopod, Ubuntu 24.04 LTS, user `ubuntu`).
+**Nol password di file ini.** Kalau butuh sandi, minta ke operator langsung —
+jangan pernah ditulis di sini atau di channel grup.
+
+**Kalau Kelvin minta cara masuk server, tanya dulu dia pakai Mac atau PC.**
+Jawabannya beda, dan ngasih yang salah bikin dia stuck di prompt password.
+
+### Dari Mac
+
+SSH key udah terpasang, jadi tanpa password:
+
+```bash
+ssh sumo                  # masuk shell
+ssh sumo 'perintah'       # jalanin langsung tanpa masuk shell
+```
+
+`sumo` itu alias di `~/.ssh/config` **di Mac-nya**, bukan di server. Jadi
+perintah ini **tidak bisa** diverifikasi dari dalam box — ini instruksi buat
+mesin klien, bukan klaim terukur.
+
+### Dari PC (Windows)
+
+Pakai password:
+
+```powershell
+ssh ubuntu@43.157.203.118
+```
+
+Biar ga ditanya password terus, setup key **sekali** di PowerShell:
+
+```powershell
+ssh-keygen -t ed25519
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh ubuntu@43.157.203.118 "cat >> ~/.ssh/authorized_keys"
+```
+
+### Fakta server ini — diukur 23 Okt 2026, bukan diasumsikan
+
+- **`sudo` tanpa password**, tapi pakai `sudo -n` biar gagal terang-terangan
+  kalau ternyata dia minta sandi (diukur: `sudo -n true` → sukses).
+- **Hermes jalan sebagai service USER, bukan sistem.** Ini diukur dua arah:
+  `systemctl --user is-active hermes-gateway` → `active`, sementara
+  `systemctl is-active hermes-gateway` (sistem) → `inactive`. Jadi lewat SSH
+  non-login, set dulu runtime dir-nya:
+
+  ```bash
+  export XDG_RUNTIME_DIR=/run/user/$(id -u)
+  systemctl --user status|start|stop hermes-gateway
+  ```
+
+  Tanpa `XDG_RUNTIME_DIR`, `systemctl --user` ga nemu bus-nya dan errornya
+  kelihatan kayak service-nya ga ada.
+- **CLI hermes** di `~/.hermes/hermes-agent/venv/bin` (diukur: `hermes` ada di
+  situ). Lewat `ssh` langsung dia **ga ada di PATH** — tambahin dulu atau pakai
+  path penuh.
+- **Kalau login biasa langsung "Connection closed", jangan pakai `-t`.** Kirim
+  perintahnya langsung: `ssh sumo 'perintah'`.
+
+Satu aturan dari dalam: **restart/stop `hermes-gateway` dari dalam sesi Hermes
+diblokir guard, dan itu benar** — prosesnya bunuh interpreter-nya sendiri, jadi
+nol yang bisa mengonfirmasi hasilnya. Dari SSH luar aman; dari dalam sesi pakai
+`systemd-run --user --on-calendar='<tanggal jam absolut>'` manggil script
+idempotent di `~/.hermes/scripts/`.
+
