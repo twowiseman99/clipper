@@ -142,3 +142,19 @@ path CLI, pitfall `pkill -f`, runbook server macet karena OOM, dan status job
 render yang sedang di-pause.
 
 **Nol password di vault maupun di sini.** Kalau butuh sandi, minta ke operator.
+
+## Subprocess berat WAJIB di dalam pagar memori
+
+Tiap pemanggilan `ffmpeg` di repo ini jalan lewat `scripts/ffguard.sh`
+(cgroup sendiri: `MemoryMax`, `MemorySwapMax=0`, plus satu `flock` global
+buat semua job render). Jalur sisipnya `CLIPPER_FFMPEG` di `edit.py:43` --
+jadi pagar masuk tanpa menyentuh satu baris pun logika render.
+
+Sebab aturan ini ada, diukur 23 Okt 2026: satu ffmpeg memegang 7,4 GB
+dari RAM 7,4 GB, OOM empat kali dalam sejam, dan karena dia jalan di
+dalam cgroup gateway dia menarik `hermes-gateway` mati tiga kali. SSH
+berhenti menjawab. Klipnya 28 detik.
+
+Prosedur lengkap, 7 aturan, dan jebakan alat ukurnya: skill
+`subprocess-memory-guard`. Gate: `tests/_v94_pagar_memori_ffmpeg.py`
+(23 cek, mutasi 4/4) dan `tests/_v95_cron_salinan_sinkron.py`.
