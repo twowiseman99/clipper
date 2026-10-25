@@ -232,3 +232,46 @@ def build_overlays(words, clip_start, tmp_dir, Overlay, name_fn,
                 img.save(path)
                 out.append(Overlay(path, x_min, top - PAD, a0, a1))
     return out
+
+
+def bake(overlays, tmp_dir, Overlay, name_fn, canvas_w=1080, fps=30):
+    """Gabung semua ubin jadi SATU video transparan (1 input ffmpeg).
+
+    Kenapa: klip 78s = 870 PNG = 870 input ffmpeg -> dibunuh MemoryMax=3G
+    setelah 11s (26 Okt). Ubin-ubin podcast ga pernah tumpang tindih waktunya
+    (tahap per kata berurutan, layar nahan sampai layar berikut), jadi bisa
+    dijejer jadi satu timeline lewat concat demuxer.
+    """
+    import subprocess
+    if not overlays:
+        return []
+    ovs = sorted(overlays, key=lambda o: o.t_start)
+    y0 = min(o.y for o in ovs)
+    y1 = max(o.y + Image.open(o.path).size[1] for o in ovs)
+    band_h = (y1 - y0 + 1) // 2 * 2
+    blank = os.path.join(tmp_dir, name_fn("podblank"))
+    Image.new("RGBA", (canvas_w, band_h), (0, 0, 0, 0)).save(blank)
+    lines, t = [], 0.0
+    for o in ovs:
+        t0 = max(o.t_start, t)          # jaga-jaga kalau ada tumpang tindih
+        if o.t_end <= t0:
+            continue
+        if t0 - t > 1e-3:
+            lines += [f"file '{blank}'", f"duration {t0 - t:.4f}"]
+        band = Image.new("RGBA", (canvas_w, band_h), (0, 0, 0, 0))
+        band.alpha_composite(Image.open(o.path).convert("RGBA"), (int(o.x), int(o.y - y0)))
+        p = os.path.join(tmp_dir, name_fn("podband"))
+        band.save(p)
+        lines += [f"file '{p}'", f"duration {o.t_end - t0:.4f}"]
+        t = o.t_end
+    lines += [f"file '{blank}'"]        # concat demuxer: entri terakhir tanpa durasi
+    lst = os.path.join(tmp_dir, "podcast_concat.txt")
+    open(lst, "w").write("\n".join(lines) + "\n")
+    out = os.path.join(tmp_dir, "podcast_band.mov")
+    ff = os.environ.get("CLIPPER_FFMPEG") or "ffmpeg"
+    r = subprocess.run([ff, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
+                        "-vf", f"fps={fps},format=argb", "-c:v", "qtrle", out],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(out):
+        raise RuntimeError(f"podcast bake gagal: {r.stderr.strip()[:400]}")
+    return [Overlay(out, 0, y0, 0.0, t)]

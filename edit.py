@@ -3092,6 +3092,9 @@ def render_clip(video_path, start, end, words, out_path, *,
                 words, start, tmp_dir, Overlay, _pod_name,
                 accent_words=accent_words, canvas_w=CANVAS_W,
                 canvas_h=CANVAS_H)
+            # ratusan ubin -> satu video transparan (1 input ffmpeg)
+            overlays = caption_podcast.bake(overlays, tmp_dir, Overlay,
+                                            _pod_name, canvas_w=CANVAS_W)
         elif caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
@@ -3799,9 +3802,18 @@ def render_clip(video_path, start, end, words, out_path, *,
                     # Entirely inside the ending: still emit the chain so the
                     # label sequence stays unbroken, but never enable it.
                     t_end = ov.t_start
+            # Video overlay (podcast band) mulai di t=0 miliknya sendiri:
+            # geser PTS-nya ke t_start supaya frame-nya sejajar timeline.
+            # PNG statis ga kena (satu frame, diulang).
+            _ov_src = f"[{first_overlay_idx + i}:v]"
+            _eof = ""
+            if ov.path.endswith(".mov"):
+                chains.append(f"{_ov_src}setpts=PTS-STARTPTS+{ov.t_start:.3f}/TB[povb{i}]")
+                _ov_src = f"[povb{i}]"
+                _eof = "eof_action=pass:"   # khusus band podcast; gaya lain byte-sama
             chains.append(
-                f"{src_label}[{first_overlay_idx + i}:v]"
-                f"overlay={ov.x}:{ov.y}:enable='between(t,{ov.t_start:.3f},{t_end:.3f})'"
+                f"{src_label}{_ov_src}"
+                f"overlay={ov.x}:{ov.y}:{_eof}enable='between(t,{ov.t_start:.3f},{t_end:.3f})'"
                 f"{dst_label}")
         # With no caption overlays the insert chain is the last video stage, so
         # the output label has to come from it or the cutaways are discarded.
