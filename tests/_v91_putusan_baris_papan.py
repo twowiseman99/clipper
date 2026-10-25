@@ -114,6 +114,7 @@ def main():
         "CLIPPER_QUEUE_DB": os.path.join(tmp, "queue.db"),
         "CLIPPER_CAMPAIGN_DB": os.path.join(tmp, "campaigns.db"),
         "CLIPPER_CAMPAIGN_ASSETS": os.path.join(tmp, "aset"),
+        "CLIPPER_BRIEF_OFFLINE": "1",
         "PYTHONPATH": BASE,
     })
 

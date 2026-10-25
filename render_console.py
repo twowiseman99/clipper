@@ -461,20 +461,21 @@ def _papan(rows, saring, umur):
         elif r["pick"] == "lewat":
             tanda = "<span class='chip lewat'>lewat</span>"
         aset = ("<span class=chip>%d aset</span>" % r["n_asset"]) if r["n_asset"] else ""
+        sumber = "<span class=chip>%s</span>" % _e(r.get("source") or "konten")
         mv = "?" if r["min_views"] is None else format(r["min_views"], ",d").replace(",", ".")
         baris.append(
             "<tr%s><td class='num r skor'>%s</td>"
             "<td class='num r'>%s</td><td class='num r'>%s</td>"
             "<td class='num r%s'>%s</td>"
             "<td><a href='/campaign/%s'>%s</a><br>"
-            "<span class=meta>%s %s %s</span></td>"
+            "<span class=meta>%s %s %s %s</span></td>"
             "<td class=putus>%s</td></tr>"
             % (kelas, format(r["score"], ",d").replace(",", "."),
                _rp(r["cpm"]),
                "?" if r["budget_left"] is None else "%d%%" % r["budget_left"],
                " merah" if r["min_views_merah"] else "", mv,
                _e(r["slug"]), _e(r["title"][:60]),
-               _e(r["brand"][:26]), tanda, aset,
+               _e(r["brand"][:26]), sumber, tanda, aset,
                _putus_cepat(r["slug"], r["pick"], saring)))
     pil = []
     for nama, nilai in (("Aktif", ""), ("Digarap", "garap"),
@@ -539,18 +540,32 @@ def papan_refresh(request: Request):
     if not siapa:
         return _minta_sandi()
     conn = camp.connect()
-    try:
-        camp.refresh(conn)
-    except Exception as exc:
+    gagal = []
+    berhasil = []
+    for label, fn in (("konten.com", camp.refresh),
+                      ("clippo", camp.refresh_clippo)):
+        try:
+            tot, baru, aktif = fn(conn)
+            berhasil.append("%s: %d campaign (%d baru, %d aktif)"
+                            % (label, tot, baru, aktif))
+        except Exception as exc:
+            gagal.append("%s ga kebaca (%s: %s)"
+                         % (label, type(exc).__name__, exc))
+    if gagal:
         # Marketplace ga kebaca itu keadaan yang wajar (mereka bisa down,
-        # kotak ini bisa kena rate limit). Papan lama TETEP ditampilin dan
-        # umur refresh-nya keliatan basi -- itu jujur. Yang ga boleh:
-        # halaman kosong tanpa sebab.
+        # kotak ini bisa kena rate limit). Gagal satu sumber GA BOLEH
+        # ngebatalin hasil sumber lain. Papan TETEP ditampilin.
         rows = camp.board(conn, limit=300)
+        kotak_err = "".join(
+            "<div class=err>Marketplace %s</div>" % _e(g) for g in gagal
+        )
+        kotak_ok = (
+            "<p class=meta>Sumber yang berhasil ditarik: %s</p>"
+            % _e(" · ".join(berhasil))
+        ) if berhasil else ""
         return _halaman("Campaign", _nav("campaign")
                         + "<h1>Campaign</h1>"
-                        + "<div class=err>Marketplace ga kebaca: %s</div>"
-                        % _e("%s: %s" % (type(exc).__name__, exc))
+                        + kotak_err + kotak_ok
                         + "<div class=panel>%s</div>"
                         % _papan(rows, "", _umur_refresh(conn)))
     return RedirectResponse("/campaign", status_code=303)
@@ -669,6 +684,82 @@ def _render_panel(c, aset):
               _e((c["description"] or "")[:400]))
 
 
+def _brief_bagian(c, brief, brief_err):
+    potong = []
+    if brief_err:
+        potong.append(
+            "<p class=warn>%s Menampilkan brief yang tersimpan.</p>"
+            % _e(brief_err))
+
+    if isinstance(brief, dict):
+        dur = brief.get("durasi") if isinstance(brief.get("durasi"), dict) else {}
+        d_min, d_max = dur.get("min"), dur.get("max")
+        if d_min or d_max:
+            info_dur = []
+            if d_min:
+                info_dur.append("min %d detik" % int(d_min))
+            if d_max:
+                info_dur.append("maks %d detik" % int(d_max))
+            potong.append("<p class=meta>Durasi klip: <b>%s</b></p>"
+                          % _e(", ".join(info_dur)))
+
+        for kunci, judul in (
+            ("wajib", "Wajib"),
+            ("boleh", "Boleh"),
+            ("dilarang", "Dilarang"),
+        ):
+            daftar = brief.get(kunci) or []
+            if daftar:
+                potong.append(
+                    "<h3 style='font-size:.85rem;color:var(--ink-dim);margin:.75rem 0 .25rem'>%s</h3>"
+                    "<ul>%s</ul>"
+                    % (_e(judul),
+                       "".join("<li>%s</li>" % _e(x) for x in daftar))
+                )
+
+        materi = brief.get("materi") or []
+        if materi:
+            li_mat = []
+            for m in materi:
+                if not isinstance(m, dict):
+                    continue
+                u = str(m.get("url") or "").strip()
+                t = str(m.get("title") or u).strip() or u
+                wtag = (" <span class='chip garap'>wajib</span>"
+                        if m.get("wajib") else "")
+                if u.lower().startswith(("http://", "https://")):
+                    badan = "<a href='%s' rel=noreferrer target=_blank>%s</a>" % (
+                        _e(u), _e(t))
+                else:
+                    badan = "<span>%s (%s)</span>" % (_e(t), _e(u))
+                li_mat.append("<li>%s%s</li>" % (badan, wtag))
+            if li_mat:
+                potong.append(
+                    "<h3 style='font-size:.85rem;color:var(--ink-dim);margin:.75rem 0 .25rem'>Materi</h3>"
+                    "<ul>%s</ul>" % "".join(li_mat)
+                )
+
+        for kunci, judul in (
+            ("caption", "Caption"),
+            ("hook", "Ide hook"),
+            ("catatan", "Catatan"),
+        ):
+            daftar = brief.get(kunci) or []
+            if daftar:
+                potong.append(
+                    "<h3 style='font-size:.85rem;color:var(--ink-dim);margin:.75rem 0 .25rem'>%s</h3>"
+                    "<ul>%s</ul>"
+                    % (_e(judul),
+                       "".join("<li>%s</li>" % _e(x) for x in daftar))
+                )
+
+    desc = (c.get("description") or "").strip()
+    if desc or not potong:
+        potong.append("<div class=desc>%s</div>"
+                      % _e(desc or "(brief kosong di daftar API)"))
+    return "".join(potong)
+
+
 @app.get("/campaign/{slug}")
 def campaign(request: Request, slug: str):
     siapa = _siapa(request)
@@ -682,15 +773,25 @@ def campaign(request: Request, slug: str):
                         "<p>Mungkin belum pernah ditarik. "
                         "<a href=/campaign>Balik ke papan</a></p>",
                         status_code=404)
+    brief, brief_err = camp.ensure_brief(conn, slug)
+    c = camp.get(conn, slug) or c
     aset = camp.assets(conn, slug)
     qconn = q.connect()
     jobs = q.for_campaign(qconn, slug, limit=12)
 
+    gone_box = ""
+    if c["status"] == "gone":
+        gone_box = (
+            "<div class=err>Campaign ini udah ga ada di marketplace. "
+            "Bahan dan riwayat render di bawah tetep disimpen.</div>"
+        )
+
     sisa = "?" if c["budget_left"] is None else "%d%%" % c["budget_left"]
     mv = "?" if c["min_views"] is None else format(c["min_views"], ",d").replace(",", ".")
     kepala = (
-        "<h1>%s</h1><p class=sub>%s · <a href='%s' rel=noreferrer>buka di "
-        "marketplace</a></p>"
+        "<h1>%s</h1><p class=sub>%s · <span class=chip>%s</span> · "
+        "<a href='%s' rel=noreferrer>buka di marketplace</a></p>"
+        "%s"
         "<div class=panel><table>"
         "<tr><th>Skor</th><td class=num><span class=skor>%s</span></td></tr>"
         "<tr><th>CPM</th><td class=num>%s <span class=meta>(%s)"
@@ -702,8 +803,9 @@ def campaign(request: Request, slug: str):
         "<tr><th>Status</th><td>%s · %s · %s</td></tr>"
         "<tr><th>Hashtag</th><td class=num>%s</td></tr>"
         "</table><h2 style='margin-top:1rem'>Brief</h2>"
-        "<div class=desc>%s</div></div>"
-        % (_e(c["title"]), _e(c["brand"]), _e(c["url"]),
+        "%s</div>"
+        % (_e(c["title"]), _e(c["brand"]), _e(c.get("source") or "konten"),
+           _e(c["url"]), gone_box,
            format(c["score"], ",d").replace(",", "."),
            _rp(c["cpm"]), _e(c["cpm_source"] or "ga ada rate"),
            sisa,
@@ -711,8 +813,8 @@ def campaign(request: Request, slug: str):
            c["min_seconds"] if c["min_seconds"] is not None else "?",
            _e(", ".join(c["platform"]) or "-"),
            _e(c["status"]), _e(c["campaign_type"]), _e(c["content_type"]),
-           _e(" ".join("#" + h for h in c["hashtags"]) or "-"),
-           _e(c["description"] or "(brief kosong di daftar API)")))
+           _e(" ".join("#" + h.lstrip("#") for h in c["hashtags"]) or "-"),
+           _brief_bagian(c, brief, brief_err)))
 
     pilih = (
         "<form method=post action='/campaign/%s/pick' class=panel>"

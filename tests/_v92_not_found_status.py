@@ -21,6 +21,7 @@ os.environ["CLIPPER_CONSOLE_USERS"] = "probe:probe-pass-123"
 os.environ["CLIPPER_QUEUE_DB"] = os.path.join(_tmp, "q.sqlite")
 os.environ["CLIPPER_CAMPAIGN_DB"] = os.path.join(_tmp, "camp.sqlite")
 os.environ["CLIPPER_TOKEN_DIR"] = tempfile.mkdtemp()
+os.environ["CLIPPER_BRIEF_OFFLINE"] = "1"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
