@@ -201,6 +201,7 @@ video{width:100%; max-width:22rem; border-radius:8px; border:1px solid var(--lin
 .meta{color:var(--ink-dim); font-size:.85rem}
 a{color:var(--teal)}
 nav{display:flex; gap:.4rem; margin:0 0 1.5rem; flex-wrap:wrap}
+.panel nav{margin-bottom:.55rem}
 nav a{
   text-decoration:none; padding:.45rem .9rem; border-radius:999px;
   border:1px solid var(--line); color:var(--ink-dim); font-size:.9rem;
@@ -215,6 +216,14 @@ td.r,th.r{text-align:right}
   margin-right:.2rem;
 }
 .garap{border-color:var(--teal); color:var(--teal)}
+.src-konten{color:var(--ink); border-color:var(--ink-dim)}
+.src-konten .chip,.chip.src-konten{
+  border-color:var(--ink-dim); color:var(--ink); background:#26221E;
+}
+.src-clippo{color:var(--gold); border-color:var(--gold)}
+.src-clippo .chip,.chip.src-clippo{
+  border-color:var(--gold); color:var(--gold); background:#241E11;
+}
 .lewat{opacity:.45}
 tr.dilewat td{opacity:.4}
 .aset li{margin-bottom:.4rem}
@@ -405,7 +414,64 @@ def _rp(n):
 
 # ------------------------------------------------------------ papan campaign
 
-def _putus_cepat(slug, pick, saring):
+_SARING_SAH = ("", "garap", "lewat", "semua")
+_SUMBER_SAH = ("", "konten", "clippo")
+_SUMBER_KELAS = {
+    "konten": "src-konten",
+    "clippo": "src-clippo",
+}
+
+
+def _label_sumber(src):
+    nama = str(src if src is not None else "konten").strip() or "konten"
+    kelas = _SUMBER_KELAS.get(nama)
+    if kelas:
+        return "<span class='%s'><span class=chip>%s</span></span>" % (
+            kelas, _e(nama))
+    return "<span class=chip>%s</span>" % _e(nama)
+
+
+def _kuery_papan(saring="", sumber=""):
+    saring = saring if saring in _SARING_SAH else ""
+    sumber = sumber if sumber in _SUMBER_SAH else ""
+    return "saring=%s&sumber=%s" % (saring, sumber)
+
+
+def _tujuan_balik(balik):
+    """Validasi field `balik` dari form putusan baris papan.
+
+    `balik` membawa query string `saring=...&sumber=...` (atau nilai `saring`
+    lama seperti `garap`). Input apa pun yang mulai dengan `/`, `http`, atau
+    memuat kunci/nilai di luar daftar sah ditolak dan jatuh ke `/campaign`
+    supaya form ini ga bisa dipakai jadi open redirect.
+    """
+    if not isinstance(balik, str):
+        return "/campaign"
+    b = balik.strip()
+    if b.startswith(("/", "\\")) or b.lower().startswith("http"):
+        return "/campaign"
+    if b in _SARING_SAH:
+        return "/campaign?saring=%s" % b
+    saring = ""
+    sumber = ""
+    dilihat = set()
+    for bagian in b.split("&"):
+        if "=" not in bagian:
+            return "/campaign"
+        k, v = bagian.split("=", 1)
+        if k in dilihat:
+            return "/campaign"
+        dilihat.add(k)
+        if k == "saring" and v in _SARING_SAH:
+            saring = v
+        elif k == "sumber" and v in _SUMBER_SAH:
+            sumber = v
+        else:
+            return "/campaign"
+    return "/campaign?%s" % _kuery_papan(saring, sumber)
+
+
+def _putus_cepat(slug, pick, saring, sumber=""):
     """Tombol garap/lewat di BARIS papan, biar triage ga perlu buka halaman.
 
     Kenapa form per baris dan bukan satu link GET: keputusan ini nulis ke
@@ -419,13 +485,15 @@ def _putus_cepat(slug, pick, saring):
     dan baris yang baru ditandain ilang dari pandangan sebelum lu lihat
     hasilnya.
     """
+    balik = _kuery_papan(saring, sumber)
+
     def tombol(nilai, label, kelas, judul):
         return ("<form method=post action='/campaign/%s/pick' "
                 "style='display:inline'>"
                 "<input type=hidden name=state value=%s>"
                 "<input type=hidden name=balik value='%s'>"
                 "<button class='%s mini' type=submit title='%s'>%s</button>"
-                "</form>" % (_e(slug), nilai, _e(saring), kelas,
+                "</form>" % (_e(slug), nilai, _e(balik), kelas,
                              _e(judul), _e(label)))
 
     if pick == "garap":
@@ -439,7 +507,7 @@ def _putus_cepat(slug, pick, saring):
                            "Lewatin campaign ini"))
 
 
-def _papan(rows, saring, umur):
+def _papan(rows, saring, umur, sumber="", semua_rows=None):
     """Tabel campaign. Urutan SKOR = cpm x sisa budget (pilihan operator).
 
     Header kolomnya "CPM" atas permintaan operator ("kita semua udah paham
@@ -449,9 +517,42 @@ def _papan(rows, saring, umur):
     ditahan di hint bawah tabel biar siapa pun yang nanti baca API ga
     ngitung kelirunya 1000x.
     """
+    saring = saring if saring in _SARING_SAH else ""
+    sumber = sumber if sumber in _SUMBER_SAH else ""
+    basis = semua_rows if semua_rows is not None else rows
+    if sumber:
+        rows = [r for r in rows if (r.get("source") or "konten") == sumber]
+
+    pil = []
+    for nama, nilai in (("Aktif", ""), ("Digarap", "garap"),
+                        ("Dilewat", "lewat"), ("Semua status", "semua")):
+        on = " class=on" if saring == nilai else ""
+        pil.append("<a%s href='/campaign?%s'>%s</a>"
+                   % (on, _kuery_papan(nilai, sumber), _e(nama)))
+
+    pil_sumber = []
+    for nama, nilai in (("Semua sumber", ""), ("konten.com", "konten"),
+                        ("Clippo", "clippo")):
+        on = " class=on" if sumber == nilai else ""
+        if nilai == "":
+            n = len(basis)
+        else:
+            n = sum(1 for r in basis if (r.get("source") or "konten") == nilai)
+        pil_sumber.append("<a%s href='/campaign?%s'>%s (%d)</a>"
+                          % (on, _kuery_papan(saring, nilai), _e(nama), n))
+
+    kepala_papan = (
+        "<nav>%s</nav>"
+        "<nav>%s</nav>"
+        "<form method=post action=/campaign/refresh style='margin-bottom:1rem'>"
+        "<button class=ghost type=submit>Tarik ulang dari marketplace</button>"
+        "<span class=hint> terakhir: %s</span></form>"
+        % ("".join(pil), "".join(pil_sumber), _e(umur))
+    )
     if not rows:
-        return ("<p class=meta>Belum ada campaign di papan. Klik "
-                "<b>Tarik ulang</b> di atas.</p>")
+        return (kepala_papan
+                + "<p class=meta>Belum ada campaign di papan. Klik "
+                  "<b>Tarik ulang</b> di atas.</p>")
     baris = []
     for r in rows:
         kelas = " class=dilewat" if r["pick"] == "lewat" else ""
@@ -461,7 +562,7 @@ def _papan(rows, saring, umur):
         elif r["pick"] == "lewat":
             tanda = "<span class='chip lewat'>lewat</span>"
         aset = ("<span class=chip>%d aset</span>" % r["n_asset"]) if r["n_asset"] else ""
-        sumber = "<span class=chip>%s</span>" % _e(r.get("source") or "konten")
+        lbl_sumber = _label_sumber(r.get("source"))
         mv = "?" if r["min_views"] is None else format(r["min_views"], ",d").replace(",", ".")
         baris.append(
             "<tr%s><td class='num r skor'>%s</td>"
@@ -475,20 +576,11 @@ def _papan(rows, saring, umur):
                "?" if r["budget_left"] is None else "%d%%" % r["budget_left"],
                " merah" if r["min_views_merah"] else "", mv,
                _e(r["slug"]), _e(r["title"][:60]),
-               _e(r["brand"][:26]), sumber, tanda, aset,
-               _putus_cepat(r["slug"], r["pick"], saring)))
-    pil = []
-    for nama, nilai in (("Aktif", ""), ("Digarap", "garap"),
-                        ("Dilewat", "lewat"), ("Semua status", "semua")):
-        on = " class=on" if saring == nilai else ""
-        pil.append("<a%s href='/campaign?saring=%s'>%s</a>"
-                   % (on, nilai, _e(nama)))
+               _e(r["brand"][:26]), lbl_sumber, tanda, aset,
+               _putus_cepat(r["slug"], r["pick"], saring, sumber)))
     return (
-        "<nav>%s</nav>"
-        "<form method=post action=/campaign/refresh style='margin-bottom:1rem'>"
-        "<button class=ghost type=submit>Tarik ulang dari marketplace</button>"
-        "<span class=hint> terakhir: %s</span></form>"
-        "<table><tr><th class=r>Skor</th><th class=r>CPM</th>"
+        kepala_papan
+        + "<table><tr><th class=r>Skor</th><th class=r>CPM</th>"
         "<th class=r>sisa budget</th><th class=r>min views</th>"
         "<th>Campaign</th><th>Putusan</th></tr>%s</table>"
         "<p class=hint>Urutan = <b>skor</b> (CPM × sisa budget). "
@@ -500,7 +592,7 @@ def _papan(rows, saring, umur):
         "API-nya ketulis <code>rate_per_million</code> tapi halaman "
         "nulis \"Rp10.000 / 1K views\" buat angka yang sama. Namanya bohong, "
         "angkanya per seribu.</p>"
-        % ("".join(pil), _e(umur), "".join(baris)))
+        % "".join(baris))
 
 
 def _umur_refresh(conn):
@@ -513,24 +605,33 @@ def _umur_refresh(conn):
 
 
 @app.get("/campaign")
-def papan(request: Request, saring: str = ""):
+def papan(request: Request, saring: str = "", sumber: str = ""):
     siapa = _siapa(request)
     if not siapa:
         return _minta_sandi()
+    saring = saring if saring in _SARING_SAH else ""
+    sumber = sumber if sumber in _SUMBER_SAH else ""
     conn = camp.connect()
-    rows = camp.board(
-        conn,
-        hanya_aktif=saring in ("", "garap", "lewat") and saring != "semua",
-        state=saring if saring in ("garap", "lewat") else None,
-        limit=300)
     if saring == "semua":
-        rows = camp.board(conn, hanya_aktif=False, limit=300)
+        semua_rows = camp.board(conn, hanya_aktif=False, limit=300)
+    else:
+        semua_rows = camp.board(
+            conn,
+            hanya_aktif=True,
+            state=saring if saring in ("garap", "lewat") else None,
+            limit=300)
+    if sumber:
+        rows = [r for r in semua_rows
+                if (r.get("source") or "konten") == sumber]
+    else:
+        rows = semua_rows
     isi = (_nav("campaign")
            + "<h1>Campaign</h1>"
            + "<p class=sub>Masuk sebagai <span class=num>%s</span> · "
              "%d campaign kelihatan</p>" % (_e(siapa), len(rows))
-           + "<div class=panel>%s</div>" % _papan(rows, saring,
-                                                  _umur_refresh(conn)))
+           + "<div class=panel>%s</div>" % _papan(
+               rows, saring, _umur_refresh(conn),
+               sumber=sumber, semua_rows=semua_rows))
     return _halaman("Campaign", isi)
 
 
@@ -789,7 +890,7 @@ def campaign(request: Request, slug: str):
     sisa = "?" if c["budget_left"] is None else "%d%%" % c["budget_left"]
     mv = "?" if c["min_views"] is None else format(c["min_views"], ",d").replace(",", ".")
     kepala = (
-        "<h1>%s</h1><p class=sub>%s · <span class=chip>%s</span> · "
+        "<h1>%s</h1><p class=sub>%s · %s · "
         "<a href='%s' rel=noreferrer>buka di marketplace</a></p>"
         "%s"
         "<div class=panel><table>"
@@ -804,7 +905,7 @@ def campaign(request: Request, slug: str):
         "<tr><th>Hashtag</th><td class=num>%s</td></tr>"
         "</table><h2 style='margin-top:1rem'>Brief</h2>"
         "%s</div>"
-        % (_e(c["title"]), _e(c["brand"]), _e(c.get("source") or "konten"),
+        % (_e(c["title"]), _e(c["brand"]), _label_sumber(c.get("source")),
            _e(c["url"]), gone_box,
            format(c["score"], ",d").replace(",", "."),
            _rp(c["cpm"]), _e(c["cpm_source"] or "ga ada rate"),
@@ -854,8 +955,7 @@ def campaign_pick(request: Request, slug: str,
     # tempat orang berhenti. Form di halaman detail ga ngirim field ini,
     # jadi dia tetep balik ke halaman campaign-nya seperti sebelumnya.
     if balik is not None:
-        return RedirectResponse("/campaign?saring=%s" % quote_plus(balik),
-                                status_code=303)
+        return RedirectResponse(_tujuan_balik(balik), status_code=303)
     return RedirectResponse("/campaign/%s" % slug, status_code=303)
 
 
