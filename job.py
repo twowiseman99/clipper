@@ -1450,7 +1450,7 @@ def _selftest():
     cat = catalogue()
     parser_choices = {
         "frame_mode": ("cover", "fill", "fit"),
-        "caption_style": ("phrase", "karaoke", "editorial", "bold"),
+        "caption_style": ("phrase", "karaoke", "editorial", "bold", "podcast"),
         "hook_style": ("boxes", "card"),
     }
     for key, allowed in parser_choices.items():
@@ -1515,7 +1515,7 @@ def main(argv=None):
     p.add_argument("--frame-mode", dest="frame_mode",
                    choices=("cover", "fill", "fit", "pillar"))
     p.add_argument("--caption-style", dest="caption_style",
-                   choices=("phrase", "karaoke", "editorial", "bold"))
+                   choices=("phrase", "karaoke", "editorial", "bold", "podcast"))
     p.add_argument("--hook-style", dest="hook_style", choices=("boxes", "card"))
     p.add_argument("--broll", dest="broll", action="store_true", default=None,
                    help="cut away to b-roll found on YouTube at phrases that "

@@ -3080,6 +3080,18 @@ def render_clip(video_path, start, end, words, out_path, *,
             overlays = _bold_layer(
                 words, start, tmp_dir, accent_words=accent_words,
                 y_frac=BELOW_CAPTION_BOTTOM if below else BOLD_Y_FRAC)
+        elif caption_style == "podcast" and not split_screen:
+            import caption_podcast
+            _pod_n = [0]
+
+            def _pod_name(prefix):
+                _pod_n[0] += 1
+                return f"{prefix}_{_pod_n[0]:04d}.png"
+
+            overlays = caption_podcast.build_overlays(
+                words, start, tmp_dir, Overlay, _pod_name,
+                accent_words=accent_words, canvas_w=CANVAS_W,
+                canvas_h=CANVAS_H)
         elif caption_style == "phrase" and not split_screen:
             overlays = _phrase_layer(
                 words, start, tmp_dir, accent_words=accent_words,
