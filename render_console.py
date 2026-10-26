@@ -253,10 +253,65 @@ select{
   font-size:.88rem; color:var(--ink-dim); white-space:pre-wrap;
   max-height:11rem; overflow:auto;
 }
-@media(max-width:34rem){
+/* Wadah tabel desktop & daftar kartu mobile */
+.desktop-table-wrap{width:100%; overflow-x:auto}
+.m-cards-list{display:none}
+
+/* Opsi tambahan yang bisa dilipat */
+details.opsi-ekstra{
+  border:1px solid var(--line); border-radius:8px;
+  margin:1rem 0; padding:.65rem .85rem; background:#141210;
+}
+details.opsi-ekstra summary{
+  cursor:pointer; color:var(--teal); font-size:.9rem;
+  font-weight:550; user-select:none; outline:none;
+}
+details.opsi-ekstra summary:hover{color:#7ACBB9}
+details.opsi-ekstra[open] summary{
+  margin-bottom:.85rem; border-bottom:1px solid var(--line);
+  padding-bottom:.55rem;
+}
+
+@media(max-width:42rem){
   .wrap{padding:1.25rem .9rem 3rem}
-  button:not(.mini){width:100%; padding:.8rem}
+  nav{gap:.4rem}
+  nav a{
+    min-height:44px; display:inline-flex; align-items:center;
+    padding:0 .9rem;
+  }
+  button:not(.mini){width:100%; min-height:44px; padding:.8rem}
   .row>*{flex:1 1 100%}
+
+  /* Sembunyikan tabel lebar di HP, ganti jadi kartu */
+  .desktop-table-wrap{display:none}
+  .m-cards-list{display:flex; flex-direction:column; gap:.85rem}
+  .m-card{
+    background:#161311; border:1px solid var(--line); border-radius:9px;
+    padding:.9rem 1rem; display:flex; flex-direction:column; gap:.75rem;
+  }
+  .m-card.dilewat{opacity:.45}
+  .m-title{
+    font-size:.95rem; font-weight:600; line-height:1.4;
+    text-decoration:none; color:var(--ink); display:block;
+  }
+  .m-title:hover{color:var(--teal)}
+  .m-meta{font-size:.8rem; color:var(--ink-dim); margin-top:.3rem}
+  .m-brand{font-weight:520; color:var(--ink); margin-right:.3rem}
+  .m-metrics{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:.4rem;
+    background:#1D1916; padding:.55rem .7rem; border-radius:7px;
+    border:1px solid var(--line); text-align:center;
+  }
+  .m-metric{display:flex; flex-direction:column; gap:.15rem}
+  .m-lbl{font-size:.68rem; color:var(--ink-dim); text-transform:uppercase; letter-spacing:.02em}
+  .m-metric .num{font-size:.88rem}
+  .m-actions{display:flex; gap:.6rem; margin-top:.2rem}
+  .m-actions form{flex:1; display:flex}
+  .m-actions button{
+    width:100%; min-height:44px; font-size:.88rem; font-weight:600;
+    border-radius:6px; display:inline-flex; align-items:center;
+    justify-content:center;
+  }
 }
 """
 
@@ -274,16 +329,16 @@ def _halaman(judul, isi, refresh=0, status_code=200):
 
 def _form(siapa, error=""):
     opsi = "".join(
-        '<option value="%s">%s — %s</option>' % (k, _e(v["label"]), _e(v["note"]))
+        '<option value="%s">%s</option>' % (k, _e(v["label"]))
         for k, v in PRESETS.items()
     )
     conn = q.connect()
     nunggu = q.waiting_count(conn)
     med_form, n_form = q.median_render_sec(conn)
     antrean_nota = (
-        '<p class=hint>Antrean kosong, render lu mulai langsung.</p>'
+        '<p class=hint style="margin-bottom:1rem">Antrean kosong, render lu mulai langsung.</p>'
         if nunggu == 0 else
-        '<p class=hint>Ada <span class=num>%d</span> job nunggu di depan. '
+        '<p class=hint style="margin-bottom:1rem">Ada <span class=num>%d</span> job nunggu di depan. '
         'Perkiraan mulai: <span class=num>%s</span>.</p>'
         % (nunggu, _lama(nunggu * med_form))
     )
@@ -295,24 +350,28 @@ def _form(siapa, error=""):
 <form method=post action=/render class=panel enctype="multipart/form-data">
   <h2>Render klip baru</h2>
   <label><span class=lab>Preset</span>
-    <select name=preset id=preset>%s</select></label>
+    <select name=preset id=preset>%s</select>
+    <span class=hint id=preset-note></span></label>
   <label><span class=lab>Link isi — video yang dipotong jadi klip</span>
-    <input type=url name=content required placeholder="https://..."></label>
-  <label><span class=lab>Link hook — b-roll pembuka (optional)</span>
-    <input type=url name=opening placeholder="https://..."></label>
+    <input type=url name=content required placeholder="https://..." inputmode=url></label>
+
+  <details class=opsi-ekstra>
+    <summary>Opsi tambahan (hook, outro, BGM, konteks)</summary>
+    <div style="margin-top:.75rem">
+      <label><span class=lab>Link hook — b-roll pembuka (optional)</span>
+        <input type=url name=opening placeholder="https://..." inputmode=url></label>
   <label id=lbl-outro><span class=lab>Gambar outro (optional)</span>
     <input type=file name=image accept="image/*" id=outro
            aria-describedby=hint-outro>
     <span class=hint id=hint-outro role=status></span></label>
-  <label><span class=lab>BGM (optional)</span>
-    <input type=file name=bgm accept="audio/*">
-    <span class=hint>Kosongin = musik dipilih dari mood klip pakai stok di
-    background_music/. File yang lu upload dipakai apa adanya, jadi aturan
-    "lagu hype ga boleh di klip duka" cuma bisa ngasih peringatan, ga bisa
-    nolak. Mood dibaca dari nama file (<code>emotional_piano.mp3</code>).</span></label>
-  <label><span class=lab>Konteks — siapa yang ngomong, soal apa (optional)</span>
-    <textarea name=context rows=2></textarea>
-    <span class=hint>Dipake buat milih b-roll dan nulis judul. Kosong = diambil dari transkrip.</span></label>
+      <label><span class=lab>BGM (optional)</span>
+        <input type=file name=bgm accept="audio/*">
+        <span class=hint>Kosong = dipilih otomatis sesuai mood klip dari background_music/. File yang diunggah akan dipakai langsung.</span></label>
+      <label><span class=lab>Konteks — siapa yang ngomong, soal apa (optional)</span>
+        <textarea name=context rows=2 placeholder="Contoh: Gibran ngomong soal makan siang gratis..."></textarea>
+        <span class=hint>Dipakai buat milih b-roll dan nulis judul. Kosong = diambil dari transkrip.</span></label>
+    </div>
+  </details>
   %s
   <button type=submit>Masukin antrean</button>
 </form>
@@ -323,24 +382,27 @@ def _form(siapa, error=""):
    ini. Lapis kejelasan, bukan lapis keamanan. */
 (function () {
   var PAKAI = %s;
+  var NOTES = %s;
   var sel = document.getElementById("preset");
   var inp = document.getElementById("outro");
   var hint = document.getElementById("hint-outro");
   var lbl = document.getElementById("lbl-outro");
+  var pNote = document.getElementById("preset-note");
   if (!sel || !inp || !hint || !lbl) return;
   function sync() {
-    var boleh = PAKAI[sel.value] === true;
+    var val = sel.value;
+    if (pNote && NOTES[val]) {
+      pNote.textContent = NOTES[val];
+    }
+    var boleh = PAKAI[val] === true;
     inp.disabled = !boleh;
-    /* Yang diredupin cuma KONTROLnya, bukan hint-nya. Pertama kali gua
-       redupin seluruh label dan hasilnya kebalik: satu-satunya kalimat yang
-       ngasih tau cara ngidupin field itu jadi teks paling pudar di halaman. */
     inp.style.opacity = boleh ? "" : ".5";
     lbl.querySelector(".lab").style.opacity = boleh ? "" : ".6";
     if (boleh) {
       hint.textContent = "Dipakai jadi frame penutup klip.";
       hint.style.color = "";
     } else {
-      hint.textContent = "Preset " + sel.options[sel.selectedIndex].text.split(" — ")[0]
+      hint.textContent = "Preset " + sel.options[sel.selectedIndex].text
         + " ga pakai gambar outro, jadi field ini mati. Pilih Jedag jedug buat ngisinya.";
       hint.style.color = "var(--gold)";
       inp.value = "";
@@ -351,7 +413,8 @@ def _form(siapa, error=""):
 })();
 </script>
 """ % (_e(siapa), err, opsi, antrean_nota,
-       json.dumps({k: v["pakai_outro"] for k, v in PRESETS.items()}))
+       json.dumps({k: v["pakai_outro"] for k, v in PRESETS.items()}),
+       json.dumps({k: v["note"] for k, v in PRESETS.items()}))
 
 
 def _dasar_median(med, n):
@@ -379,7 +442,7 @@ def _tabel(jobs):
         # and tells a first-time user nothing: not why the table is empty,
         # not what to do, not how long the thing they start will take.
         return ("<p class=meta>Belum ada render di box ini.</p>"
-                "<p class=hint>Isi form di atas dan klik Render — hasilnya "
+                "<p class=hint>Isi form di atas dan klik <b>Masukin antrean</b> — hasilnya "
                 "muncul di sini. Halaman ini aman ditinggal: rendernya jalan "
                 "di proses terpisah, jadi nutup tab ga ngebatalin.</p>")
 
@@ -554,6 +617,7 @@ def _papan(rows, saring, umur, sumber="", semua_rows=None):
                 + "<p class=meta>Belum ada campaign di papan. Klik "
                   "<b>Tarik ulang</b> di atas.</p>")
     baris = []
+    kartu = []
     for r in rows:
         kelas = " class=dilewat" if r["pick"] == "lewat" else ""
         tanda = ""
@@ -578,21 +642,48 @@ def _papan(rows, saring, umur, sumber="", semua_rows=None):
                _e(r["slug"]), _e(r["title"][:60]),
                _e(r["brand"][:26]), lbl_sumber, tanda, aset,
                _putus_cepat(r["slug"], r["pick"], saring, sumber)))
+        kartu.append(
+            "<div class='m-card%s'>"
+            "<div class=m-card-head>"
+            "<a href='/campaign/%s' class=m-title>%s</a>"
+            "<div class=m-meta><span class=m-brand>%s</span> %s %s %s</div>"
+            "</div>"
+            "<div class=m-metrics>"
+            "<div class=m-metric><span class=m-lbl>Skor</span><span class='num skor'>%s</span></div>"
+            "<div class=m-metric><span class=m-lbl>CPM</span><span class=num>%s</span></div>"
+            "<div class=m-metric><span class=m-lbl>Sisa</span><span class=num>%s</span></div>"
+            "<div class=m-metric><span class=m-lbl>Min Views</span><span class='num%s'>%s</span></div>"
+            "</div>"
+            "<div class=m-actions>%s</div>"
+            "</div>"
+            % (kelas,
+               _e(r["slug"]), _e(r["title"]),
+               _e(r["brand"]), lbl_sumber, tanda, aset,
+               format(r["score"], ",d").replace(",", "."),
+               _rp(r["cpm"]),
+               "?" if r["budget_left"] is None else "%d%%" % r["budget_left"],
+               " merah" if r["min_views_merah"] else "", mv,
+               _putus_cepat(r["slug"], r["pick"], saring, sumber)))
+    tabel_html = (
+        "<div class=desktop-table-wrap><table><tr><th class=r>Skor</th><th class=r>CPM</th>"
+        "<th class=r>sisa budget</th><th class=r>min views</th>"
+        "<th>Campaign</th><th>Putusan</th></tr>%s</table></div>" % "".join(baris)
+    )
+    kartu_html = "<div class=m-cards-list>%s</div>" % "".join(kartu)
     return (
         kepala_papan
-        + "<table><tr><th class=r>Skor</th><th class=r>CPM</th>"
-        "<th class=r>sisa budget</th><th class=r>min views</th>"
-        "<th>Campaign</th><th>Putusan</th></tr>%s</table>"
-        "<p class=hint>Urutan = <b>skor</b> (CPM × sisa budget). "
+        + tabel_html
+        + kartu_html
+        + "<p class=hint>Urutan = <b>skor</b> (CPM × sisa budget). "
         "CPM mentah nipu: campaign dengan rate tertinggi di marketplace "
-        "(Rp15.000) sisa budgetnya cuma 6%%, jadi rate-nya ga bisa diambil. "
+        "(Rp15.000) sisa budgetnya cuma 6%, jadi rate-nya ga bisa diambil. "
         "Angka merah di min views = lantai di atas 10.000, klip di bawah itu "
         "ga dibayar sama sekali.</p>"
         "<p class=hint>CPM di sini = rupiah per <b>1.000</b> views. Field "
         "API-nya ketulis <code>rate_per_million</code> tapi halaman "
         "nulis \"Rp10.000 / 1K views\" buat angka yang sama. Namanya bohong, "
         "angkanya per seribu.</p>"
-        % "".join(baris))
+    )
 
 
 def _umur_refresh(conn):
