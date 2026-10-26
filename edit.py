@@ -326,6 +326,9 @@ FLASH = os.environ.get("CLIPPER_FLASH", "1") not in ("0", "", "false")
 # which is why the old flash had to be capped at 3 and left off.
 FLASH_AMOUNT = float(os.environ.get("CLIPPER_FLASH_AMOUNT", "0.18"))
 FLASH_HOLD = float(os.environ.get("CLIPPER_FLASH_HOLD", "0.08"))
+# Frame hitam penuh di tiap hentakan penutup jamet ("kedap kedip", operator
+# 26 Okt). 2 frame @30fps = 67 ms. 0 = mati.
+BLACK_FRAMES = int(os.environ.get("CLIPPER_BLACK_FRAMES", "2"))
 # Every other flicker goes dark instead of bright, matching the reference's
 # near-even split. Set 0 for bright-only.
 FLASH_DARK_RATIO = float(os.environ.get("CLIPPER_FLASH_DARK_RATIO", "0.5"))
@@ -2153,6 +2156,28 @@ def _flash_expr(times, dur):
     return "".join(terms).lstrip("+")
 
 
+def _blackout_filter(times, dur, fps=30):
+    """drawbox hitam penuh selama BLACK_FRAMES frame di tiap hentakan, atau "".
+
+    drawbox (bukan eq brightness -1): brightness dijumlah sama flicker dan
+    di-clamp, jadi -1 + 0.18 = abu-abu gelap, bukan hitam. drawbox t=fill
+    nimpa piksel jadi hitam murni dan dukung enable= per waktu.
+    """
+    if BLACK_FRAMES <= 0 or not times:
+        return ""
+    hold = BLACK_FRAMES / float(fps)
+    gates = []
+    for t in times:
+        a = max(0.0, float(t))
+        b = min(dur, a + hold)
+        if b > a:
+            gates.append(f"between(t,{a:.3f},{b - 0.001:.3f})")
+    if not gates:
+        return ""
+    return ("drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:"
+            f"enable='{'+'.join(gates)}'")
+
+
 def _slam_offsets(times, dur):
     """x/y pixel-offset expressions that throw the frame on each beat.
 
@@ -3413,11 +3438,15 @@ def render_clip(video_path, start, end, words, out_path, *,
             # Clustered, like the shake and the slam: the three beat-driven
             # effects have to agree on WHICH onsets are hits, or grouping one of
             # them just adds a fourth rhythm on top of the other two.
-            p_flash = _flash_expr(
-                _burst_times(_cluster_beats(
+            _hit_times = (_burst_times(_cluster_beats(
                     _window_beats(bgm, _end_at, _out_len, intro_dur)),
                              per=1)
-                or p_punches, _out_len)
+                or p_punches)
+            p_flash = _flash_expr(_hit_times, _out_len)
+            # Frame hitam di tiap hentakan ("kasih tambahan frame item jadi
+            # keliatan kedap kedip", operator 26 Okt). Onset SAMA dengan
+            # flicker/shake, jadi ga nambah ritme keempat.
+            p_black = _blackout_filter(_hit_times, _out_len)
             # freeze_frame_at is intentionally NOT passed: moving loop's
             # start= is what shortened the freeze to 1.0s. The chosen frame
             # arrives as an overlay upstream instead, so loop keeps its own
@@ -3589,6 +3618,7 @@ def render_clip(video_path, start, end, words, out_path, *,
                           + (f",eq=brightness='{p_bright}':eval=frame"
                              if p_bright else "")
                           + (f",{slam}" if slam else "")
+                          + (f",{p_black}" if p_black else "")
                           + f"[{base_label}]")
             # The portrait tail. It goes DOWNSTREAM of p_filters for the same
             # reason the flicker does: p_filters ends with the freeze `loop`,
@@ -3725,6 +3755,10 @@ def render_clip(video_path, start, end, words, out_path, *,
                             f"scale=w='iw*(1+{OUTRO_PORTRAIT_ZOOM:.3f}*{_e})'"
                             f":h=-1:eval=frame,"
                             f"crop={CANVAS_W}:{CANVAS_H}:(iw-ow)/2:0")
+                # 2b. Frame hitam di hentakan potret juga, onset sama.
+                _pblk = _blackout_filter(_pbeats, _out_len)
+                if _pblk:
+                    _pfx.append(_pblk)
                 # 3. The dip closes over all of it, still last.
                 if _pfade:
                     _pfx.append(_pfade)
