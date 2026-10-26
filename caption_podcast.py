@@ -33,6 +33,7 @@ MAX_WORDS = 5           # ~5 kata per layar seperti referensi
 GAP_SPLIT = 0.45        # jeda segini = ganti layar
 FADE_IN = 0.20          # buram -> tajam (referensi 15fps: ~130-200 ms)
 FADE_STEPS = 4          # berapa tahap animasi masuk per kata
+MARGIN_X = 40           # baris kecil ga boleh lewat tepi layar (render v3 kepotong)
 HOLD_GAP = 0.60         # jeda < ini: layar lama nahan sampai layar baru, ga kosong
 LINE_TIGHT = 0.68       # rapatnya tingkat; 0.80 kebaca "mepet" di render v3
 STOP = {"yang", "dan", "di", "ke", "itu", "ini", "aja", "sih", "kan",
@@ -148,23 +149,46 @@ def layout(screen, key, canvas_w=1080):
     h_small = sb[3] - sb[1]
     h_key = kb[3] - kb[1]
     y_key = h_small + gap
+    # Baris kecil bisa lebih lebar dari kata kunci. Rata kanan/kiri ke kunci
+    # bikin "tertangani dengan baik ya" keluar tepi KIRI layar (render v3,
+    # 26 Okt) -- rencana bilang x=106 padahal ubin baris atas mulai minus.
+    # Tiap baris dijepit ke margin, tetap rapat ke kunci kalau muat.
+    lo, hi = MARGIN_X, canvas_w - MARGIN_X
+
+    def clamp(row):
+        if not row:
+            return row
+        x0 = min(r[4] for r in row)
+        x1 = max(r[4] + wid(r[1], fs) for r in row)
+        dx = 0
+        if x1 - x0 > hi - lo:
+            dx = lo - x0
+        elif x0 < lo:
+            dx = lo - x0
+        elif x1 > hi:
+            dx = hi - x1
+        return [r[:4] + (r[4] + dx,) + r[5:] for r in row]
+
     # baris atas (pre): disusun dari kanan ke kiri, ujung kanannya = ujung kunci
-    pre = list(range(0, key))
     x = kx0 + kw
-    for i in reversed(pre):
+    row = []
+    for i in reversed(range(0, key)):
         t = words[i].lower()
         x -= wid(t, fs)
-        placed.append((i, t, SIZE_SMALL, FONT_SMALL, x, 0))
+        row.append((i, t, SIZE_SMALL, FONT_SMALL, x, 0))
         x -= space
+    placed += clamp(row)
     # kunci
     placed.append((key, kt, big_size, FONT_BIG, kx0, y_key))
     # baris bawah (post): rata kiri ke awal kunci
     x = kx0
     y_post = y_key + h_key + gap
+    row = []
     for i in range(key + 1, len(words)):
         t = words[i].lower()
-        placed.append((i, t, SIZE_SMALL, FONT_SMALL, x, y_post))
+        row.append((i, t, SIZE_SMALL, FONT_SMALL, x, y_post))
         x += wid(t, fs) + space
+    placed += clamp(row)
     placed.sort()
     return placed, y_post + h_small
 

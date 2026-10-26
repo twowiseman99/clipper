@@ -51,3 +51,33 @@ for scr, key in KASUS:
         gagal.append(teks)
 assert not gagal, f"tinta numpuk di: {gagal}"
 print("_v96 ok: nol piksel tinta numpuk di", len(KASUS), "layar")
+
+
+# Gate kedua: tinta ga boleh keluar tepi layar. Render v3 Gibran 26 Okt:
+# kunci "IBU" pendek, 4 kata kecil di baris atas rata kanan ke "IBU" ->
+# "tertangani" kepotong jadi "rtangani" (tinta x -52 di kode lama).
+def tepi(screen, key):
+    placed, h = cp.layout(screen, key)
+    can = np.zeros((h + 400, 1080 + 1600), bool)
+    for (i, t, size, font, x, y) in placed:
+        a = np.asarray(cp._tile(t, size, font))[:, :, 3] > 128
+        X = int(x) - cp.PAD + 800
+        can[int(y):int(y) + a.shape[0], X:X + a.shape[1]] |= a
+    cols = np.where(can.any(axis=0))[0] - 800
+    return int(cols.min()), int(cols.max())
+
+
+TEPI = KASUS + [
+    (W("tertangani", "dengan", "baik,", "ya,", "ibu"), 4),       # baris atas panjang, kunci pendek
+    (W("ibu", "tertangani", "dengan", "baik", "sekali"), 0),     # baris bawah panjang
+    (W("jangan", "bisa", "dipaksakan", "masuk", "dulu"), 2),     # kunci panjang
+]
+luar = []
+for scr, key in TEPI:
+    l, r = tepi(scr, key)
+    teks = " ".join(w["word"] for w in scr)
+    print(f"  {teks:34s} kunci={scr[key]['word']:10s} tinta x {l:5d}..{r:5d}")
+    if l < 0 or r >= 1080:
+        luar.append(f"{teks} ({l}..{r})")
+assert not luar, f"tinta keluar tepi layar: {luar}"
+print("_v96 ok: nol tinta keluar tepi di", len(TEPI), "layar")
