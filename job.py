@@ -156,6 +156,9 @@ def catalogue():
             {"id": "bold", "label": "Bold all-caps",
              "desc": "Condensed all-caps in white, two words a line, "
                      "emphasis by SIZE not colour. No karaoke highlight."},
+            {"id": "podcast", "label": "Podcast (3 tingkat)",
+             "desc": "Kata kunci 3x lebih gede di tengah, kata kecil di atas "
+                     "dan bawah, putih tanpa garis tepi, masuk buram->tajam."},
         ],
         "hook_style": [
             {"id": "boxes", "label": "Pull quote",
