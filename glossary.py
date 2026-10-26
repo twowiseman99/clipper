@@ -29,12 +29,20 @@ SCHEMA_VERSION = 1
 PATH = os.environ.get(
     "CLIPPER_GLOSSARY",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "glossary.json"))
+_DEFAULT_LEXICON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "assets", "lexicon", "id_common.txt")
+LEXICON_PATH = os.environ.get("CLIPPER_LEXICON", _DEFAULT_LEXICON)
+_INITIAL_LEXICON_PATH = LEXICON_PATH
+_LEXICON_CACHE = None
+_LEXICON_LOADED_PATH = None
 
 # A correction has to be seen this many times before it is applied blind.
 # Once is a guess; twice is a pattern. Until then the entry is recorded but
 # only the model decides.
 MIN_SEEN = int(os.environ.get("CLIPPER_GLOSSARY_MIN_SEEN", "2"))
 VALID_KINDS = ("person", "place", "org", "term", "word")
+NAME_KINDS = ("person", "place", "org")
 
 
 def _blank():
@@ -85,6 +93,34 @@ def _key(s):
     return re.sub(r"\W", "", str(s).lower())
 
 
+def _active_lexicon_path():
+    if LEXICON_PATH != _INITIAL_LEXICON_PATH:
+        return LEXICON_PATH
+    return os.environ.get("CLIPPER_LEXICON") or _DEFAULT_LEXICON
+
+
+def _common_set():
+    global _LEXICON_CACHE, _LEXICON_LOADED_PATH
+    path = _active_lexicon_path()
+    if _LEXICON_CACHE is not None and _LEXICON_LOADED_PATH == path:
+        return _LEXICON_CACHE
+    try:
+        with open(path, encoding="utf-8") as f:
+            _LEXICON_CACHE = frozenset(_key(line) for line in f if _key(line))
+    except Exception as exc:
+        print("glossary: lexicon tidak ditemukan (%s: %s) — filter kata umum nonaktif"
+              % (type(exc).__name__, exc), file=sys.stderr)
+        _LEXICON_CACHE = frozenset()
+    _LEXICON_LOADED_PATH = path
+    return _LEXICON_CACHE
+
+
+def is_common(word):
+    """True when `_key(word)` is in the common-word lexicon."""
+    k = _key(word)
+    return bool(k and k in _common_set())
+
+
 def find(data, word):
     """The entry matching `word` ignoring case and punctuation, or None."""
     k = _key(word)
@@ -109,6 +145,11 @@ def record(corrections, kind="word", path=PATH):
     added = 0
     for was, now in pairs:
         if _key(was) == _key(now):
+            continue
+        # Kata umum sehari-hari kemungkinan besar memang benar di klip lain;
+        # jangan disimpan agar kamus global tidak menumpuk kata umum dan
+        # menggantinya secara buta di render berikutnya.
+        if kind not in NAME_KINDS and is_common(was):
             continue
         hit = find(data, was)
         if hit is None:
@@ -145,12 +186,21 @@ def apply(words, path=PATH):
         return items, 0
     data = load(path)
     table = {}
+    skipped = []
     for t in data.get("terms", ()):
         if int(t.get("seen") or 0) < MIN_SEEN:
             continue
         src, dst = t.get("source"), t.get("target")
-        if src and dst:
-            table[_key(src)] = str(dst)
+        if not (src and dst):
+            continue
+        if t.get("kind") not in NAME_KINDS and is_common(src):
+            skipped.append((str(src), str(dst)))
+            continue
+        table[_key(src)] = str(dst)
+    if skipped:
+        print("glossary: %d dilewati (kata umum) — %s"
+              % (len(skipped), ", ".join("%s->%s" % p for p in skipped[:10])),
+              file=sys.stderr)
     if not table:
         return items, 0
 

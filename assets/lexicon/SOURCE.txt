@@ -1,0 +1,4 @@
+Source: https://github.com/hermitdave/FrequencyWords
+License: MIT
+Date: 2026-10-26
+Note: 20k teratas dari content/2018/id/id_50k.txt
