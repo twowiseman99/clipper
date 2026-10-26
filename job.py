@@ -998,6 +998,14 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
         audit.warned("language", "transcript review", "disabled",
                      "CLIPPER_LANG_REVIEW is off")
 
+    # Ejaan yang DITETAPKAN operator ("Buk" -> "Bu"). Bukan salah dengar, jadi
+    # language.review bener lolosin; dijaga di kode, jalan walau review mati.
+    import ejaan
+    seg_words, _ej = ejaan.apply(seg_words)
+    if _ej:
+        _log("ejaan: %d diganti — %s" % (
+            len(_ej), ", ".join(f"{a}->{b}" for a, b in _ej)))
+
     # Measure which words the speaker actually leaned on before captions are
     # drawn. Failure here scores every word 0.0 and the captions fall back to
     # the model's punchline pick, so a broken audio read never blocks a render.
