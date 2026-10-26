@@ -1001,7 +1001,10 @@ def run(content_url, opening_url=None, opening_start=0.0, hook=None,
     # Ejaan yang DITETAPKAN operator ("Buk" -> "Bu"). Bukan salah dengar, jadi
     # language.review bener lolosin; dijaga di kode, jalan walau review mati.
     import ejaan
-    seg_words, _ej = ejaan.apply(seg_words)
+    if os.environ.get("CLIPPER_EJAAN", "1") != "0":
+        seg_words, _ej = ejaan.apply(seg_words)
+    else:
+        _ej = []
     if _ej:
         _log("ejaan: %d diganti — %s" % (
             len(_ej), ", ".join(f"{a}->{b}" for a, b in _ej)))
